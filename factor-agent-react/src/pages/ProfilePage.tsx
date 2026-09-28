@@ -166,11 +166,10 @@ export function ProfilePage({ notify }: { notify: (m: string) => void }) {
               {profile.settings.map(s => {
                 const Icon = ICONS[s.icon];
                 const isToggle = s.type === "toggle";
-                const isReadonly = s.type === "readonly";
                 return (
                   <div key={s.key}
-                    className={"setting-row" + (!isToggle && !isReadonly ? " clickable" : "")}
-                    onClick={!isToggle && !isReadonly ? () => setEditing("risk") : undefined}>
+                    className={"setting-row" + (!isToggle ? " clickable" : "")}
+                    onClick={!isToggle ? () => setEditing("risk") : undefined}>
                     <div className="setting-left">
                       <Icon />
                       <div className="setting-info">
@@ -185,7 +184,7 @@ export function ProfilePage({ notify }: { notify: (m: string) => void }) {
                         <span className="track" />
                       </label>
                     ) : (
-                      <span className="s-value">{s.value ?? "—"}{!isReadonly && <span className="s-edit">配置</span>}</span>
+                      <span className="s-value">{s.value ?? "—"}<span className="s-edit">配置</span></span>
                     )}
                   </div>
                 );

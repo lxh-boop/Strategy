@@ -218,12 +218,12 @@ Base URL `http://127.0.0.1:3000/api`。请求/响应 JSON（UTF-8）。完整字
 | GET /factors | 因子库 | 9 项（后端下发，UI 数据驱动） |
 | GET /backtest-params | 回测参数配置 | label/value/hint 三项（区间/TopK/费率） |
 | POST /screen | 选股筛选 | `{universe?, filters[], topN?}` → `{stocks, total}` |
-| GET /user/profile | 用户资料 | 含因子偏好雷达、设置项（模型/数据来源为 readonly） |
+| GET /user/profile | 用户资料 | 含因子偏好雷达、设置项（notify/report/risk 三项） |
 | PATCH /user/settings | 更新设置项 | `{key, on?, value?}` → 返回更新后完整 profile |
 
 > **产品边界（2026-09-28）**：大模型统一智谱 GLM、行情数据统一使用平台内部数据，均由服务端
 > `.env` 配置，不向终端用户暴露模型/数据源配置项。个人中心设置项仅 notify / report / risk
-> 可配置，`model` / `datasource` 为 readonly 展示项（DTO 白名单校验，传其他 key 返回 400）。
+> 可配置；模型与数据来源由平台统一提供，不作为设置项下发（DTO 白名单校验，传其他 key 返回 400）。
 
 ### 发消息完整时序（核心链路）
 

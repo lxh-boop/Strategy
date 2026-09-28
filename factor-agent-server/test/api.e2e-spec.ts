@@ -263,21 +263,14 @@ describe('因子智投后端 · 契约 e2e 测试样例', () => {
 
   /* ---------- 个人中心（契约 §3.6） ---------- */
 
-  it('GET /api/user/profile：设置项含 toggle/readonly/single，模型与数据来源只读', async () => {
+  it('GET /api/user/profile：设置项 = notify/report(toggle) + risk(single)，无只读展示项', async () => {
     const res = await request(app.getHttpServer()).get('/api/user/profile').expect(200);
     const settings = res.body.settings;
+    expect(settings.map((s: { key: string }) => s.key)).toEqual(['notify', 'report', 'risk']);
 
     const notify = settings.find((s: { key: string }) => s.key === 'notify');
     expect(notify.type).toBe('toggle');
     expect(notify.on).toBe(true);
-
-    const model = settings.find((s: { key: string }) => s.key === 'model');
-    expect(model.type).toBe('readonly');
-    expect(model.value).toBe('智谱 GLM');
-
-    const datasource = settings.find((s: { key: string }) => s.key === 'datasource');
-    expect(datasource.type).toBe('readonly');
-    expect(datasource.value).toBe('内部数据');
 
     const risk = settings.find((s: { key: string }) => s.key === 'risk');
     expect(risk.type).toBe('single');
@@ -299,19 +292,14 @@ describe('因子智投后端 · 契约 e2e 测试样例', () => {
     expect(s.body.settings.find((x: { key: string }) => x.key === 'risk').value).toBe('积极型');
   });
 
-  it('PATCH /api/user/settings 只读项与未知 key：400', async () => {
-    /* 模型/数据来源为 readonly 展示项，白名单外一律拒绝 */
-    const ro = await request(app.getHttpServer())
-      .patch('/api/user/settings')
-      .send({ key: 'datasource', value: 'Wind' })
-      .expect(400);
-    expect(ro.body.error.code).toBe('INVALID_ARGUMENT');
-
-    const res = await request(app.getHttpServer())
-      .patch('/api/user/settings')
-      .send({ key: 'nope', on: true })
-      .expect(400);
-    expect(res.body.error.code).toBe('INVALID_ARGUMENT');
+  it('PATCH /api/user/settings 白名单外 key：400（含已移除的 model/datasource）', async () => {
+    for (const key of ['model', 'datasource', 'nope']) {
+      const res = await request(app.getHttpServer())
+        .patch('/api/user/settings')
+        .send({ key, on: true })
+        .expect(400);
+      expect(res.body.error.code).toBe('INVALID_ARGUMENT');
+    }
   });
 
   it('已下线的密钥管理接口保持 404（防止误恢复）', async () => {

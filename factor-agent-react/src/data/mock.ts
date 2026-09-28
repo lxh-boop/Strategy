@@ -43,8 +43,6 @@ export const PROFILE: UserProfile = {
   settings: [
     { key: "notify", icon: "bell", title: "调仓与信号通知", desc: "策略触发买卖信号时推送提醒", type: "toggle", on: true },
     { key: "report", icon: "file", title: "每日策略日报", desc: "每个交易日收盘后生成持仓分析", type: "toggle", on: true },
-    { key: "model", icon: "key", title: "模型配置", desc: "大模型由平台统一提供，不支持自行配置", type: "readonly", on: null, value: "智谱 GLM" },
-    { key: "datasource", icon: "database", title: "数据来源", desc: "行情与回测统一使用平台内部数据", type: "readonly", on: null, value: "内部数据" },
     { key: "risk", icon: "shield", title: "风险偏好", desc: "影响智能体推荐策略的风格", type: "single", on: null,
       choices: ["保守型", "稳健型", "平衡型", "积极型"], value: "稳健型" },
   ],

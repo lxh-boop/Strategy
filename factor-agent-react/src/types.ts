@@ -105,7 +105,7 @@ export interface Strategy {
 
 /* ----- 个人中心 ----- */
 export type SettingIcon = "bell" | "file" | "key" | "database" | "shield";
-export type SettingType = "toggle" | "single" | "readonly";
+export type SettingType = "toggle" | "single";
 
 export interface ProfileSetting {
   key: string;
@@ -115,7 +115,7 @@ export interface ProfileSetting {
   type: SettingType;
   on?: boolean | null;    // toggle 型：开关状态；其余类型为 null
   choices?: string[];     // single 型可选项
-  value?: string;         // single / readonly 型的当前值（展示口径，后端下发）
+  value?: string;         // single 型的当前值（展示口径，后端下发）
 }
 
 export interface UserProfile {

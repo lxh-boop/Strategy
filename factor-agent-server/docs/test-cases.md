@@ -71,10 +71,10 @@ curl -s -X POST http://127.0.0.1:3000/api/conversations/<id>/messages \
 
 | # | 操作 | 预期 |
 |---|---|---|
-| U1 | `GET /api/user/profile` | notify/report 为 toggle（on）；**model/datasource 为 readonly 展示项**（智谱 GLM / 内部数据）；risk 为 single（4 个 choices，value=稳健型） |
+| U1 | `GET /api/user/profile` | 设置项只有 3 个：notify/report 为 toggle（on）、risk 为 single（4 个 choices，value=稳健型）；**无模型/数据来源展示项** |
 | U2 | `PATCH {key:'notify', on:false}` | on 变 false |
 | U3 | `PATCH {key:'risk', value:'积极型'}` | value 变积极型 |
-| U4 | `PATCH {key:'datasource', …}`（只读项）/ 未知 key | 400 `INVALID_ARGUMENT` |
+| U4 | `PATCH {key:'model'/'datasource'/其他白名单外 key}` | 400 `INVALID_ARGUMENT`（模型与数据来源由平台统一提供，不作为设置项下发） |
 | U5 | `POST/GET /api/user/apikeys` | 404（密钥管理已下线，防止误恢复） |
 
 ### 3.3 行情配置与筛选

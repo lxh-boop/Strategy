@@ -7,7 +7,7 @@ import { UserService } from './user.service';
 export class UserController {
   constructor(private readonly users: UserService) {}
 
-  /** 模型（智谱 GLM）与数据来源在 settings 中为 readonly 展示项，用户不可配置 */
+  /** 设置项：notify/report 为 toggle，risk 为 single；模型与数据来源由平台统一提供，不在设置项中展示 */
   @Get('profile')
   profile(): UserProfile {
     return this.users.getProfile();

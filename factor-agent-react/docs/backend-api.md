@@ -122,11 +122,11 @@ interface UserProfile {
   radar: { name: string; value: number }[];   // 因子偏好 0-100
   settings: {
     key: string;          // notify / report / model / datasource / risk
-    type: "toggle" | "single" | "readonly";
+    type: "toggle" | "single";
     title: string; desc: string;
     on?: boolean;         // toggle 型开关状态
     choices?: string[];   // single 型可选项
-    value?: string;       // single / readonly 型当前值（展示口径，后端下发）
+    value?: string;       // single 型当前值（展示口径，后端下发）
   }[];
 }
 ```
@@ -137,8 +137,6 @@ interface UserProfile {
 |---|---|---|---|
 | notify | toggle | 是否推送调仓与信号通知 | 开关 |
 | report | toggle | 是否生成每日策略日报 | 开关 |
-| model | readonly | 智能体大模型（统一智谱 GLM，平台提供） | 不可配置 |
-| datasource | readonly | 行情与回测数据来源（统一使用平台内部数据） | 不可配置 |
 | risk | single | 风险偏好（保守/稳健/平衡/积极） | 单选 |
 
 ### 2.5 因子库 Factor
@@ -276,7 +274,7 @@ GET /api/factors
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/api/user/profile` | 用户信息 + 因子偏好 + 设置项（模型/数据来源为只读展示） |
+| GET | `/api/user/profile` | 用户信息 + 因子偏好 + 设置项（notify/report/risk 三项） |
 | PATCH | `/api/user/settings` | 更新设置项（toggle 传 `on`、single 传 `value`） |
 
 **PATCH /api/user/settings 请求示例（按 key 的 type 区分）**
@@ -288,7 +286,7 @@ GET /api/factors
 
 > 产品边界（2026-09-28）：大模型统一智谱 GLM、行情数据统一使用平台内部数据，
 > 均由服务端配置，**不提供用户级模型/数据源配置**；个人中心可配置项仅
-> notify / report / risk，`model` 与 `datasource` 为 readonly 展示项。
+> 可配置项：notify / report / risk。模型（统一智谱 GLM）与数据来源（平台内部数据）由平台统一提供，不作为设置项下发。
 
 ---
 
