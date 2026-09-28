@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>因子智投 · 多因子选股智能体</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div class="app">
+
+  <!-- ===== 侧边栏 ===== -->
+  <aside class="sidebar">
+    <div class="logo">
+      <div class="logo-mark">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M3 20 L7 12 L11 15 L15 6 L18 10 L21 4"/>
+        </svg>
+      </div>
+      <div class="logo-text">
+        <span class="logo-name">因子智投</span>
+        <span class="logo-sub">AlphaSage Agent</span>
+      </div>
+    </div>
+
+    <nav class="nav">
+      <div class="nav-label">工作台</div>
+      <button class="nav-item active" data-page="chat">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+        <span>对话选股</span>
+      </button>
+      <button class="nav-item" data-page="strategies">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/></svg>
+        <span>我的策略</span>
+        <em class="nav-badge" id="nav-strategy-count">4</em>
+      </button>
+      <button class="nav-item" data-page="profile">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+        <span>个人中心</span>
+      </button>
+    </nav>
+
+    <div class="agent-status">
+      <div class="agent-status-dot"></div>
+      <div>
+        <div class="agent-status-title">智能体在线</div>
+        <div class="agent-status-sub">数据更新于 09-23 15:00</div>
+      </div>
+    </div>
+
+    <div class="sidebar-user" id="sidebar-user">
+      <div class="avatar">陈</div>
+      <div class="sidebar-user-info">
+        <div class="sidebar-user-name">陈研究员</div>
+        <div class="sidebar-user-plan">专业版会员</div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ===== 主内容区 ===== -->
+  <main class="main">
+
+    <!-- 页面1：对话选股 -->
+    <section id="page-chat" class="page active">
+      <!-- 会话列表侧栏 -->
+      <aside class="conv-panel">
+        <button class="btn btn-primary conv-new-btn" id="btn-new-conv">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          新建对话
+        </button>
+        <div class="conv-list" id="conv-list"><!-- 会话列表由 JS 渲染 --></div>
+      </aside>
+
+      <div class="chat-main">
+      <header class="chat-header">
+        <div class="chat-agent">
+          <div class="chat-agent-avatar">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 20 L7 12 L11 15 L15 6 L18 10 L21 4"/></svg>
+          </div>
+          <div>
+            <div class="chat-agent-name">因子智投 · 选股智能体</div>
+            <div class="chat-agent-desc">多因子建模 / 智能对话 / 回测分析</div>
+          </div>
+        </div>
+        <div class="chat-header-actions">
+          <button class="btn btn-ghost btn-sm btn-new-conv-m" id="btn-new-conv-m">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            新建对话
+          </button>
+          <button class="btn btn-ghost btn-sm" id="btn-clear-chat">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/></svg>
+            清空对话
+          </button>
+          <button class="btn btn-primary btn-sm" data-goto="strategies">查看我的策略</button>
+        </div>
+      </header>
+
+      <div class="chat-body" id="chat-body"><div class="chat-body-inner"></div></div>
+
+      <footer class="chat-input-wrap">
+        <div class="chat-suggestions" id="chat-suggestions"><!-- 建议提示词 --></div>
+        <div class="chat-input-box">
+          <button class="icon-btn" title="上传数据文件">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+          </button>
+          <input type="text" id="chat-input" placeholder="向智能体描述你的选股需求，如：帮我构建一个低波动+高股息的防御策略…" autocomplete="off">
+          <button class="btn btn-primary btn-send" id="btn-send">
+            发送
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+          </button>
+        </div>
+        <div class="chat-disclaimer">内容由 AI 生成，仅供研究参考，不构成投资建议</div>
+      </footer>
+      </div><!-- /chat-main -->
+    </section>
+
+    <!-- 页面2：我的策略 -->
+    <section id="page-strategies" class="page">
+      <header class="page-header">
+        <div>
+          <h1>我的策略</h1>
+          <p class="page-sub">管理你创建的多因子选股策略，查看回测表现</p>
+        </div>
+        <button class="btn btn-primary" id="btn-new-strategy">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          新建策略
+        </button>
+      </header>
+
+      <div class="stat-row" id="strategy-stats"><!-- 统计卡 --></div>
+      <div class="strategy-grid" id="strategy-grid"><!-- 策略卡片 --></div>
+    </section>
+
+    <!-- 页面3：个人中心 -->
+    <section id="page-profile" class="page">
+      <header class="page-header">
+        <div>
+          <h1>个人中心</h1>
+          <p class="page-sub">账户信息、因子偏好与系统设置</p>
+        </div>
+      </header>
+
+      <div class="profile-layout">
+        <div class="profile-left">
+          <div class="card user-card" id="user-card"><!-- 用户信息 --></div>
+          <div class="card radar-card">
+            <div class="card-title">因子偏好画像</div>
+            <div class="card-sub">基于你近 90 天的策略构建与对话记录生成</div>
+            <div id="radar-chart"></div>
+            <div class="radar-legend" id="radar-legend"></div>
+          </div>
+        </div>
+        <div class="profile-right">
+          <div class="card">
+            <div class="card-title">偏好设置</div>
+            <div id="profile-settings"></div>
+          </div>
+          <div class="card plan-card">
+            <div class="plan-info">
+              <div class="plan-tag">专业版会员</div>
+              <div class="plan-desc">因子库全量开放 · 每月 200 次回测额度 · 专属数据源</div>
+              <div class="plan-expire">2026-12-31 到期</div>
+            </div>
+            <button class="btn btn-outline-light">续费升级</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<!-- 弹窗根节点 -->
+<div id="modal-root"></div>
+
+<script src="js/data.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
