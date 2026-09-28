@@ -1,0 +1,152 @@
+/* ==========================================================
+   B-INT-01 会话业务（ConversationsServiceImpl）单元测试
+   StoreService / AgentService 均为 mock：不触真实存储、不调 GLM
+   运行：npm test
+   ========================================================== */
+import { Test } from '@nestjs/testing';
+import { AgentService } from '../../../src/agent/agent.service';
+import { ApiException } from '../../../src/common/api.exception';
+import { ConversationsService } from '../../../src/conversations/conversations.service';
+import { ConversationsServiceImpl } from '../../../src/conversations/implementations/conversations.service.impl';
+import { StoreService } from '../../../src/core/store.service';
+import { AgentReply, ChatMessage, Conversation } from '../../../src/types';
+
+/* 测试数据构造：与 src/types.ts 口径一致 */
+const conv = (id: string, messages: ChatMessage[]): Conversation => ({
+  id,
+  title: '新对话',
+  messages,
+  updatedAt: Date.now(),
+});
+const userMsg = (bubble: string): ChatMessage => ({ role: 'user', bubble, time: '10:00' });
+const agentMsg = (bubble: string): ChatMessage => ({ role: 'agent', bubble, time: '10:01' });
+
+describe('B-INT-01 ConversationsServiceImpl（会话业务）', () => {
+  const store = {
+    listConversations: jest.fn(),
+    getConversation: jest.fn(),
+    newConversation: jest.fn(),
+    deleteConversation: jest.fn(),
+    clearConversation: jest.fn(),
+    appendMessages: jest.fn(),
+    renameConversationFromFirstMessage: jest.fn(),
+  };
+  const agent = { reply: jest.fn() };
+  let svc: ConversationsService;
+
+  beforeEach(async () => {
+    jest.clearAllMocks();
+    const moduleRef = await Test.createTestingModule({
+      providers: [
+        ConversationsServiceImpl,
+        { provide: StoreService, useValue: store },
+        { provide: AgentService, useValue: agent },
+      ],
+    }).compile();
+    svc = moduleRef.get(ConversationsServiceImpl);
+  });
+
+  /** 断言 fn 抛出统一契约异常：HTTP 状态码 + error.code */
+  async function expectApiError(fn: () => unknown, status: number, code: string): Promise<void> {
+    try {
+      await fn();
+      throw new Error(`期望抛出 ApiException(${code})，实际没有抛出`);
+    } catch (e) {
+      expect(e).toBeInstanceOf(ApiException);
+      expect((e as ApiException).getStatus()).toBe(status);
+      expect((e as ApiException).code).toBe(code);
+    }
+  }
+
+  /* ---------- 透传类方法 ---------- */
+
+  it('list：透传 store.listConversations()', () => {
+    const data = [conv('c1', [])];
+    store.listConversations.mockReturnValue(data);
+    expect(svc.list()).toBe(data);
+  });
+
+  it('create：透传 store.newConversation()', () => {
+    const fresh = conv('c2', [agentMsg('欢迎')]);
+    store.newConversation.mockReturnValue(fresh);
+    expect(svc.create()).toBe(fresh);
+  });
+
+  /* ---------- 404 语义：会话不存在 ---------- */
+
+  it('remove：删除成功无返回；会话不存在抛 404 NOT_FOUND', async () => {
+    store.deleteConversation.mockReturnValue(true);
+    expect(svc.remove('c1')).toBeUndefined();
+
+    store.deleteConversation.mockReturnValue(false);
+    await expectApiError(() => svc.remove('nope'), 404, 'NOT_FOUND');
+  });
+
+  it('clear：返回清空后的会话；会话不存在抛 404 NOT_FOUND', async () => {
+    const cleared = conv('c1', [agentMsg('欢迎')]);
+    store.clearConversation.mockReturnValue(cleared);
+    expect(svc.clear('c1')).toBe(cleared);
+
+    store.clearConversation.mockReturnValue(undefined);
+    await expectApiError(() => svc.clear('nope'), 404, 'NOT_FOUND');
+  });
+
+  it('getMessages：返回该会话的消息数组；会话不存在抛 404 NOT_FOUND', async () => {
+    const messages = [userMsg('你好'), agentMsg('你好，我是多因子选股智能体')];
+    store.getConversation.mockReturnValue(conv('c1', messages));
+    expect(svc.getMessages('c1')).toBe(messages);
+
+    store.getConversation.mockReturnValue(undefined);
+    await expectApiError(() => svc.getMessages('nope'), 404, 'NOT_FOUND');
+  });
+
+  /* ---------- sendMessage：编排逻辑 ---------- */
+
+  it('sendMessage：会话不存在抛 404，且不调智能体', async () => {
+    store.getConversation.mockReturnValue(undefined);
+    await expectApiError(() => svc.sendMessage('nope', '你好'), 404, 'NOT_FOUND');
+    expect(agent.reply).not.toHaveBeenCalled();
+  });
+
+  it('sendMessage：routeText = 最近 2 条用户消息 + 当前消息，空格拼接', async () => {
+    const c = conv('c1', [userMsg('第一问'), agentMsg('答一'), userMsg('第二问'), agentMsg('答二')]);
+    store.getConversation.mockReturnValue(c);
+    agent.reply.mockResolvedValue({ text: '回复' } as AgentReply);
+
+    await svc.sendMessage('c1', '构建策略');
+
+    expect(agent.reply).toHaveBeenCalledTimes(1);
+    expect(agent.reply).toHaveBeenCalledWith(c, '构建策略', '第一问 第二问 构建策略');
+  });
+
+  it('sendMessage：没有历史用户消息时 routeText 即当前消息', async () => {
+    const c = conv('c1', [agentMsg('欢迎语')]);
+    store.getConversation.mockReturnValue(c);
+    agent.reply.mockResolvedValue({ text: '回复' } as AgentReply);
+
+    await svc.sendMessage('c1', '你好');
+
+    expect(agent.reply).toHaveBeenCalledWith(c, '你好', '你好');
+  });
+
+  it('sendMessage：落库用户+智能体两条消息、按首条消息命名、返回值与智能体回复一致', async () => {
+    store.getConversation.mockReturnValue(conv('c1', []));
+    const card = { type: 'backtest', title: '小盘动量增强', tag: '进攻型', curve: [100], benchCurve: [100], metrics: [] };
+    agent.reply.mockResolvedValue({ text: '策略已构建', card } as AgentReply);
+
+    const { userMessage, agentMessage } = await svc.sendMessage('c1', '帮我构建策略');
+
+    expect(userMessage).toMatchObject({ role: 'user', bubble: '帮我构建策略' });
+    expect(userMessage.time).toMatch(/^\d{2}:\d{2}$/);
+    expect(agentMessage).toMatchObject({ role: 'agent', bubble: '策略已构建', card });
+
+    expect(store.appendMessages).toHaveBeenCalledTimes(1);
+    const [calledId, appended] = store.appendMessages.mock.calls[0];
+    expect(calledId).toBe('c1');
+    expect(appended).toHaveLength(2);
+    expect(appended[0]).toMatchObject({ role: 'user', bubble: '帮我构建策略' });
+    expect(appended[1]).toMatchObject({ role: 'agent', bubble: '策略已构建', card });
+
+    expect(store.renameConversationFromFirstMessage).toHaveBeenCalledWith('c1', '帮我构建策略');
+  });
+});
