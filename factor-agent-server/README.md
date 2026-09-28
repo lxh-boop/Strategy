@@ -30,28 +30,46 @@ server: { port: 5173, proxy: { "/api": "http://localhost:3000" } }
 > 数据统一使用内部数据**，个人中心移除 API 密钥与数据源配置，设置项仅保留
 > notify / report / risk 可配置（`model` / `datasource` 为只读展示项）。
 
-## 目录结构
+## 目录结构（接口与实现分离）
+
+> 统一模式：`<域>.service.ts` 为接口契约（abstract class），`implementations/` 放具体实现，
+> `<域>.module.ts` 里 `{ provide: 接口, useClass: 实现 }` 装配——换实现只改一行。
 
 ```
 src/
 ├── main.ts                    # 入口：CORS、全局校验管道、统一错误过滤器
 ├── app.module.ts / app.controller.ts
 ├── types.ts                   # 与前端 src/types.ts 一致的共享类型
-├── common/
-│   ├── api.exception.ts       # ApiException(code, status, message)
-│   └── api-error.filter.ts    # 全局异常 → { "error": { "code", "message" } }
+├── common/                    # ApiException + 全局错误格式（接口实现的公共依赖）
 ├── config/configuration.ts    # 环境变量
 ├── core/                      # 领域共享层（全局模块）
-│   ├── store.service.ts       # 内存存储 + 种子数据（与前端 mock 对齐）
-│   ├── backtest.service.ts    # 模拟回测引擎（种子伪随机，确定性）
-│   └── screen.service.ts      # 选股筛选
-├── agent/                     # 智能体（LangGraph 状态图）
-│   └── agent.service.ts
-├── conversations/             # 会话模块（6 个接口）
-├── strategies/                # 策略模块（6 个接口）
-├── market/                    # 因子库 / 回测参数 / 选股筛选
-├── user/                      # 个人中心
+│   ├── store.service.ts       # 【接口】存储契约 SVC-D01~D18 + 共享常量
+│   ├── backtest.service.ts    # 【接口】回测契约 SVC-D19 + 纯函数（normalizeWeights 等）
+│   ├── screen.service.ts      # 【接口】筛选契约 SVC-D20 + 字段/操作符白名单
+│   └── implementations/
+│       ├── memory-store.service.ts    # 【实现】内存存储 + 种子测试样例
+│       ├── mock-backtest.service.ts   # 【实现】随机数据回测（种子伪随机，确定性）
+│       └── mock-screen.service.ts     # 【实现】演示股票池筛选
+├── agent/                     # 智能体
+│   ├── agent.service.ts       # 【接口】SVC-C01
+│   ├── factor-knowledge.ts    # 因子知识库读取（docs/factors.md）
+│   └── implementations/
+│       └── langgraph-agent.service.ts  # 【实现】LangGraph 状态图 + GLM tool-calling
+├── conversations/             # 会话模块（API-02~07）
+│   ├── conversations.service.ts        # 【接口】B-INT-01
+│   └── implementations/conversations.service.impl.ts
+├── strategies/                # 策略模块（API-08~13）
+│   ├── strategies.service.ts           # 【接口】B-INT-02
+│   └── implementations/strategies.service.impl.ts
+├── market/                    # 市场数据（API-14~16）
+│   ├── market.service.ts               # 【接口】B-INT-03
+│   └── implementations/market.service.impl.ts
+├── user/                      # 个人中心（API-17~18）
+│   ├── user.service.ts                 # 【接口】B-INT-04
+│   └── implementations/user.service.impl.ts
 └── zhipu/                     # 智谱直连客户端（health 探测与备用，主链路走 LangChain）
+    ├── zhipu.service.ts       # 【接口】SVC-Z01~Z03
+    └── implementations/http-zhipu.service.ts
 ```
 
 ## 智能体（LangGraph + LangChain tool-calling）

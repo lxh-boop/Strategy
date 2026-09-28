@@ -1,10 +1,14 @@
 import { Injectable } from '@nestjs/common';
-import { ApiException } from '../common/api.exception';
-import { ScreenFilter, ScreenResult, ScreenResultStock } from '../types';
-import { STOCK_POOL, StockMeta } from './store.service';
+import { ScreenFilter, ScreenResult } from '../types';
+import { StockMeta } from './store.service';
 
-/** 支持的筛选字段 → StockMeta 属性名 */
-const FIELD_MAP: Record<string, keyof StockMeta> = {
+/* ==========================================================
+   选股筛选接口（契约层）—— 定义"按条件筛股票能做什么"。
+   实现：implementations/mock-screen.service.ts（演示股票池）
+   ========================================================== */
+
+/** 支持的筛选字段 → StockMeta 属性名（筛选条件 DSL，契约的一部分） */
+export const FIELD_MAP: Record<string, keyof StockMeta> = {
   roe_ttm: 'roeTtm',
   pe_percentile: 'pePct',
   dividend_yield: 'divYield',
@@ -12,7 +16,8 @@ const FIELD_MAP: Record<string, keyof StockMeta> = {
   momentum_20d: 'mom20',
 };
 
-const OP_MAP: Record<string, (a: number, b: number) => boolean> = {
+/** 支持的比较符（筛选条件 DSL，契约的一部分） */
+export const OP_MAP: Record<string, (a: number, b: number) => boolean> = {
   '>': (a, b) => a > b,
   '<': (a, b) => a < b,
   '>=': (a, b) => a >= b,
@@ -20,32 +25,8 @@ const OP_MAP: Record<string, (a: number, b: number) => boolean> = {
   '==': (a, b) => a === b,
 };
 
+/** 选股筛选接口：按股票池 + 条件过滤，按综合因子得分降序取 TopN */
 @Injectable()
-export class ScreenService {
-  /** 按股票池 + 条件筛选，按综合因子得分降序（演示数据） */
-  screen(options: { universe?: string; filters: ScreenFilter[]; topN?: number }): ScreenResult {
-    const { universe, filters, topN = 5 } = options;
-
-    let pool: StockMeta[] = STOCK_POOL;
-    if (universe && universe !== '全市场') {
-      pool = pool.filter((s) => s.universes.includes(universe));
-    }
-
-    for (const f of filters) {
-      const key = FIELD_MAP[f.field];
-      const op = OP_MAP[f.op];
-      if (!key) throw new ApiException('INVALID_ARGUMENT', 400, `不支持的筛选字段: ${f.field}（支持：${Object.keys(FIELD_MAP).join('、')}）`);
-      if (!op) throw new ApiException('INVALID_ARGUMENT', 400, `不支持的比较符: ${f.op}（支持：>、<、>=、<=、==）`);
-      pool = pool.filter((s) => op(s[key] as number, f.value));
-    }
-
-    const sorted = [...pool].sort((a, b) => b.baseScore - a.baseScore);
-    const stocks: ScreenResultStock[] = sorted.slice(0, Math.max(1, topN)).map((s) => ({
-      code: s.code,
-      name: s.name,
-      score: s.baseScore,
-      weight: null,
-    }));
-    return { stocks, total: sorted.length };
-  }
+export abstract class ScreenService {
+  abstract screen(options: { universe?: string; filters: ScreenFilter[]; topN?: number }): ScreenResult;
 }
