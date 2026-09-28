@@ -9,6 +9,15 @@
 - 大模型：智谱 GLM（OpenAI 兼容协议，经 `@langchain/openai` 的 `ChatOpenAI` 接入）
 - 端口：**3000**（`.env` 可改；注意本机 8000 已被一个 Python uvicorn 服务占用）
 
+## 测试
+
+```bash
+npm run test:e2e    # 契约 e2e 测试样例（20 个用例，离线可跑，不消耗 GLM 额度）
+```
+
+测试样例清单与扩展约定见 **[docs/test-cases.md](docs/test-cases.md)**。
+自动化用例置空 `ZHIPU_API_KEY` 走开发模式（关键词规则 + 模板文案），行为确定、任何机器可跑。
+
 ## 快速开始
 
 ```bash
