@@ -4,7 +4,7 @@
    2. 后端不可达时的兜底展示数据（与后端种子数据同口径）。
    正常链路下，因子库/回测参数/策略/个人中心均以后端接口为准。
    ========================================================== */
-import type { BtParamItem, ApiKeyEntry, FactorLibItem, UserProfile } from "../types";
+import type { BtParamItem, FactorLibItem, UserProfile } from "../types";
 
 // 因子库兜底（正常由 GET /api/factors 下发）
 export const FACTOR_LIB: FactorLibItem[] = [
@@ -43,15 +43,10 @@ export const PROFILE: UserProfile = {
   settings: [
     { key: "notify", icon: "bell", title: "调仓与信号通知", desc: "策略触发买卖信号时推送提醒", type: "toggle", on: true },
     { key: "report", icon: "file", title: "每日策略日报", desc: "每个交易日收盘后生成持仓分析", type: "toggle", on: true },
-    { key: "apikey", icon: "key", title: "API 密钥管理", desc: "用于接入行情与回测数据服务", type: "keys", on: null },
-    { key: "datasrc", icon: "database", title: "数据源配置", desc: "行情数据 / 财务数据 / 另类数据", type: "multi", on: null,
-      choices: ["聚宽", "Wind", "Tushare", "米筐RiceQuant", "东方财富"], value: "聚宽 + Wind" },
+    { key: "model", icon: "key", title: "模型配置", desc: "大模型由平台统一提供，不支持自行配置", type: "readonly", on: null, value: "智谱 GLM" },
+    { key: "datasource", icon: "database", title: "数据来源", desc: "行情与回测统一使用平台内部数据", type: "readonly", on: null, value: "内部数据" },
     { key: "risk", icon: "shield", title: "风险偏好", desc: "影响智能体推荐策略的风格", type: "single", on: null,
       choices: ["保守型", "稳健型", "平衡型", "积极型"], value: "稳健型" },
-  ],
-  apiKeys: [
-    { name: "聚宽行情数据", key: "jq_5****4f01" },
-    { name: "Wind 回测服务", key: "wind****4e66" },
   ],
 };
 

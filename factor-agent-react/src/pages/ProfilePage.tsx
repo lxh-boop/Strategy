@@ -1,12 +1,11 @@
 import { useEffect, useState } from "react";
-import type { ApiKeyEntry, SettingIcon, UserProfile } from "../types";
+import type { SettingIcon, UserProfile } from "../types";
 import { PROFILE } from "../data/mock";
-import { ApiError, addApiKey, getProfile, removeApiKey, updateSetting } from "../api";
+import { ApiError, getProfile, updateSetting } from "../api";
 import { RadarChart } from "../components/charts";
 import { Modal } from "../components/ui";
 import {
-  IconBell, IconClose, IconDatabase, IconFile, IconKey,
-  IconPlus, IconShield, IconTrash,
+  IconBell, IconClose, IconDatabase, IconFile, IconKey, IconShield,
 } from "../components/icons";
 
 const ICONS: Record<SettingIcon, () => JSX.Element> = {
@@ -17,70 +16,10 @@ const ICONS: Record<SettingIcon, () => JSX.Element> = {
   shield: IconShield,
 };
 
-/* ----- API 密钥管理弹窗（增删直接落到后端，列表只显示服务端下发的脱敏值） ----- */
+/* ----- 单选配置弹窗（风险偏好） ----- */
 
-function ApiKeysModal({ keys, onClose, onAdd, onRemove, notify }: {
-  keys: ApiKeyEntry[];
-  onClose: () => void;
-  onAdd: (name: string, key: string) => Promise<void>;
-  onRemove: (name: string) => Promise<void>;
-  notify: (m: string) => void;
-}) {
-  const [name, setName] = useState("");
-  const [value, setValue] = useState("");
-  const [busy, setBusy] = useState(false);
-
-  const add = async () => {
-    if (!name.trim() || !value.trim()) { notify("请填写名称与密钥"); return; }
-    setBusy(true);
-    try {
-      await onAdd(name.trim(), value.trim());
-      setName("");
-      setValue("");
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <Modal onClose={onClose}>
-      <div className="modal-head">
-        <div className="modal-title">API 密钥管理</div>
-        <button className="icon-btn" onClick={onClose}><IconClose /></button>
-      </div>
-      <div className="modal-body">
-        {keys.length ? keys.map(k => (
-          <div className="key-row" key={k.name}>
-            <span className="k-name">{k.name}</span>
-            <span className="k-val">{k.key}</span>
-            <button className="icon-btn" title="删除" onClick={() => void onRemove(k.name)}><IconTrash /></button>
-          </div>
-        )) : (
-          <div className="agent-card-text">暂无密钥，添加后用于接入行情与回测数据服务。</div>
-        )}
-        <div className="key-add">
-          <input className="text-input" placeholder="名称，如：聚宽行情数据"
-            value={name} onChange={e => setName(e.target.value)} />
-          <input className="text-input" placeholder="密钥"
-            value={value} onChange={e => setValue(e.target.value)} />
-          <button className="btn btn-ghost" disabled={busy} onClick={add}><IconPlus />添加</button>
-        </div>
-        <div className="agent-card-text" style={{ margin: "10px 0 0" }}>
-          密钥提交后由后端保存，界面只展示脱敏值（如 jq_5****4f01），完整密钥不可再查看。
-        </div>
-      </div>
-      <div className="modal-foot">
-        <button className="btn btn-primary" onClick={onClose}>完成</button>
-      </div>
-    </Modal>
-  );
-}
-
-/* ----- 单选/多选配置弹窗（数据源、风险偏好） ----- */
-
-function ChoiceModal({ title, multi, choices, selected, onClose, onSave, notify }: {
+function ChoiceModal({ title, choices, selected, onClose, onSave, notify }: {
   title: string;
-  multi: boolean;
   choices: string[];
   selected: string[];
   onClose: () => void;
@@ -90,14 +29,8 @@ function ChoiceModal({ title, multi, choices, selected, onClose, onSave, notify 
   const [sel, setSel] = useState<string[]>(selected);
   const [busy, setBusy] = useState(false);
 
-  const toggle = (c: string) =>
-    setSel(prev => {
-      if (!multi) return [c];
-      return prev.includes(c) ? prev.filter(x => x !== c) : [...prev, c];
-    });
-
   const save = async () => {
-    if (!sel.length) { notify(multi ? "请至少选择一项" : "请选择一项"); return; }
+    if (!sel.length) { notify("请选择一项"); return; }
     setBusy(true);
     try {
       await onSave(sel);
@@ -117,18 +50,13 @@ function ChoiceModal({ title, multi, choices, selected, onClose, onSave, notify 
           {choices.map(c => (
             <label key={c} className="factor-tag"
               style={{ cursor: "pointer", userSelect: "none", padding: "7px 13px", fontSize: 12 }}>
-              <input type={multi ? "checkbox" : "radio"} name="choice" checked={sel.includes(c)}
-                onChange={() => toggle(c)}
+              <input type="radio" name="choice" checked={sel.includes(c)}
+                onChange={() => setSel([c])}
                 style={{ accentColor: "var(--primary)", marginRight: 5, verticalAlign: -1 }} />
               {c}
             </label>
           ))}
         </div>
-        {multi && (
-          <div className="agent-card-text" style={{ margin: "10px 0 0" }}>
-            可多选，选中的数据源将同时用于行情获取与回测。
-          </div>
-        )}
       </div>
       <div className="modal-foot">
         <button className="btn btn-ghost" onClick={onClose}>取消</button>
@@ -143,7 +71,7 @@ function ChoiceModal({ title, multi, choices, selected, onClose, onSave, notify 
 export function ProfilePage({ notify }: { notify: (m: string) => void }) {
   /* 先用内置兜底数据渲染，随后以 GET /api/user/profile 的结果为准 */
   const [profile, setProfile] = useState<UserProfile>(PROFILE);
-  const [editing, setEditing] = useState<null | "apikey" | "datasrc" | "risk">(null);
+  const [editing, setEditing] = useState<null | "risk">(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -160,20 +88,18 @@ export function ProfilePage({ notify }: { notify: (m: string) => void }) {
 
   const setting = (key: string) => profile.settings.find(s => s.key === key);
   const risk = setting("risk")?.value ?? "—";
-  const datasrcChoices = setting("datasrc")?.choices ?? [];
   const riskChoices = setting("risk")?.choices ?? [];
 
   const fail = (e: unknown, fallback: string) =>
     notify(e instanceof ApiError ? e.message : fallback);
 
   /** 乐观更新设置项，失败时回退并提示；返回是否保存成功 */
-  const patchSetting = async (key: string, payload: { on?: boolean; value?: string; values?: string[] }, rollback: UserProfile): Promise<boolean> => {
+  const patchSetting = async (key: string, payload: { on?: boolean; value?: string }, rollback: UserProfile): Promise<boolean> => {
     setProfile(p => ({
       ...p,
       settings: p.settings.map(s => {
         if (s.key !== key) return s;
         if (payload.on !== undefined) return { ...s, on: payload.on };
-        if (payload.values !== undefined) return { ...s, value: payload.values.join(" + ") };
         return { ...s, value: payload.value };
       }),
     }));
@@ -191,29 +117,6 @@ export function ProfilePage({ notify }: { notify: (m: string) => void }) {
     const item = setting(key);
     void patchSetting(key, { on }, profile);
     if (item) notify(`「${item.title}」已${on ? "开启" : "关闭"}`);
-  };
-
-  const displayValue = (s: ProfileSettingKey): string =>
-    setting(s)?.value ?? (s === "apikey" ? `已配置 ${profile.apiKeys.length} 个` : "未配置");
-
-  const handleAddKey = async (name: string, key: string) => {
-    try {
-      setProfile(await addApiKey(name, key));
-      notify(`密钥「${name}」已保存到后端`);
-    } catch (e) {
-      fail(e, "密钥保存失败");
-      throw e;
-    }
-  };
-
-  const handleRemoveKey = async (name: string) => {
-    try {
-      setProfile(await removeApiKey(name));
-      notify(`密钥「${name}」已删除`);
-    } catch (e) {
-      fail(e, "密钥删除失败");
-      throw e;
-    }
   };
 
   return (
@@ -263,10 +166,11 @@ export function ProfilePage({ notify }: { notify: (m: string) => void }) {
               {profile.settings.map(s => {
                 const Icon = ICONS[s.icon];
                 const isToggle = s.type === "toggle";
+                const isReadonly = s.type === "readonly";
                 return (
                   <div key={s.key}
-                    className={"setting-row" + (isToggle ? "" : " clickable")}
-                    onClick={isToggle ? undefined : () => setEditing(s.key as "apikey" | "datasrc" | "risk")}>
+                    className={"setting-row" + (!isToggle && !isReadonly ? " clickable" : "")}
+                    onClick={!isToggle && !isReadonly ? () => setEditing("risk") : undefined}>
                     <div className="setting-left">
                       <Icon />
                       <div className="setting-info">
@@ -281,7 +185,7 @@ export function ProfilePage({ notify }: { notify: (m: string) => void }) {
                         <span className="track" />
                       </label>
                     ) : (
-                      <span className="s-value">{displayValue(s.key as ProfileSettingKey)}<span className="s-edit">配置</span></span>
+                      <span className="s-value">{s.value ?? "—"}{!isReadonly && <span className="s-edit">配置</span>}</span>
                     )}
                   </div>
                 );
@@ -292,7 +196,7 @@ export function ProfilePage({ notify }: { notify: (m: string) => void }) {
           <div className="card plan-card">
             <div className="plan-info">
               <div className="plan-tag">专业版会员</div>
-              <div className="plan-desc">因子库全量开放 · 每月 200 次回测额度 · 专属数据源</div>
+              <div className="plan-desc">因子库全量开放 · 每月 200 次回测额度 · 内部数据直连</div>
               <div className="plan-expire">2026-12-31 到期</div>
             </div>
             <button className="btn btn-outline-light" onClick={() => notify("续费流程即将上线（演示）")}>续费升级</button>
@@ -300,25 +204,8 @@ export function ProfilePage({ notify }: { notify: (m: string) => void }) {
         </div>
       </div>
 
-      {editing === "apikey" && (
-        <ApiKeysModal keys={profile.apiKeys} notify={notify}
-          onClose={() => setEditing(null)}
-          onAdd={handleAddKey}
-          onRemove={handleRemoveKey} />
-      )}
-      {editing === "datasrc" && (
-        <ChoiceModal title="数据源配置" multi choices={datasrcChoices}
-          selected={(setting("datasrc")?.value ?? "").split(" + ").filter(Boolean)}
-          notify={notify}
-          onClose={() => setEditing(null)}
-          onSave={async v => {
-            if (!(await patchSetting("datasrc", { values: v }, profile))) return;
-            setEditing(null);
-            notify(`数据源已更新：${v.join(" + ")}`);
-          }} />
-      )}
       {editing === "risk" && (
-        <ChoiceModal title="风险偏好" multi={false} choices={riskChoices} selected={[risk]} notify={notify}
+        <ChoiceModal title="风险偏好" choices={riskChoices} selected={[risk]} notify={notify}
           onClose={() => setEditing(null)}
           onSave={async v => {
             if (!(await patchSetting("risk", { value: v[0] }, profile))) return;
@@ -329,5 +216,3 @@ export function ProfilePage({ notify }: { notify: (m: string) => void }) {
     </section>
   );
 }
-
-type ProfileSettingKey = "notify" | "report" | "apikey" | "datasrc" | "risk";

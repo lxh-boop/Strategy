@@ -26,8 +26,9 @@ server: { port: 5173, proxy: { "/api": "http://localhost:3000" } }
 ```
 
 > ✅ **前后端已打通**（2026-09-24）：React 前端全部数据走本服务，联调过程与验证记录见
-> `factor-agent-react/docs/integration.md`。为对齐契约 §3.6，本次补齐了个人中心密钥接口
-> （`POST/DELETE /api/user/apikeys`，出参脱敏）与设置项的 `type/choices` 字段。
+> `factor-agent-react/docs/integration.md`。2026-09-28 按产品决策调整：**模型统一智谱 GLM、
+> 数据统一使用内部数据**，个人中心移除 API 密钥与数据源配置，设置项仅保留
+> notify / report / risk 可配置（`model` / `datasource` 为只读展示项）。
 
 ## 目录结构
 
@@ -107,9 +108,7 @@ START → agent(GLM，绑定 2 个工具) ⇄ tools(执行工具) → 最终文�
 | DELETE | `/api/strategies/:id` | 删除策略 |
 | GET | `/api/factors` · `/api/backtest-params` | 因子库 / 回测参数（后端下发，UI 数据驱动） |
 | POST | `/api/screen` | 选股筛选 `{universe, filters, topN}` |
-| GET | `/api/user/profile` · PATCH `/api/user/settings` | 个人中心（设置项含 type/choices；toggle 传 `on`、multi 传 `values`、single 传 `value`） |
-| POST | `/api/user/apikeys` | 新增密钥 `{name, key}`（重名 409；完整密钥只在提交时出现） |
-| DELETE | `/api/user/apikeys/:name` | 删除密钥（profile 出参中的密钥一律脱敏，如 `jq_5****4f01`） |
+| GET | `/api/user/profile` · PATCH `/api/user/settings` | 个人中心（模型/数据来源为 readonly 展示；toggle 传 `on`、single 传 `value`） |
 
 错误格式统一为 `{ "error": { "code": "MESSAGE" } }`，如：
 

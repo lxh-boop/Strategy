@@ -105,7 +105,7 @@ export interface Strategy {
 
 /* ----- 个人中心 ----- */
 export type SettingIcon = 'bell' | 'file' | 'key' | 'database' | 'shield';
-export type SettingType = 'toggle' | 'keys' | 'multi' | 'single';
+export type SettingType = 'toggle' | 'single' | 'readonly';
 
 export interface ProfileSetting {
   key: string;
@@ -114,13 +114,8 @@ export interface ProfileSetting {
   desc: string;
   type: SettingType;
   on?: boolean | null;    // toggle 型：开关状态；其余类型为 null
-  choices?: string[];     // multi / single 型可选项
-  value?: string;         // keys / multi / single 型的当前值（展示口径）
-}
-
-export interface ApiKeyEntry {
-  name: string;           // 密钥名称，如 "聚宽行情数据"
-  key: string;            // 存储为完整密钥；对外（GET profile）只返回脱敏值
+  choices?: string[];     // single 型可选项
+  value?: string;         // single / readonly 型的当前值（展示口径，后端下发）
 }
 
 export interface UserProfile {
@@ -131,7 +126,6 @@ export interface UserProfile {
   lastLogin: string;
   radar: { name: string; value: number }[];
   settings: ProfileSetting[];
-  apiKeys: ApiKeyEntry[]; // 出参为脱敏密钥
 }
 
 /* ----- 因子库 / 回测参数 / 选股筛选 ----- */

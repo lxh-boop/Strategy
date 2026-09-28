@@ -184,16 +184,10 @@ function seedProfile(): UserProfile {
     settings: [
       { key: 'notify', icon: 'bell', title: '调仓与信号通知', desc: '策略触发买卖信号时推送提醒', type: 'toggle', on: true },
       { key: 'report', icon: 'file', title: '每日策略日报', desc: '每个交易日收盘后生成持仓分析', type: 'toggle', on: true },
-      { key: 'apikey', icon: 'key', title: 'API 密钥管理', desc: '用于接入行情与回测数据服务', type: 'keys', on: null },
-      { key: 'datasrc', icon: 'database', title: '数据源配置', desc: '行情数据 / 财务数据 / 另类数据', type: 'multi', on: null,
-        choices: ['聚宽', 'Wind', 'Tushare', '米筐RiceQuant', '东方财富'], value: '聚宽 + Wind' },
+      { key: 'model', icon: 'key', title: '模型配置', desc: '大模型由平台统一提供，不支持自行配置', type: 'readonly', on: null, value: '智谱 GLM' },
+      { key: 'datasource', icon: 'database', title: '数据来源', desc: '行情与回测统一使用平台内部数据', type: 'readonly', on: null, value: '内部数据' },
       { key: 'risk', icon: 'shield', title: '风险偏好', desc: '影响智能体推荐策略的风格', type: 'single', on: null,
         choices: ['保守型', '稳健型', '平衡型', '积极型'], value: '稳健型' },
-    ],
-    // 演示密钥（实际环境必须加密存储；出参统一经 maskKey 脱敏）
-    apiKeys: [
-      { name: '聚宽行情数据', key: 'jq_5f3a9c2e8b7d4f01' },
-      { name: 'Wind 回测服务', key: 'wind_9d27be41a5c84e66' },
     ],
   };
 }
@@ -305,15 +299,8 @@ export class StoreService {
 
   /* ----- 用户 ----- */
 
-  /** 出参口径：apiKeys 只给脱敏值；apikey 设置项的 value 随密钥数量联动 */
   getProfile(): UserProfile {
-    return {
-      ...this.profile,
-      apiKeys: this.profile.apiKeys.map((k) => ({ name: k.name, key: maskKey(k.key) })),
-      settings: this.profile.settings.map((s) =>
-        s.key === 'apikey' ? { ...s, value: `已配置 ${this.profile.apiKeys.length} 个` } : s,
-      ),
-    };
+    return this.profile;
   }
 
   updateSetting(key: string, patch: { on?: boolean | null; value?: string }): ProfileSetting | undefined {
@@ -323,26 +310,6 @@ export class StoreService {
     if (patch.value !== undefined) setting.value = patch.value;
     return setting;
   }
-
-  /** 新增密钥：存储完整值，重名视为冲突（对外只回脱敏值） */
-  addApiKey(name: string, key: string): UserProfile | null {
-    if (this.profile.apiKeys.some((k) => k.name === name)) return null;
-    this.profile.apiKeys.push({ name, key });
-    return this.getProfile();
-  }
-
-  removeApiKey(name: string): UserProfile | undefined {
-    const before = this.profile.apiKeys.length;
-    this.profile.apiKeys = this.profile.apiKeys.filter((k) => k.name !== name);
-    if (this.profile.apiKeys.length === before) return undefined;
-    return this.getProfile();
-  }
-}
-
-/** 密钥脱敏：保留前 4 位与后 4 位，如 `jq_5****4f01` */
-function maskKey(key: string): string {
-  if (key.length <= 8) return key.slice(0, 2) + '****';
-  return key.slice(0, 4) + '****' + key.slice(-4);
 }
 
 /** 当前时刻 "HH:mm"（消息 time 字段口径） */

@@ -104,13 +104,9 @@ export const getBtParams = () => http<{ label: string; value: string; hint: stri
 /* ----- 个人中心（契约 §3.6） ----- */
 
 export const getProfile = () => http<UserProfile>("GET", "/user/profile");
-/** 更新设置项：toggle 型传 on，single 型传 value，multi 型传 values */
-export const updateSetting = (payload: { key: string; on?: boolean; value?: string; values?: string[] }) =>
+/** 更新设置项：toggle 型传 on，single 型（风险偏好）传 value；模型/数据来源为 readonly 不可配置 */
+export const updateSetting = (payload: { key: string; on?: boolean; value?: string }) =>
   http<UserProfile>("PATCH", "/user/settings", payload);
-export const addApiKey = (name: string, key: string) =>
-  http<UserProfile>("POST", "/user/apikeys", { name, key });
-export const removeApiKey = (name: string) =>
-  http<UserProfile>("DELETE", `/user/apikeys/${encodeURIComponent(name)}`);
 
 /* ----- 卡片 id（会话内标记"已保存"用） ----- */
 

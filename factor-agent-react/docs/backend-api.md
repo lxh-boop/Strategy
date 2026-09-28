@@ -120,13 +120,13 @@ interface UserProfile {
   name: string; org: string; plan: string;
   registerDate: string; lastLogin: string;
   radar: { name: string; value: number }[];   // 因子偏好 0-100
-  apiKeys: { name: string; key: string }[];   // 第三方数据服务密钥（后端应加密存储）
   settings: {
-    key: string;          // notify / report / apikey / datasrc / risk
-    type: "toggle" | "keys" | "multi" | "single";
+    key: string;          // notify / report / model / datasource / risk
+    type: "toggle" | "single" | "readonly";
     title: string; desc: string;
     on?: boolean;         // toggle 型开关状态
-    choices?: string[];   // multi/single 型可选项
+    choices?: string[];   // single 型可选项
+    value?: string;       // single / readonly 型当前值（展示口径，后端下发）
   }[];
 }
 ```
@@ -137,8 +137,8 @@ interface UserProfile {
 |---|---|---|---|
 | notify | toggle | 是否推送调仓与信号通知 | 开关 |
 | report | toggle | 是否生成每日策略日报 | 开关 |
-| apikey | keys | 第三方服务密钥列表（名称 + 密钥） | 增删 |
-| datasrc | multi | 启用的数据源（聚宽/Wind/Tushare 等） | 多选 |
+| model | readonly | 智能体大模型（统一智谱 GLM，平台提供） | 不可配置 |
+| datasource | readonly | 行情与回测数据来源（统一使用平台内部数据） | 不可配置 |
 | risk | single | 风险偏好（保守/稳健/平衡/积极） | 单选 |
 
 ### 2.5 因子库 Factor
@@ -276,21 +276,19 @@ GET /api/factors
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/api/user/profile` | 用户信息 + 因子偏好 + 设置项 + 密钥列表 |
-| PATCH | `/api/user/settings` | 更新设置项（按 key 区分类型，见下） |
-| POST | `/api/user/apikeys` | 新增 API 密钥 `{ "name": "聚宽行情数据", "key": "…" }` |
-| DELETE | `/api/user/apikeys/:name` | 删除指定密钥 |
+| GET | `/api/user/profile` | 用户信息 + 因子偏好 + 设置项（模型/数据来源为只读展示） |
+| PATCH | `/api/user/settings` | 更新设置项（toggle 传 `on`、single 传 `value`） |
 
 **PATCH /api/user/settings 请求示例（按 key 的 type 区分）**
 
 ```json
 { "key": "notify",  "on": true }
-{ "key": "datasrc", "values": ["聚宽", "Wind"] }
 { "key": "risk",    "value": "积极型" }
 ```
 
-> 安全要求：API 密钥在后端必须加密存储；列表接口只返回脱敏值（如 `jq_5****4f01`），
-> 完整密钥仅在创建时返回一次。
+> 产品边界（2026-09-28）：大模型统一智谱 GLM、行情数据统一使用平台内部数据，
+> 均由服务端配置，**不提供用户级模型/数据源配置**；个人中心可配置项仅
+> notify / report / risk，`model` 与 `datasource` 为 readonly 展示项。
 
 ---
 
@@ -306,7 +304,7 @@ GET /api/factors
 | `src/data/mock.ts` → `PROFILE` | 假用户资料 | `GET /api/user/profile` |
 | `src/data/mock.ts` → `FACTOR_LIB` / `BT_PARAMS` / `DEMO_STOCK_POOL` | 静态字典 | `GET /api/factors` 等（参数项由后端下发后 UI 自动渲染） |
 | `src/hooks/useConversations.ts` | 会话存 localStorage（key：`alphasage_conversations_react_v1`） | §3.1 会话接口，登录后数据上云 |
-| `src/pages/ProfilePage.tsx` | 偏好设置/密钥/数据源存 localStorage（key：`alphasage_profile_v1`） | §3.6 用户设置与密钥接口 |
+| `src/pages/ProfilePage.tsx` | 偏好设置存 localStorage（key：`alphasage_profile_v1`） | §3.6 用户设置接口 |
 
 > `BT_PARAMS` / `FACTOR_LIB` 这类**配置型数据建议由后端下发**：前端 UI 是
 > 数据驱动的，后端加一个参数项（如以后恢复"初始资金"）前端无需改代码。

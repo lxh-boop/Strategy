@@ -1,11 +1,12 @@
-import { ArrayNotEmpty, IsArray, IsBoolean, IsIn, IsOptional, IsString, Length } from 'class-validator';
+import { IsBoolean, IsIn, IsOptional, IsString } from 'class-validator';
 
+/** 可配置的设置项白名单：模型与数据来源为 readonly 展示项，不接受用户调整 */
 export class UpdateSettingDto {
   @IsString()
-  @IsIn(['notify', 'report', 'apikey', 'datasrc', 'risk'], { message: '未知的设置项 key' })
+  @IsIn(['notify', 'report', 'risk'], { message: '未知的设置项 key' })
   key: string;
 
-  /** toggle 型设置项传 on，其余类型不适用 */
+  /** toggle 型设置项传 on */
   @IsOptional()
   @IsBoolean()
   on?: boolean;
@@ -14,21 +15,4 @@ export class UpdateSettingDto {
   @IsOptional()
   @IsString()
   value?: string;
-
-  /** multi 型（数据源）传 values，存储为 " + " 拼接的展示值 */
-  @IsOptional()
-  @IsArray()
-  @ArrayNotEmpty()
-  @IsString({ each: true })
-  values?: string[];
-}
-
-export class CreateApiKeyDto {
-  @IsString()
-  @Length(1, 40, { message: '密钥名称长度需在 1~40 字符之间' })
-  name: string;
-
-  @IsString()
-  @Length(1, 200, { message: '密钥内容长度需在 1~200 字符之间' })
-  key: string;
 }

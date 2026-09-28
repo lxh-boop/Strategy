@@ -3,6 +3,10 @@
 > 本文记录 2026-09-24 前后端打通的**完整做法**：改了哪些文件、为什么改、数据怎么流、
 > 如何启动验证。接口字段口径见 [backend-api.md](backend-api.md)（契约），后端架构见
 > `factor-agent-server/docs/technical.md`。
+>
+> 🔄 **2026-09-28 更新**：按产品决策，模型统一智谱 GLM、数据统一使用平台内部数据；
+> 个人中心已移除 API 密钥管理与数据源配置，`model` / `datasource` 为只读展示项。
+> 文中涉及密钥/数据源的段落为当时的历史记录，现状以契约文档为准。
 
 ---
 
@@ -19,7 +23,7 @@ NestJS 后端（factor-agent-server，端口 3000）
   │  ├─ /api/conversations/**   会话 + 智能体（LangGraph 编排）
   │  ├─ /api/strategies/**      策略 + 模拟回测引擎
   │  ├─ /api/factors · /api/backtest-params · /api/screen
-  │  └─ /api/user/**            个人中心（profile / settings / apikeys）
+  │  └─ /api/user/**            个人中心（profile / settings）
   ▼
 智谱 GLM（compose_text/chat_reply 节点生成回复文本；调用失败时回复仅含报错信息，不带卡片，不静默降级）
 ```
