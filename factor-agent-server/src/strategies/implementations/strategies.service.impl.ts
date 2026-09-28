@@ -77,7 +77,7 @@ export class StrategiesServiceImpl extends StrategiesService {
     return this.runBacktest(strategy, params);
   }
 
-  report(id: string): Pick<Strategy, 'metrics' | 'curve' | 'benchCurve' | 'holdings'> {
+  getReport(id: string): Pick<Strategy, 'metrics' | 'curve' | 'benchCurve' | 'holdings'> {
     const s = this.getOrThrow(id);
     return { metrics: s.metrics, curve: s.curve, benchCurve: s.benchCurve, holdings: s.holdings };
   }

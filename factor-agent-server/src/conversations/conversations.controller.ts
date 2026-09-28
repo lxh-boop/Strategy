@@ -31,7 +31,7 @@ export class ConversationsController {
 
   @Get(':id/messages')
   messages(@Param('id') id: string): ChatMessage[] {
-    return this.conversations.messages(id);
+    return this.conversations.getMessages(id);
   }
 
   @Post(':id/messages')

@@ -18,5 +18,5 @@ export abstract class StrategiesService {
   abstract update(id: string, dto: UpdateStrategyDto): Strategy;
   abstract remove(id: string): void;
   abstract backtest(id: string, params: BacktestParamsDto): Strategy;
-  abstract report(id: string): StrategyReport;
+  abstract getReport(id: string): StrategyReport;
 }

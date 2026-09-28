@@ -30,7 +30,7 @@ export class StrategiesController {
 
   @Get(':id/report')
   report(@Param('id') id: string) {
-    return this.strategies.report(id);
+    return this.strategies.getReport(id);
   }
 
   @Delete(':id')
