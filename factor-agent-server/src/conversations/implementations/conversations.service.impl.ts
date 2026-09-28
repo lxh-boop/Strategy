@@ -38,7 +38,7 @@ export class ConversationsServiceImpl extends ConversationsService {
     return conv;
   }
 
-  messages(id: string): ChatMessage[] {
+  getMessages(id: string): ChatMessage[] {
     const conv = this.store.getConversation(id);
     if (!conv) throw new ApiException('NOT_FOUND', 404, `会话不存在: ${id}`);
     return conv.messages;

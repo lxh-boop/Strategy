@@ -12,7 +12,7 @@ export abstract class ConversationsService {
   abstract create(): Conversation;
   abstract remove(id: string): void;
   abstract clear(id: string): Conversation;
-  abstract messages(id: string): ChatMessage[];
+  abstract getMessages(id: string): ChatMessage[];
 
   /** 发消息：返回同一次请求的用户消息与智能体回复 */
   abstract sendMessage(id: string, text: string): Promise<{ userMessage: ChatMessage; agentMessage: ChatMessage }>;
