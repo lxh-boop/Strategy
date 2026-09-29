@@ -1,4 +1,4 @@
-# B 模块内部业务接口状态（B-INT-01 ~ 04）
+# B 模块内部业务接口状态（B-INT-01 ~ 05）
 
 > 与 `docs/模块划分文档.md` §3.2 一一对应；状态规则见 [README.md](README.md)。
 
@@ -8,3 +8,4 @@
 | B-INT-02 | `StrategiesService`<br>`list()` — 无参；策略列表（含 s1~s4 种子策略）<br>`create(input)` — input：策略定义（name 必填，universe/rebalance/benchmark 可选，factors 必填 ≥1 项 {name, weight≥0}）；创建草稿策略：权重归一化、按股票池推默认业绩基准<br>`update(id, patch)` — id：策略 id，patch：更新字段（均可选，factors 同 create）；保存=归一化+自动重新回测（API-10），draft→done<br>`backtest(id, params?)` — id：策略 id，params 可选：{period 回测区间, topK 持股数（>10 截为 10）, feeRate 双边费率}；单独重跑回测并写回<br>`getReport(id)` — id：策略 id；返回报告四件套 metrics/curve/benchCurve/holdings<br>`remove(id)` — id：策略 id；删除策略 | 策略业务：权重归一化（SVC-D21）、**保存=归一化+自动重新回测**（API-10 语义） | chenhaotao | ✅ 已完成 | f0388f2 实现 · 47ceb10 方法名对齐 · 0be3b38 测试（2026-09-28）<br>测试：`factor-agent-server/test/strategies/implementations/strategies.service.impl.spec.ts` |
 | B-INT-03 | `MarketService`<br>`listFactors()` — 无参；因子库配置下发<br>`listBtParams()` — 无参；回测参数项下发<br>`screen(options)` — options：筛选条件 {universe 股票池, filters[{field, op, value}] 指标条件, topN 返回数量}；按指标条件筛选股票并评分排序 | 市场数据业务：汇聚 SVC-D14/D15/D20 | chenhaotao | ✅ 已完成 | f0388f2 实现 · 0be3b38 测试（2026-09-28）<br>测试：`factor-agent-server/test/market/implementations/market.service.impl.spec.ts` |
 | B-INT-04 | `UserService`<br>`getProfile()` — 无参；个人资料与设置项读取<br>`updateSetting(key, payload)` — key：设置项（白名单 notify/report/risk，之外 400），payload：toggle 型传 {on}、single 型传 {value}；更新设置并返回最新 profile | 用户业务：设置项白名单校验（notify/report/risk 之外 400），汇聚 SVC-D17/D18 | chenhaotao | ✅ 已完成 | f0388f2 实现 · 0be3b38 测试（2026-09-28）<br>测试：`factor-agent-server/test/user/implementations/user.service.impl.spec.ts` |
+| B-INT-05 | `AuthService`<br>`register(dto)` — dto：{username 3~24 位字母/数字/下划线, password 6~64 位, nickname? ≤40}；创建用户（bcrypt 哈希）并签发 JWT，注册即登录；用户名重复 409 USERNAME_TAKEN<br>`login(dto)` — dto：{username, password}；校验通过签发 JWT（payload {sub, ver}，7 天）；失败统一 401 AUTH_FAILED（不区分账号/密码）<br>`logout(userId)` — userId 从 token 解出；SVC-D23.bumpTokenVersion 使该用户全部旧 token 失效，204<br>`me(userId)` — 返回 UserPublic（不含哈希），401 兜底由 JwtGuard 负责 | 鉴权业务（M13）：bcrypt + JWT；用户读写经 SVC-D23；M13 同批给 B-INT-01~04 全部方法加 userId 首参（数据按用户隔离） | CZT123526 | 🚧 进行中 | |
