@@ -6,11 +6,14 @@
 
 | 编号 | 接口 | 说明 | 负责人 | 状态 | 完成提交/日期 |
 |---|---|---|---|---|---|
-| SVC-C01 | `AgentService.reply(conversation, userText, routeText): Promise<AgentReply>` | 智能体唯一公开方法。出参 `{ text, card? }`：text 为文案（GLM 失败时=失败原因），card 可选 report/backtest/stocks | 待认领 | ⬜ 未实现 | |
-| TOOL-C01 | `select_factors(factors[], universe?, rebalance?, name?, tag?)` | LLM 工具：抽因子配置 → 归一化 → `SVC-D13` 存会话级配置，提示模型继续调 TOOL-C02 | 待认领 | ⬜ 未实现 | |
-| TOOL-C02 | `run_backtest()` | LLM 工具：读 `SVC-D12` 当前配置 → `SVC-D19` 回测 → 产出 report 卡 | 待认领 | ⬜ 未实现 | |
-| TOOL-C03 | `query_factors(...)` | （规划）因子数据库查询：因子主数据入库后的第三个 LLM 工具，配合"上千因子"检索化演进 | 待认领 | ⬜ 未实现 | |
-| C-INT-01 | `loadFactorKnowledge(): string` | 读 `docs/factors.md` 全文注入提示词（mtime 缓存，改文档即生效） | 待认领 | ⬜ 未实现 | |
+| SVC-C01 | `AgentService.reply(conversation, userText, routeText): Promise<AgentReply>` | 智能体唯一公开方法。出参 `{ text, card? }`：text 为文案（GLM 失败时=失败原因）；card 契约保留但当前实现不产卡片（随 mock 链路下线）。routeText 参数保留、当前未使用 | chenhaotao | ✅ 已实现 | 345a98f 重写（2026-09-29） |
+| TOOL-C01 | `select_factors(factors[], universe?, rebalance?, name?, tag?)` | **已废弃（2026-09-29）**：旧"选风格因子"工具，随 mock 回测链路下线，由 TOOL-C05+TOOL-C06 取代 | chenhaotao | ➖ 废弃 | 345a98f（2026-09-29） |
+| TOOL-C02 | `run_backtest()` | **已废弃（2026-09-29）**：旧 mock 回测工具，真库链路无回测 | chenhaotao | ➖ 废弃 | 345a98f（2026-09-29） |
+| TOOL-C03 | `query_factors(...)` | **规划取消**：原单工具因子查询演化为 TOOL-C04~C06 三个按需工具 | chenhaotao | ➖ 废弃 | 345a98f（2026-09-29） |
+| TOOL-C04 | `list_factor_tables()` | LLM 工具：返回 `SQL/tables.md` 表目录（表名/中文名/说明/唯一键）；选取因子前必须先调用 | chenhaotao | ✅ 已实现 | 345a98f（2026-09-29） |
+| TOOL-C05 | `list_factor_fields(tables[])` | LLM 工具：按表名列表（可多表）返回字段明细（字段名/中文名/类型/可空/描述）；表名必须来自 TOOL-C04，非法表进 notFound 并附可用表 | chenhaotao | ✅ 已实现 | 345a98f（2026-09-29） |
+| TOOL-C06 | `read_factor_data(table, fields[], date, security)` | LLM 工具：调 SVC-D22 查库并把行 JSON 回给模型；显式四参数，格式/白名单由 SVC-D22 校验 | chenhaotao | ✅ 已实现 | 345a98f（2026-09-29） |
+| C-INT-01 | `loadFactorKnowledge(): string` | **已废弃（2026-09-29）**：`docs/factors.md` 删除，因子知识改由 `SQL/` 字典 + SVC-D22 配套解析按需加载（TOOL-C04/C05） | chenhaotao | ➖ 废弃 | 345a98f（2026-09-29） |
 
 ## 智谱直连客户端（模块 C 提供）
 
@@ -35,8 +38,8 @@
 | SVC-D09 | `StoreService.clearConversation(id)` | 清空会话（恢复欢迎语、重置标题） | 待认领 | ⬜ 未实现 | |
 | SVC-D10 | `StoreService.appendMessages(id, msgs)` | 追加消息 | 待认领 | ⬜ 未实现 | |
 | SVC-D11 | `StoreService.renameConversationFromFirstMessage(id, text)` | 按首条消息前 16 字命名会话 | 待认领 | ⬜ 未实现 | |
-| SVC-D12 | `StoreService.getLastReport(convId)` | 读会话级"当前策略配置"（C 的记忆） | 待认领 | ⬜ 未实现 | |
-| SVC-D13 | `StoreService.setLastReport(convId, config)` | 写会话级"当前策略配置" | 待认领 | ⬜ 未实现 | |
+| SVC-D12 | `StoreService.getLastReport(convId)` | 读会话级"当前策略配置"（**当前无消费方**：C 的会话记忆随 mock 链路下线闲置，契约保留） | 待认领 | ⬜ 未实现 | |
+| SVC-D13 | `StoreService.setLastReport(convId, config)` | 写会话级"当前策略配置"（**当前无消费方**，同上） | 待认领 | ⬜ 未实现 | |
 | SVC-D14 | `StoreService.getFactorLib()` | 因子库 9 项（API-14 数据源） | 待认领 | ⬜ 未实现 | |
 | SVC-D15 | `StoreService.getBtParams()` | 回测参数项（API-15 数据源） | 待认领 | ⬜ 未实现 | |
 | SVC-D16 | `StoreService.getStockPool()` | 演示股票池 16 只 | 待认领 | ⬜ 未实现 | |
@@ -45,6 +48,7 @@
 | SVC-D19 | `BacktestService.runBacktest(input): BacktestOutput` | 回测：入参 `{seedKey, factors, universe, rebalance}`；曲线起点 100、百分比 `14.6`、确定性可复现 | 待认领 | ⬜ 未实现 | |
 | SVC-D20 | `ScreenService.screen({universe?, filters[], topN?}): ScreenResult` | 选股筛选（字段/操作符白名单，非法 → 400） | 待认领 | ⬜ 未实现 | |
 | SVC-D21 | 共享常量与工具导出 | `normalizeWeights`、`toMetricItems`、`mkBench`、`todayStr`、`nowTime`、`WELCOME_TEXT`、`BT_DEFAULTS`、`CURVE_*`、`STOCK_POOL`、`LastReport`/`StockMeta` 类型 | 待认领 | ⬜ 未实现 | |
+| SVC-D22 | `FactorDataService.readTable({table, fields[], date, security})` + 字典解析 `loadTableCatalog/loadTableFieldDetails/loadTableFields/listKnownTables` | MySQL 因子取数 + 字段字典解析：白名单两道闸、防注入、值参数化；字典现读 `SQL/*.md` 改文档即生效（TOOL-C04~C06 的数据源） | chenhaotao | ✅ 已实现 | 345a98f（2026-09-29） |
 
 ## 外部接口
 
