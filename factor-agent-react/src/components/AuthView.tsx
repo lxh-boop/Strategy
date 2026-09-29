@@ -58,6 +58,16 @@ export function AuthView({ onAuthed }: { onAuthed: (user: UserPublic) => void })
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
 
+  /** 切换登录/注册：清空全部输入与报错，两种模式各从零开始填 */
+  const switchMode = (next: "login" | "register") => {
+    if (busy || next === mode) return;
+    setMode(next);
+    setUsername("");
+    setPassword("");
+    setNickname("");
+    setError("");
+  };
+
   const submit = async () => {
     if (busy) return;
     setError("");
@@ -65,7 +75,7 @@ export function AuthView({ onAuthed }: { onAuthed: (user: UserPublic) => void })
       setError("用户名须为 3~24 位字母/数字/下划线");
       return;
     }
-    if (!PASSWORD_RE.test(password) || (mode === "login" && password.length < 6)) {
+    if (!PASSWORD_RE.test(password)) {
       setError("密码须为 6~64 位字符（注册仅支持可打印 ASCII）");
       return;
     }
@@ -96,22 +106,23 @@ export function AuthView({ onAuthed }: { onAuthed: (user: UserPublic) => void })
         </div>
 
         <div style={s.tabs}>
-          <button style={{ ...s.tab, ...(mode === "login" ? s.tabActive : {}) }} onClick={() => { setMode("login"); setError(""); }}>登录</button>
-          <button style={{ ...s.tab, ...(mode === "register" ? s.tabActive : {}) }} onClick={() => { setMode("register"); setError(""); }}>注册</button>
+          <button style={{ ...s.tab, ...(mode === "login" ? s.tabActive : {}) }} disabled={busy} onClick={() => switchMode("login")}>登录</button>
+          <button style={{ ...s.tab, ...(mode === "register" ? s.tabActive : {}) }} disabled={busy} onClick={() => switchMode("register")}>注册</button>
         </div>
 
         <label style={s.label}>用户名</label>
-        <input style={s.input} value={username} maxLength={24} placeholder="3~24 位字母/数字/下划线"
+        <input style={s.input} value={username} maxLength={24} placeholder="3~24 位字母/数字/下划线" autoComplete="username"
           onChange={e => setUsername(e.target.value)} onKeyDown={e => e.key === "Enter" && void submit()} />
 
         <label style={s.label}>密码</label>
         <input style={s.input} type="password" value={password} maxLength={64} placeholder="6~64 位字符"
+          autoComplete={mode === "login" ? "current-password" : "new-password"}
           onChange={e => setPassword(e.target.value)} onKeyDown={e => e.key === "Enter" && void submit()} />
 
         {mode === "register" && (
           <>
             <label style={s.label}>昵称（可选，缺省同用户名）</label>
-            <input style={s.input} value={nickname} maxLength={40} placeholder="展示用昵称"
+            <input style={s.input} value={nickname} maxLength={40} placeholder="展示用昵称" autoComplete="nickname"
               onChange={e => setNickname(e.target.value)} onKeyDown={e => e.key === "Enter" && void submit()} />
           </>
         )}
