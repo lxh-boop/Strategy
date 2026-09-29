@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import type { SettingIcon, UserProfile } from "../types";
 import { PROFILE } from "../data/mock";
-import { ApiError, getProfile, updateSetting } from "../api";
+import { ApiError, clearToken, getProfile, logout as apiLogout, updateSetting } from "../api";
 import { RadarChart } from "../components/charts";
 import { Modal } from "../components/ui";
 import {
@@ -119,6 +119,13 @@ export function ProfilePage({ notify }: { notify: (m: string) => void }) {
     if (item) notify(`「${item.title}」已${on ? "开启" : "关闭"}`);
   };
 
+  /** 退出登录：服务端 token_version +1（全部旧 token 失效），本地清 token 回登录页 */
+  const doLogout = () => {
+    void apiLogout().catch(() => { /* 离线也照样清本地 */ });
+    clearToken();
+    location.reload();
+  };
+
   return (
     <section id="page-profile" className="page active">
       <header className="page-header">
@@ -126,6 +133,7 @@ export function ProfilePage({ notify }: { notify: (m: string) => void }) {
           <h1>个人中心</h1>
           <p className="page-sub">账户信息与系统设置</p>
         </div>
+        <button className="btn btn-ghost" onClick={doLogout}>退出登录</button>
       </header>
 
       <div className="profile-layout">

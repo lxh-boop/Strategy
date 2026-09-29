@@ -1,8 +1,11 @@
 import { Body, Controller, Get, Post } from '@nestjs/common';
 import { BtParamItem, FactorLibItem, ScreenResult } from '../types';
+import { Public } from '../common/public.decorator';
 import { MarketService } from './market.service';
 import { ScreenDto } from './dto';
 
+/** API-14/15/16 市场数据（公开：公共配置数据，无用户维度） */
+@Public()
 @Controller('api')
 export class MarketController {
   constructor(private readonly market: MarketService) {}

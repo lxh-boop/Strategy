@@ -2,20 +2,21 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { ReportCard, Strategy } from "./types";
 import {
   ApiError, backtestStrategy as apiBacktest, createStrategy,
-  deleteStrategy as apiDeleteStrategy, getHealth, listStrategies, updateStrategy,
-  type HealthInfo, type NewStrategyInput,
+  deleteStrategy as apiDeleteStrategy, getHealth, getToken, listStrategies, updateStrategy,
+  me as apiMe, AUTH_EXPIRED_EVENT, type HealthInfo, type NewStrategyInput, type UserPublic,
 } from "./api";
 import { useConversations } from "./hooks/useConversations";
 import { ConfigProvider } from "./config";
 import { ChatPage } from "./pages/ChatPage";
 import { StrategiesPage } from "./pages/StrategiesPage";
 import { ProfilePage } from "./pages/ProfilePage";
+import { AuthView } from "./components/AuthView";
 import { Toast } from "./components/ui";
 import { IconChat, IconGrid, IconLogo, IconUser } from "./components/icons";
 
 type Page = "chat" | "strategies" | "profile";
 
-export default function App() {
+function MainApp({ user }: { user: UserPublic }) {
   const [page, setPage] = useState<Page>("chat");
   const [strategies, setStrategies] = useState<Strategy[]>([]);
   const [strategiesLoading, setStrategiesLoading] = useState(true);
@@ -155,10 +156,10 @@ export default function App() {
           </div>
 
           <div className="sidebar-user" onClick={() => setPage("profile")}>
-            <div className="avatar">陈</div>
+            <div className="avatar">{user.nickname.slice(0, 1) || "友"}</div>
             <div className="sidebar-user-info">
-              <div className="sidebar-user-name">陈研究员</div>
-              <div className="sidebar-user-plan">专业版会员</div>
+              <div className="sidebar-user-name">{user.nickname}</div>
+              <div className="sidebar-user-plan">团队版</div>
             </div>
           </div>
         </aside>
@@ -199,4 +200,44 @@ export default function App() {
       </div>
     </ConfigProvider>
   );
+}
+
+/* ==========================================================
+   鉴权外壳（M13）：启动时校验本地 token（API-24）→ 有效进主应用，
+   无效/缺失进登录视图；任意请求 401 会广播 AUTH_EXPIRED_EVENT，
+   这里统一切回登录视图。key={user.id} 保证换账号时主应用整体
+   重挂载、所有数据重新拉取（会话/策略/资料都按新用户隔离）。
+   ========================================================== */
+export default function App() {
+  const [user, setUser] = useState<UserPublic | null>(null);
+  const [authReady, setAuthReady] = useState(false);
+
+  useEffect(() => {
+    void (async () => {
+      if (getToken()) {
+        try {
+          setUser((await apiMe()).user);
+        } catch {
+          /* token 无效：http() 已清 token 并广播 */
+        }
+      }
+      setAuthReady(true);
+    })();
+  }, []);
+
+  useEffect(() => {
+    const onExpired = () => setUser(null);
+    window.addEventListener(AUTH_EXPIRED_EVENT, onExpired);
+    return () => window.removeEventListener(AUTH_EXPIRED_EVENT, onExpired);
+  }, []);
+
+  if (!authReady) {
+    return (
+      <div style={{ position: "fixed", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", color: "#98a1b3", fontSize: 14 }}>
+        正在连接…
+      </div>
+    );
+  }
+  if (!user) return <AuthView onAuthed={setUser} />;
+  return <MainApp key={user.id} user={user} />;
 }

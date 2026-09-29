@@ -1,52 +1,58 @@
 import { Injectable } from '@nestjs/common';
 import { ApiException } from '../../common/api.exception';
 import { AgentService } from '../../agent/agent.service';
-import { nowTime, StoreService } from '../../core/store.service';
+import { nowTime } from '../../core/store.service';
+import { UserStoreService } from '../../core/user-store.service';
 import { ChatMessage, Conversation } from '../../types';
 import { ConversationsService } from '../conversations.service';
 
 /* ==========================================================
    会话业务实现：编排"校验 → 拼 routeText → 调智能体 → 落库 → 命名 → 返回"
+   M13：数据经 UserStoreService 按 userId 隔离（userId 来自 JWT，不信任入参）
    ========================================================== */
 
 @Injectable()
 export class ConversationsServiceImpl extends ConversationsService {
   constructor(
-    private readonly store: StoreService,
+    private readonly users: UserStoreService,
     private readonly agent: AgentService,
   ) {
     super();
   }
 
-  list(): Conversation[] {
-    return this.store.listConversations();
+  async list(userId: number): Promise<Conversation[]> {
+    return this.users.listConversations(userId);
   }
 
-  create(): Conversation {
-    return this.store.newConversation();
+  async create(userId: number): Promise<Conversation> {
+    return this.users.newConversation(userId);
   }
 
-  remove(id: string): void {
-    if (!this.store.deleteConversation(id)) {
+  async remove(userId: number, id: string): Promise<void> {
+    if (!(await this.users.deleteConversation(userId, id))) {
       throw new ApiException('NOT_FOUND', 404, `会话不存在: ${id}`);
     }
   }
 
-  clear(id: string): Conversation {
-    const conv = this.store.clearConversation(id);
+  async clear(userId: number, id: string): Promise<Conversation> {
+    const conv = await this.users.clearConversation(userId, id);
     if (!conv) throw new ApiException('NOT_FOUND', 404, `会话不存在: ${id}`);
     return conv;
   }
 
-  getMessages(id: string): ChatMessage[] {
-    const conv = this.store.getConversation(id);
+  async getMessages(userId: number, id: string): Promise<ChatMessage[]> {
+    const conv = await this.users.getConversation(userId, id);
     if (!conv) throw new ApiException('NOT_FOUND', 404, `会话不存在: ${id}`);
     return conv.messages;
   }
 
   /** 发送消息：路由上下文取最近 3 条用户消息（含当前，与前端语义一致） */
-  async sendMessage(id: string, text: string): Promise<{ userMessage: ChatMessage; agentMessage: ChatMessage }> {
-    const conv = this.store.getConversation(id);
+  async sendMessage(
+    userId: number,
+    id: string,
+    text: string,
+  ): Promise<{ userMessage: ChatMessage; agentMessage: ChatMessage }> {
+    const conv = await this.users.getConversation(userId, id);
     if (!conv) throw new ApiException('NOT_FOUND', 404, `会话不存在: ${id}`);
 
     const recentUser = conv.messages.filter((m) => m.role === 'user').slice(-2).map((m) => m.bubble);
@@ -57,8 +63,8 @@ export class ConversationsServiceImpl extends ConversationsService {
     const userMessage: ChatMessage = { role: 'user', bubble: text, time: nowTime() };
     const agentMessage: ChatMessage = { role: 'agent', bubble: reply.text, card: reply.card, time: nowTime() };
 
-    this.store.appendMessages(id, [userMessage, agentMessage]);
-    this.store.renameConversationFromFirstMessage(id, text);
+    await this.users.appendMessages(userId, id, [userMessage, agentMessage]);
+    await this.users.renameConversationFromFirstMessage(userId, id, text);
 
     return { userMessage, agentMessage };
   }
