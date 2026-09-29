@@ -1,6 +1,6 @@
 # HTTP 接口状态（API-01 ~ API-24）
 
-> 与 `docs/模块划分文档.md` §3.1 一一对应；API-19~20 为规划接口，API-21~24 进行中（M13 登录鉴权）；
+> 与 `docs/模块划分文档.md` §3.1 一一对应；API-19~20 为规划接口；
 > 状态规则见 [README.md](README.md)。
 > 已实现接口在状态列按三段写：**功能**（大概做什么）/ **参数**（入参结构）/ **依赖接口**（依赖哪一个接口）。
 
@@ -27,18 +27,19 @@
 | API-17 | GET `/api/user/profile` | 用户信息 + 因子偏好雷达 + 设置项（模型/数据来源为 readonly 展示） | 待认领 | ✅ 已实现<br>**功能**：用户信息 + 因子偏好雷达 + 设置项展示<br>**参数**：无<br>**依赖接口**：B-INT-04（getProfile）→ SVC-D17 | f0388f2（2026-09-28） |
 | API-18 | PATCH `/api/user/settings` | 更新设置项，仅 notify/report/risk 可配置（toggle 传 `on`、single 传 `value`），其余 key 400 | 待认领 | ✅ 已实现<br>**功能**：更新设置项，白名单外 key 返回 400<br>**参数**：Body `{ key ∈ notify/report/risk; on?（boolean，toggle 项）; value?（string，single 项）}`<br>**依赖接口**：B-INT-04（updateSetting）→ SVC-D18 | f0388f2（2026-09-28） |
 
-## 进行中（M13 登录鉴权与多用户：API-21 ~ API-24）
+## 已实现（M13 登录鉴权与多用户：API-21 ~ API-24）
 
 | 编号 | 接口 | 说明 | 负责人 | 状态 | 完成提交/日期 |
 |---|---|---|---|---|---|
-| API-21 | POST `/api/auth/register` | 用户注册，注册即登录 | CZT123526 | 🚧 进行中 | |
-| API-22 | POST `/api/auth/login` | 登录，签发 token | CZT123526 | 🚧 进行中 | |
-| API-23 | POST `/api/auth/logout` | 登出，使旧 token 失效 | CZT123526 | 🚧 进行中 | |
-| API-24 | GET `/api/auth/me` | 当前登录用户信息 | CZT123526 | 🚧 进行中 | |
+| API-21 | POST `/api/auth/register` | 用户注册，注册即登录 | CZT123526 | ✅ 已实现<br>**功能**：注册并直接登录（返回 token，无需再调 login）；撞名返回 409<br>**参数**：Body `{ username（3~24 位字母/数字/下划线，大小写不敏感唯一）; password（6~64 位可打印 ASCII）; nickname?（≤40 字，缺省取 username）}`<br>**依赖接口**：B-INT-05（register）→ SVC-D23（createUser / findByUsername） | 3e0efd9（2026-09-29） |
+| API-22 | POST `/api/auth/login` | 登录，签发 token | CZT123526 | ✅ 已实现<br>**功能**：登录签发 JWT；失败统一 401 AUTH_FAILED（不区分账号/密码错，防撞库）<br>**参数**：Body `{ username; password }`<br>**依赖接口**：B-INT-05（login）→ SVC-D23（findByUsername / touchLastLogin） | 3e0efd9（2026-09-29） |
+| API-23 | POST `/api/auth/logout` | 登出，使旧 token 失效 | CZT123526 | ✅ 已实现<br>**功能**：服务端 token_version 自增，已签发 token 全部立即失效；成功 204<br>**参数**：无（Bearer token 识别用户）<br>**依赖接口**：B-INT-05（logout）→ SVC-D23（bumpTokenVersion） | 3e0efd9（2026-09-29） |
+| API-24 | GET `/api/auth/me` | 当前登录用户信息 | CZT123526 | ✅ 已实现<br>**功能**：返回当前登录用户 `{ user: UserPublic }`；token 无效/过期/已登出返回 401<br>**参数**：无<br>**依赖接口**：B-INT-05（me）→ JwtAuthGuard（全局守卫校验）→ SVC-D23（findUserById） | 3e0efd9（2026-09-29） |
 
-> **功能**：注册/登录/登出/当前用户，JWT（7 天）鉴权，数据按用户隔离<br>
+> **功能**：注册/登录/登出/当前用户，JWT（HS256，7 天）鉴权，数据按用户隔离<br>
 > **参数**：字段级定义见 `factor-agent-react/docs/backend-api.md` §7<br>
-> **依赖接口**：B-INT-05（auth 业务）→ SVC-D23（用户库存储）；21/22 公开，23/24 及其余业务接口需 Bearer
+> **依赖接口**：B-INT-05（auth 业务）→ SVC-D23（用户库存储）；21/22 公开，23/24 及其余业务接口需 Bearer。
+> M13 同批：API-02~13/17/18 增加 Bearer 校验与用户隔离（实现更新见 3e0efd9），API-01/14/15/16 保持公开。
 
 ## 规划接口（API-19 ~ API-20，M15~M16 认领后细化定义）
 
