@@ -2,7 +2,7 @@ import { Injectable } from '@nestjs/common';
 
 /* ==========================================================
    因子数据读取接口（契约层）—— 定义"按表 + 因子集合 + 日期 + 股票读库能做什么"。
-   实现：implementations/mysql-factor-data.service.ts（MySQL information_schema/hems_data 库）
+   实现：implementations/mysql-factor-data.service.ts（MySQL information_schema/herms_data 库）
    白名单：表名 / 因子字段必须是 <项目根>/SQL 字段字典里出现过的
    （tables.md 给表清单，<表名>.md 给该表字段；解析见 factor-schema.ts）
    调用方：C 智能体（先查表描述 → 按需加载表字段 → 选因子 → 调本接口取数）

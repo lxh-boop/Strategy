@@ -134,17 +134,21 @@ export class LangGraphAgentService extends AgentService {
     const model = config.get<string>('zhipu.model') ?? 'glm-4-flash';
     const baseURL = config.get<string>('zhipu.baseUrl') ?? 'https://open.bigmodel.cn/api/paas/v4';
     const timeoutMs = Number(config.get<number>('chat.timeoutMs') ?? 20_000);
+    const thinking = config.get<string>('zhipu.thinking') ?? 'disabled';
 
     if (apiKey.trim()) {
       this.llm = new ChatOpenAI({
         apiKey,
         modelName: model,
         temperature: 0.6,
-        // 推理模型（如 glm-5.3-flash）会先输出 reasoning_content 再输出正文/工具调用，
-        // max_tokens 同时约束两者；工具循环里还有工具调用 JSON 开销，给足余量
-        maxTokens: 2048,
+        // 推理模型（如 glm-5.3-flash）的 reasoning_content 与正文/工具调用共用 max_tokens，
+        // 给足余量，避免思考爆发时正文被截成空
+        maxTokens: 16_384,
         timeout: timeoutMs,
         configuration: { baseURL },
+        // 默认关闭思考（GLM thinking）：单轮延迟更低，且消除思考爆发吃穿 max_tokens 导致正文为空；
+        // ZHIPU_THINKING=enabled 可开回
+        ...(thinking === 'enabled' ? {} : { modelKwargs: { thinking: { type: 'disabled' } } }),
       });
       this.app = this.buildGraph(
         this.llm.bindTools([LIST_FACTOR_TABLES_SPEC, LIST_FACTOR_FIELDS_SPEC, READ_FACTOR_DATA_SPEC]) as unknown as {
@@ -335,13 +339,15 @@ export class LangGraphAgentService extends AgentService {
   }
 }
 
-/** AIMessage.content 兼容 string / 内容块数组 */
+/** AIMessage.content 兼容 string / 内容块数组；正文为空时兜底退回推理模型的思考内容 */
 function extractText(message: AIMessage): string {
   const content = message.content;
-  if (typeof content === 'string') return content;
-  return content
-    .map((p) => (typeof p === 'string' ? p : 'text' in p ? String(p.text) : ''))
-    .join('');
+  const text = typeof content === 'string'
+    ? content
+    : content.map((p) => (typeof p === 'string' ? p : 'text' in p ? String(p.text) : '')).join('');
+  if (text.trim()) return text;
+  const kw = message.additional_kwargs as { reasoning_content?: unknown } | undefined;
+  return typeof kw?.reasoning_content === 'string' ? kw.reasoning_content : '';
 }
 
 /** GLM 调用失败时的回复正文（唯一内容，不带卡片）：如实展示失败原因，如 429 余额不足 / 403 无模型权限 */

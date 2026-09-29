@@ -19,7 +19,7 @@ import { MockScreenService } from './implementations/mock-screen.service';
  *                           / MemoryUserStoreService（未配置时开发兜底）
  *   回测   BacktestService → MockBacktestService（随机数据，确定性可复现）
  *   筛选   ScreenService   → MockScreenService（演示股票池）
- *   因子取数 FactorDataService → MysqlFactorDataService（MySQL hems_data 库）
+ *   因子取数 FactorDataService → MysqlFactorDataService（MySQL herms_data 库）
  * 换实现只改这一处，上层（B/C）零改动。
  */
 @Global()
