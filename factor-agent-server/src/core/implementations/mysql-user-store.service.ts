@@ -200,13 +200,24 @@ export class MysqlUserStoreService extends UserStoreService {
     return this.readConversation(userId, id);
   }
 
+  /** 冗余用户名查取：username 注册后不可改，落库时随行写入便于直接浏览归属 */
+  private async usernameOf(userId: number): Promise<string> {
+    const rows = await this.selectRows<{ username: string }>(
+      'SELECT username FROM users WHERE id = ? LIMIT 1',
+      [userId],
+      '查询用户名失败',
+    );
+    return rows[0]?.username ?? '';
+  }
+
   async newConversation(userId: number): Promise<Conversation> {
     const id = 'c' + Date.now() + Math.random().toString(36).slice(2, 6);
+    const username = await this.usernameOf(userId);
     await this.withConn(async (conn) => {
-      await conn.execute('INSERT INTO conversations (id, user_id, title) VALUES (?, ?, ?)', [id, userId, '新对话']);
+      await conn.execute('INSERT INTO conversations (id, user_id, username, title) VALUES (?, ?, ?, ?)', [id, userId, username, '新对话']);
       await conn.execute(
-        'INSERT INTO messages (conversation_id, role, bubble, card, time) VALUES (?, ?, ?, NULL, ?)',
-        [id, 'agent', WELCOME_TEXT, nowTime()],
+        'INSERT INTO messages (conversation_id, username, role, bubble, card, time) VALUES (?, ?, ?, ?, NULL, ?)',
+        [id, username, 'agent', WELCOME_TEXT, nowTime()],
       );
     });
     const conv = await this.readConversation(userId, id);
@@ -227,12 +238,13 @@ export class MysqlUserStoreService extends UserStoreService {
   async clearConversation(userId: number, id: string): Promise<Conversation | undefined> {
     const conv = await this.readConversation(userId, id);
     if (!conv) return undefined;
+    const username = await this.usernameOf(userId);
     await this.withConn(async (conn) => {
       await conn.execute('DELETE FROM messages WHERE conversation_id = ?', [id]);
       await conn.execute("UPDATE conversations SET title = '新对话', updated_at = NOW() WHERE id = ?", [id]);
       await conn.execute(
-        'INSERT INTO messages (conversation_id, role, bubble, card, time) VALUES (?, ?, ?, NULL, ?)',
-        [id, 'agent', WELCOME_TEXT, nowTime()],
+        'INSERT INTO messages (conversation_id, username, role, bubble, card, time) VALUES (?, ?, ?, ?, NULL, ?)',
+        [id, username, 'agent', WELCOME_TEXT, nowTime()],
       );
     });
     return this.readConversation(userId, id);
@@ -241,11 +253,12 @@ export class MysqlUserStoreService extends UserStoreService {
   async appendMessages(userId: number, id: string, msgs: ChatMessage[]): Promise<Conversation | undefined> {
     const conv = await this.readConversation(userId, id);
     if (!conv) return undefined;
+    const username = await this.usernameOf(userId);
     await this.withConn(async (conn) => {
       for (const m of msgs) {
         await conn.execute(
-          'INSERT INTO messages (conversation_id, role, bubble, card, time) VALUES (?, ?, ?, ?, ?)',
-          [id, m.role, m.bubble, m.card ? JSON.stringify(m.card) : null, m.time],
+          'INSERT INTO messages (conversation_id, username, role, bubble, card, time) VALUES (?, ?, ?, ?, ?, ?)',
+          [id, username, m.role, m.bubble, m.card ? JSON.stringify(m.card) : null, m.time],
         );
       }
       // ON UPDATE CURRENT_TIMESTAMP 只在本行字段变更时触发，这里必须显式更新

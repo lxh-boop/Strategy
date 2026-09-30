@@ -32,7 +32,8 @@ export default () => ({
   },
   // 登录鉴权 JWT（M13）：留空 secret 用内置开发密钥，团队联调建议 .env 统一配置
   userJwt: {
-    secret: process.env.USER_JWT_SECRET ?? 'alphasage-dev-secret-change-me',
-    expiresIn: process.env.USER_JWT_EXPIRES ?? '7d',
+    // 留空按未配置处理（?? 挡不住"有这行但值为空"，空串会让签发 JWT 直接 500）
+    secret: (process.env.USER_JWT_SECRET ?? '').trim() || 'alphasage-dev-secret-change-me',
+    expiresIn: (process.env.USER_JWT_EXPIRES ?? '').trim() || '7d',
   },
 });
