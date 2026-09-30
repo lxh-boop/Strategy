@@ -1,6 +1,8 @@
-import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Param, Post } from '@nestjs/common';
+import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Param, Post, Res } from '@nestjs/common';
+import { Response } from 'express';
 import { ChatMessage, Conversation } from '../types';
 import { UserId } from '../common/current-user.decorator';
+import { ApiException } from '../common/api.exception';
 import { ConversationsService } from './conversations.service';
 import { SendMessageDto } from './dto';
 
@@ -39,5 +41,41 @@ export class ConversationsController {
   @Post(':id/messages')
   async send(@UserId() userId: number, @Param('id') id: string, @Body() dto: SendMessageDto) {
     return this.conversations.sendMessage(userId, id, dto.text);
+  }
+
+  /** 发消息（流式）：过程事件以 text/event-stream 推送（节点级，非推理流式）。
+   *  事件序列 = start → tool_call/tool_result* → final（携带与 POST /:id/messages
+   *  完全相同的响应体）→ 连接结束；失败以 error 事件收尾。
+   *  HTTP 恒 200（开流后状态码不可改），错误一律走 error 事件；
+   *  EventSource 不支持 POST，前端用 fetch 读流；中途断开不影响最终落库。 */
+  @Post(':id/chat/stream')
+  async sendStream(
+    @UserId() userId: number,
+    @Param('id') id: string,
+    @Body() dto: SendMessageDto,
+    @Res() res: Response,
+  ): Promise<void> {
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no'); // 关闭反向代理缓冲，事件即时到达
+    res.flushHeaders();
+    const write = (event: unknown): void => {
+      try {
+        res.write(`data: ${JSON.stringify(event)}\n\n`);
+      } catch {
+        /* 客户端已断开：静默丢弃后续事件 */
+      }
+    };
+    try {
+      const result = await this.conversations.sendMessageStream(userId, id, dto.text, write);
+      write({ type: 'final', ...result });
+    } catch (error) {
+      const code = error instanceof ApiException ? error.code : 'INTERNAL_ERROR';
+      const message = error instanceof ApiException ? error.message : '服务异常，请稍后重试';
+      write({ type: 'error', code, message });
+    } finally {
+      res.end();
+    }
   }
 }

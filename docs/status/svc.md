@@ -6,7 +6,7 @@
 
 | 编号 | 接口 | 说明 | 负责人 | 状态 | 完成提交/日期 |
 |---|---|---|---|---|---|
-| SVC-C01 | `AgentService.reply(conversation, userText, routeText): Promise<AgentReply>` | 智能体唯一公开方法。出参 `{ text, card? }`：text 为文案（GLM 失败时=失败原因）；card 在本次执行跑成等权回测时为净值卡片（TOOL-C07，卡片绕过 LLM 直达前端），其余场景无卡片。routeText 参数保留、当前未使用 | chenhaotao | ✅ 已实现 | 345a98f 重写（2026-09-29） |
+| SVC-C01 | `AgentService.reply(conversation, userText, routeText): Promise<AgentReply>`；`replyStream(…, onProgress)` 流式形态 | 智能体唯一公开方法。出参 `{ text, card? }`：text 为文案（GLM 失败时=失败原因）；card 在本次执行跑成等权回测时为净值卡片（TOOL-C07，卡片绕过 LLM 直达前端），其余场景无卡片。routeText 参数保留、当前未使用。replyStream 默认委托 reply；LangGraph 实现经图状态 onProgress 通道推节点级事件（AgentProgressEvent：start/tool_call/tool_result/error，无推理流式） | chenhaotao | ✅ 已实现 | 345a98f 重写（2026-09-29） |
 | TOOL-C01 | `select_factors(factors[], universe?, rebalance?, name?, tag?)` | **已废弃（2026-09-29）**：旧"选风格因子"工具，随 mock 回测链路下线，由 TOOL-C05+TOOL-C06 取代 | chenhaotao | ➖ 废弃 | 345a98f（2026-09-29） |
 | TOOL-C02 | `run_backtest()` | **已废弃（2026-09-29）**：旧 mock 回测工具，真库链路无回测 | chenhaotao | ➖ 废弃 | 345a98f（2026-09-29） |
 | TOOL-C03 | `query_factors(...)` | **规划取消**：原单工具因子查询演化为 TOOL-C04~C06 三个按需工具 | chenhaotao | ➖ 废弃 | 345a98f（2026-09-29） |

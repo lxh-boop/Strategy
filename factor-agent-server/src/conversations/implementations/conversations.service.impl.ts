@@ -3,12 +3,14 @@ import { ApiException } from '../../common/api.exception';
 import { AgentService } from '../../agent/agent.service';
 import { nowTime } from '../../core/store.service';
 import { UserStoreService } from '../../core/user-store.service';
-import { ChatMessage, Conversation } from '../../types';
-import { ConversationsService } from '../conversations.service';
+import { AgentProgressSink, ChatMessage, Conversation } from '../../types';
+import { ConversationsService, SendMessageResult } from '../conversations.service';
 
 /* ==========================================================
    会话业务实现：编排"校验 → 拼 routeText → 调智能体 → 落库 → 命名 → 返回"
    M13：数据经 UserStoreService 按 userId 隔离（userId 来自 JWT，不信任入参）
+   sendMessage 与 sendMessageStream 共享 prepare/persist 两段编排，
+   唯一差别是调 agent.reply 还是 agent.replyStream（后者附带过程事件）。
    ========================================================== */
 
 @Injectable()
@@ -47,25 +49,38 @@ export class ConversationsServiceImpl extends ConversationsService {
   }
 
   /** 发送消息：路由上下文取最近 3 条用户消息（含当前，与前端语义一致） */
-  async sendMessage(
+  async sendMessage(userId: number, id: string, text: string): Promise<SendMessageResult> {
+    const { conv, routeText } = await this.prepare(userId, id, text);
+    const reply = await this.agent.reply(conv, text, routeText);
+    return this.persist(userId, id, text, reply);
+  }
+
+  /** 发送消息（流式）：编排同 sendMessage，智能体换成 replyStream 推过程事件 */
+  async sendMessageStream(
     userId: number,
     id: string,
     text: string,
-  ): Promise<{ userMessage: ChatMessage; agentMessage: ChatMessage }> {
+    onProgress: AgentProgressSink,
+  ): Promise<SendMessageResult> {
+    const { conv, routeText } = await this.prepare(userId, id, text);
+    const reply = await this.agent.replyStream(conv, text, routeText, onProgress);
+    return this.persist(userId, id, text, reply);
+  }
+
+  /** 编排前半：会话校验 + 路由上下文（最近 2 条用户消息 + 当前消息拼接） */
+  private async prepare(userId: number, id: string, text: string): Promise<{ conv: Conversation; routeText: string }> {
     const conv = await this.users.getConversation(userId, id);
     if (!conv) throw new ApiException('NOT_FOUND', 404, `会话不存在: ${id}`);
-
     const recentUser = conv.messages.filter((m) => m.role === 'user').slice(-2).map((m) => m.bubble);
-    const routeText = [...recentUser, text].join(' ');
+    return { conv, routeText: [...recentUser, text].join(' ') };
+  }
 
-    const reply = await this.agent.reply(conv, text, routeText);
-
+  /** 编排后半：落库用户/智能体消息 + 按首条消息命名会话 */
+  private async persist(userId: number, id: string, text: string, reply: { text: string; card?: ChatMessage['card'] }): Promise<SendMessageResult> {
     const userMessage: ChatMessage = { role: 'user', bubble: text, time: nowTime() };
     const agentMessage: ChatMessage = { role: 'agent', bubble: reply.text, card: reply.card, time: nowTime() };
-
     await this.users.appendMessages(userId, id, [userMessage, agentMessage]);
     await this.users.renameConversationFromFirstMessage(userId, id, text);
-
     return { userMessage, agentMessage };
   }
 }

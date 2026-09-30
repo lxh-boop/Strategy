@@ -32,7 +32,7 @@ describe('B-INT-01 ConversationsServiceImpl（会话业务）', () => {
     appendMessages: jest.fn(),
     renameConversationFromFirstMessage: jest.fn(),
   };
-  const agent = { reply: jest.fn() };
+  const agent = { reply: jest.fn(), replyStream: jest.fn() };
   let svc: ConversationsService;
 
   beforeEach(async () => {
@@ -150,5 +150,32 @@ describe('B-INT-01 ConversationsServiceImpl（会话业务）', () => {
     expect(appended[1]).toMatchObject({ role: 'agent', bubble: '策略已构建', card });
 
     expect(store.renameConversationFromFirstMessage).toHaveBeenCalledWith(USER, 'c1', '帮我构建策略');
+  });
+
+  /* ---------- sendMessageStream：流式编排（过程事件透传，落库语义与 sendMessage 一致） ---------- */
+
+  it('sendMessageStream：会话不存在抛 404，且不调智能体', async () => {
+    store.getConversation.mockResolvedValue(undefined);
+    await expectApiError(() => svc.sendMessageStream(USER, 'nope', '你好', () => {}), 404, 'NOT_FOUND');
+    expect(agent.replyStream).not.toHaveBeenCalled();
+  });
+
+  it('sendMessageStream：事件接收端原样透传给 agent.replyStream，编排与 sendMessage 一致', async () => {
+    const c = conv('c1', [userMsg('第一问'), agentMsg('答一')]);
+    store.getConversation.mockResolvedValue(c);
+    const card = { type: 'backtest', title: 'T', tag: 'T', curve: [100], benchCurve: [100], metrics: [] };
+    agent.replyStream.mockResolvedValue({ text: '流式回复', card } as AgentReply);
+    const seen: unknown[] = [];
+    const onProgress = (e: unknown): void => void seen.push(e);
+
+    const { userMessage, agentMessage } = await svc.sendMessageStream(USER, 'c1', '回测一下', onProgress);
+
+    expect(agent.replyStream).toHaveBeenCalledTimes(1);
+    expect(agent.replyStream).toHaveBeenCalledWith(c, '回测一下', '第一问 回测一下', onProgress);
+    expect(seen).toHaveLength(0); // 事件由智能体引擎产生，编排层只透传不自行发事件
+    expect(userMessage).toMatchObject({ role: 'user', bubble: '回测一下' });
+    expect(agentMessage).toMatchObject({ role: 'agent', bubble: '流式回复', card });
+    expect(store.appendMessages).toHaveBeenCalledTimes(1);
+    expect(store.renameConversationFromFirstMessage).toHaveBeenCalledWith(USER, 'c1', '回测一下');
   });
 });
