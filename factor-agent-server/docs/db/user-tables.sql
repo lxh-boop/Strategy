@@ -2,7 +2,7 @@
 -- AlphaSage 用户库表结构（M13 登录鉴权与多用户）
 -- 目标库：alphasage_user（团队共享 MySQL，utf8mb4 / InnoDB）
 -- 执行：mysql -h <USER_DB_HOST> -P 3306 -u alphasage -p alphasage_user < user-tables.sql
--- 约定：主数据一律带 user_id 隔离；密码只存 bcrypt 哈希（60 字符），永不回传；
+-- 约定：主数据一律带 user_id 隔离；conversations/messages 另冗余 username 列（用户名不可改，写入时查取）便于直接浏览；密码只存 bcrypt 哈希（60 字符），永不回传；
 --       JSON 列的结构与 src/types.ts 的 Strategy/ChatMessage 字段级一致；
 --       username 大小写不敏感唯一（utf8mb4_unicode_ci：Zhang 与 zhang 视为同一账号，
 --       注册与登录查找必须同一 collation 口径，勿在列上另指定 _bin）；
@@ -65,6 +65,7 @@ CREATE TABLE IF NOT EXISTS strategies (
 CREATE TABLE IF NOT EXISTS conversations (
   id         VARCHAR(36) NOT NULL PRIMARY KEY COMMENT '会话 id',
   user_id    BIGINT UNSIGNED NOT NULL COMMENT '归属用户',
+  username   VARCHAR(24) NOT NULL DEFAULT '' COMMENT '冗余用户名：注册后不可改；默认空串兼容旧代码写入，新代码总是显式写入真实用户名',
   title      VARCHAR(80) NOT NULL DEFAULT '新对话' COMMENT '标题，按首条用户消息前 16 字命名',
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -76,6 +77,7 @@ CREATE TABLE IF NOT EXISTS conversations (
 CREATE TABLE IF NOT EXISTS messages (
   id              BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   conversation_id VARCHAR(36) NOT NULL COMMENT '所属会话',
+  username        VARCHAR(24) NOT NULL DEFAULT '' COMMENT '冗余用户名：默认空串兼容旧代码，新代码总是显式写入',
   role            VARCHAR(10)  NOT NULL COMMENT 'user / agent',
   CONSTRAINT chk_msg_role CHECK (role IN ('user','agent')),
   bubble          TEXT         NOT NULL COMMENT '文案内容（≤2000 字，DTO 层校验）',
