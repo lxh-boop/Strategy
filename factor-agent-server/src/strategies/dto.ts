@@ -1,5 +1,5 @@
 import { Type } from 'class-transformer';
-import { ArrayMinSize, IsArray, IsInt, IsNotEmpty, IsNumber, IsObject, IsOptional, IsString, Min, ValidateNested } from 'class-validator';
+import { ArrayMinSize, IsArray, IsInt, IsNotEmpty, IsNumber, IsObject, IsOptional, IsString, MaxLength, Min, ValidateNested } from 'class-validator';
 import { FactorWeight } from '../types';
 
 export class FactorWeightDto {
@@ -13,20 +13,25 @@ export class FactorWeightDto {
 }
 
 export class CreateStrategyDto {
+  /* 长度上限与 user-tables.sql 列宽一致，超长在 DTO 层返回 400 而非数据库 500 */
   @IsString()
   @IsNotEmpty({ message: 'name 不能为空' })
+  @MaxLength(80, { message: 'name 不能超过 80 字' })
   name: string;
 
   @IsOptional()
   @IsString()
+  @MaxLength(40, { message: 'universe 不能超过 40 字' })
   universe?: string;
 
   @IsOptional()
   @IsString()
+  @MaxLength(20, { message: 'rebalance 不能超过 20 字' })
   rebalance?: string;
 
   @IsOptional()
   @IsString()
+  @MaxLength(40, { message: 'benchmark 不能超过 40 字' })
   benchmark?: string;
 
   @IsArray()
@@ -39,18 +44,22 @@ export class CreateStrategyDto {
 export class UpdateStrategyDto {
   @IsOptional()
   @IsString()
+  @MaxLength(80, { message: 'name 不能超过 80 字' })
   name?: string;
 
   @IsOptional()
   @IsString()
+  @MaxLength(40, { message: 'universe 不能超过 40 字' })
   universe?: string;
 
   @IsOptional()
   @IsString()
+  @MaxLength(20, { message: 'rebalance 不能超过 20 字' })
   rebalance?: string;
 
   @IsOptional()
   @IsString()
+  @MaxLength(40, { message: 'benchmark 不能超过 40 字' })
   benchmark?: string;
 
   @IsOptional()

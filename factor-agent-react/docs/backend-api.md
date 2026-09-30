@@ -12,7 +12,7 @@
 |---|---|
 | Base URL | `/api`（开发期前端走 Vite 代理，见下文 §7） |
 | 数据格式 | 请求/响应均为 JSON（UTF-8） |
-| 鉴权 | 预留 `Authorization: Bearer <token>`，当前演示版未接登录 |
+| 鉴权 | `Authorization: Bearer <JWT>`（M13 起实施）；公开接口 API-01/14/15/16/21/22，其余未带或无效 token → 401 `AUTH_REQUIRED` |
 | 时间字段 | 统一 ISO 8601（如 `2026-09-23T15:00:00+08:00`），由前端格式化展示 |
 | 错误格式 | `{ "error": { "code": "BACKTEST_FAILED", "message": "…" } }`，HTTP 状态码区分 |
 | 数值单位 | 见 §2.6「数值口径」，重要：百分比是 `14.6` 而不是 `0.146` |
@@ -327,3 +327,88 @@ GET /api/factors
 3. "重新回测"会整体替换曲线、指标、持仓，历史报告如需保留由后端另行存档；
 4. 涨跌颜色（红涨绿跌）、百分比格式化均由前端根据数值符号/大小渲染，后端只管数值；
 5. 会话数据当前在前端 localStorage（换浏览器/清缓存会丢），接入 §3.1 后应迁移到服务端。
+
+---
+
+## 7. 登录鉴权与多用户（M13：API-21 ~ API-24）
+
+> 数据落在团队共享用户库（`alphasage_user`），注册的账号任何同事的机器上都能登录，
+> 策略/会话/设置跟随账号。token 为 JWT（HS256，payload `{sub: userId, ver: tokenVersion, iat, exp}`，
+> 有效期 7 天；登出后 ver 自增使旧 token 全部失效）。
+
+### 7.1 数据模型（追加到 src/types.ts）
+
+```ts
+/** 用户公开信息（任何接口都不返回密码哈希） */
+interface UserPublic {
+  id: number;            // 用户 id
+  username: string;      // 登录名，3~24 位字母/数字/下划线
+  nickname: string;      // 昵称，≤40 字
+  createdAt: string;     // ISO 8601
+}
+
+/** 登录/注册成功响应 */
+interface AuthSuccess {
+  token: string;         // JWT，前端存 localStorage，之后每个请求带 Authorization: Bearer <token>
+  user: UserPublic;
+}
+```
+
+### 7.2 接口定义
+
+#### API-21 POST /api/auth/register（公开）
+
+注册并直接登录（返回 token，前端无需再调 login）。
+
+- 请求 Body：`{ "username": "zhangsan", "password": "abc12345", "nickname": "小张" }`
+  - `username` 必填，3~24 位字母/数字/下划线，**大小写不敏感唯一**（`Zhang` 与 `zhang`
+    视为同一账号，注册与登录同口径）；`password` 必填，6~64 位**可打印 ASCII**
+    （bcrypt 只看前 72 字节，限 ASCII 防多字节截断）；`nickname` 可选，≤40 字，缺省用 username
+- 成功 201：`AuthSuccess`
+- 失败：400 `INVALID_ARGUMENT`（校验不过）；409 `USERNAME_TAKEN`（用户名已存在）
+
+#### API-22 POST /api/auth/login（公开）
+
+- 请求 Body：`{ "username": "zhangsan", "password": "abc12345" }`
+- 成功 200：`AuthSuccess`
+- 失败：401 `AUTH_FAILED`（账号不存在或密码错误，**统一文案不区分**，防撞库）
+
+#### API-23 POST /api/auth/logout（需登录）
+
+使当前用户全部已签发 token 失效（服务端 token_version 自增），前端同时删除本地 token。
+
+- 成功 204，无 Body
+- 失败：401 `AUTH_REQUIRED`
+
+#### API-24 GET /api/auth/me（需登录）
+
+- 成功 200：`{ "user": UserPublic }`
+- 失败：401 `AUTH_REQUIRED`（token 无效/过期/已被登出）
+
+### 7.3 既有接口的鉴权化改造（M13 同批完成）
+
+| 接口 | 改造 |
+|---|---|
+| API-02 ~ API-13、API-17、API-18 | 需 Bearer；数据按 token 中的 userId 隔离（A 只能看到自己的策略/会话/设置） |
+| API-01、API-14/15/16 | 保持公开（健康检查与公共配置数据，无用户维度） |
+| 401 处理（前端约定） | `api.ts` 统一捕获 401 → 清除本地 token → 跳转登录页/弹登录框 |
+
+### 7.4 前端改造点（对接 M13 时）
+
+| 位置 | 改造 |
+|---|---|
+| `src/api.ts` | 请求封装统一注入 `Authorization` 头；新增 register/login/logout/me 四个函数；401 统一处理 |
+| `src/App.tsx` | 启动时若有 token 先调 API-24 验证，失败则清 token |
+| 登录/注册 UI | 新增登录页或弹窗（首版可用弹窗），成功后 `AuthSuccess` 存 localStorage |
+| localStorage | token key 建议 `alphasage_token_v1`；会话/设置不再走本地缓存，全部走服务端 |
+
+### 7.5 M13 后 API-17 profile 各字段口径（后端实现约定）
+
+| 字段 | M13 后来源 |
+|---|---|
+| `name` / `nickname` | users.nickname（注册缺省取 username） |
+| `org` / `plan` | 平台固定文案（`"AlphaSage 团队"` / `"团队版"`），不再 mock |
+| `registerDate` | users.created_at（YYYY-MM-DD） |
+| `lastLogin` | users.last_login_at（每次登录成功 UPDATE；首次注册时等于 created_at） |
+| `radar` | 按该用户 strategies.factors 聚合（因子名 → 平均权重），无策略时空数组 `[]` |
+| `settings` | user_settings 行：notify/report 为 toggle（on）、risk 为 single，**value 存中文显示值**（`保守型/稳健型/平衡型/积极型`，缺省 `稳健型`，口径同前端 choices） |

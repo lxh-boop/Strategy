@@ -158,3 +158,21 @@ export interface ScreenResult {
   stocks: ScreenResultStock[];
   total: number;
 }
+
+/* ----- 登录鉴权（M13，与 backend-api.md §7.1 一致） ----- */
+
+/** 用户公开信息（任何接口都不返回密码哈希） */
+export interface UserPublic {
+  id: number;
+  username: string;
+  nickname: string;
+  /** ISO 8601 */
+  createdAt: string;
+}
+
+/** 注册/登录成功响应 */
+export interface AuthSuccess {
+  /** JWT，前端存 localStorage，之后每个请求带 Authorization: Bearer <token> */
+  token: string;
+  user: UserPublic;
+}

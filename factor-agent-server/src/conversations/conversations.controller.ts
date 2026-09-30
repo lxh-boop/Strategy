@@ -1,41 +1,43 @@
 import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Param, Post } from '@nestjs/common';
-import { Conversation, ChatMessage } from '../types';
+import { ChatMessage, Conversation } from '../types';
+import { UserId } from '../common/current-user.decorator';
 import { ConversationsService } from './conversations.service';
 import { SendMessageDto } from './dto';
 
+/** API-02 ~ API-07（M13 起需 Bearer，数据按 token 用户隔离） */
 @Controller('api/conversations')
 export class ConversationsController {
   constructor(private readonly conversations: ConversationsService) {}
 
   @Get()
-  list(): Conversation[] {
-    return this.conversations.list();
+  async list(@UserId() userId: number): Promise<Conversation[]> {
+    return this.conversations.list(userId);
   }
 
   @Post()
-  create(): Conversation {
-    return this.conversations.create();
+  async create(@UserId() userId: number): Promise<Conversation> {
+    return this.conversations.create(userId);
   }
 
   /** 注意路由顺序：具体路径在前，:id 参数路由在后 */
   @Delete(':id')
   @HttpCode(HttpStatus.NO_CONTENT)
-  remove(@Param('id') id: string): void {
-    this.conversations.remove(id);
+  async remove(@UserId() userId: number, @Param('id') id: string): Promise<void> {
+    await this.conversations.remove(userId, id);
   }
 
   @Post(':id/clear')
-  clear(@Param('id') id: string): Conversation {
-    return this.conversations.clear(id);
+  async clear(@UserId() userId: number, @Param('id') id: string): Promise<Conversation> {
+    return this.conversations.clear(userId, id);
   }
 
   @Get(':id/messages')
-  messages(@Param('id') id: string): ChatMessage[] {
-    return this.conversations.getMessages(id);
+  async messages(@UserId() userId: number, @Param('id') id: string): Promise<ChatMessage[]> {
+    return this.conversations.getMessages(userId, id);
   }
 
   @Post(':id/messages')
-  async send(@Param('id') id: string, @Body() dto: SendMessageDto) {
-    return this.conversations.sendMessage(id, dto.text);
+  async send(@UserId() userId: number, @Param('id') id: string, @Body() dto: SendMessageDto) {
+    return this.conversations.sendMessage(userId, id, dto.text);
   }
 }

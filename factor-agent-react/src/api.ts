@@ -25,10 +25,14 @@ export class ApiError extends Error {
 
 async function http<T>(method: string, path: string, body?: unknown): Promise<T> {
   let res: Response;
+  const token = getToken();
   try {
     res = await fetch("/api" + path, {
       method,
-      headers: body !== undefined ? { "Content-Type": "application/json" } : undefined,
+      headers: {
+        ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
+        ...(token ? { Authorization: "Bearer " + token } : {}),
+      },
       body: body !== undefined ? JSON.stringify(body) : undefined,
     });
   } catch {
@@ -43,6 +47,11 @@ async function http<T>(method: string, path: string, body?: unknown): Promise<T>
       if (data.error?.code) code = data.error.code;
     } catch {
       /* 非 JSON 响应，保留默认错误文案 */
+    }
+    /* 登录态失效（非登录接口本身的 AUTH_FAILED）：清 token 并广播，App 切回登录视图 */
+    if (res.status === 401 && code !== "AUTH_FAILED") {
+      clearToken();
+      window.dispatchEvent(new Event(AUTH_EXPIRED_EVENT));
     }
     throw new ApiError(code, message);
   }
@@ -107,6 +116,41 @@ export const getProfile = () => http<UserProfile>("GET", "/user/profile");
 /** 更新设置项：toggle 型传 on，single 型（风险偏好）传 value；模型/数据来源为 readonly 不可配置 */
 export const updateSetting = (payload: { key: string; on?: boolean; value?: string }) =>
   http<UserProfile>("PATCH", "/user/settings", payload);
+
+/* ----- 登录鉴权（契约 §7，M13） ----- */
+
+/** 用户公开信息（任何接口都不返回密码哈希） */
+export interface UserPublic {
+  id: number;
+  username: string;
+  nickname: string;
+  createdAt: string;
+}
+
+/** 注册/登录成功响应 */
+export interface AuthSuccess {
+  token: string;
+  user: UserPublic;
+}
+
+const TOKEN_KEY = "alphasage_token_v1";
+export const getToken = (): string | null => localStorage.getItem(TOKEN_KEY);
+export const setToken = (token: string): void => localStorage.setItem(TOKEN_KEY, token);
+export const clearToken = (): void => localStorage.removeItem(TOKEN_KEY);
+
+/** token 失效广播：http() 捕获 401 后发，App 监听后切回登录视图 */
+export const AUTH_EXPIRED_EVENT = "alphasage:auth-expired";
+
+/** 注册并直接登录（后端返回 token，无需再调 login）；撞名 409 USERNAME_TAKEN */
+export const register = (input: { username: string; password: string; nickname?: string }) =>
+  http<AuthSuccess>("POST", "/auth/register", input);
+/** 登录；失败统一 401 AUTH_FAILED（不区分账号/密码错） */
+export const login = (input: { username: string; password: string }) =>
+  http<AuthSuccess>("POST", "/auth/login", input);
+/** 登出：服务端 token_version +1 使已签发 token 全部失效 */
+export const logout = () => http<void>("POST", "/auth/logout");
+/** 启动时校验本地 token；返回 { user } */
+export const me = () => http<{ user: UserPublic }>("GET", "/auth/me");
 
 /* ----- 卡片 id（会话内标记"已保存"用） ----- */
 

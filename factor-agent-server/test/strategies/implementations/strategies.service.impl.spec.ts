@@ -1,13 +1,13 @@
 /* ==========================================================
    B-INT-02 策略业务（StrategiesServiceImpl）单元测试
    钉住四条业务规则：权重归一化、全 0 报 400、保存=自动重新回测（API-10）、
-   回测确定性种子来源；StoreService / BacktestService 均为 mock
+   回测确定性种子来源；UserStoreService / BacktestService 均为 mock
    运行：npx jest strategies.service.impl
    ========================================================== */
 import { Test } from '@nestjs/testing';
 import { ApiException } from '../../../src/common/api.exception';
 import { BacktestService, BacktestOutput } from '../../../src/core/backtest.service';
-import { StoreService } from '../../../src/core/store.service';
+import { UserStoreService } from '../../../src/core/user-store.service';
 import { StrategiesService } from '../../../src/strategies/strategies.service';
 import { StrategiesServiceImpl } from '../../../src/strategies/implementations/strategies.service.impl';
 import { Strategy } from '../../../src/types';
@@ -47,6 +47,7 @@ function expectNormalized(factors: { name: string; weight: number }[]) {
 }
 
 describe('B-INT-02 StrategiesServiceImpl（策略业务）', () => {
+  const USER = 1;
   const store = {
     listStrategies: jest.fn(),
     getStrategy: jest.fn(),
@@ -62,7 +63,7 @@ describe('B-INT-02 StrategiesServiceImpl（策略业务）', () => {
     const moduleRef = await Test.createTestingModule({
       providers: [
         StrategiesServiceImpl,
-        { provide: StoreService, useValue: store },
+        { provide: UserStoreService, useValue: store },
         { provide: BacktestService, useValue: btEngine },
       ],
     }).compile();
@@ -83,24 +84,24 @@ describe('B-INT-02 StrategiesServiceImpl（策略业务）', () => {
 
   /* ---------- list / remove ---------- */
 
-  it('list：透传 store.listStrategies()', () => {
+  it('list：透传 store.listStrategies(userId)', async () => {
     const data = [seedStrategy()];
-    store.listStrategies.mockReturnValue(data);
-    expect(svc.list()).toBe(data);
+    store.listStrategies.mockResolvedValue(data);
+    expect(await svc.list(USER)).toBe(data);
   });
 
   it('remove：删除成功无返回；策略不存在抛 404 NOT_FOUND', async () => {
-    store.deleteStrategy.mockReturnValue(true);
-    expect(svc.remove('sx')).toBeUndefined();
+    store.deleteStrategy.mockResolvedValue(true);
+    expect(await svc.remove(USER, 'sx')).toBeUndefined();
 
-    store.deleteStrategy.mockReturnValue(false);
-    await expectApiError(() => svc.remove('nope'), 404, 'NOT_FOUND');
+    store.deleteStrategy.mockResolvedValue(false);
+    await expectApiError(() => svc.remove(USER, 'nope'), 404, 'NOT_FOUND');
   });
 
   /* ---------- create：默认值 + 归一化 + 草稿形态 ---------- */
 
-  it('create：默认 universe/rebalance/benchmark、草稿态、指标为空曲线平', () => {
-    const s = svc.create({ name: '新策略', factors: [{ name: '价值', weight: 60 }, { name: '成长', weight: 40 }] });
+  it('create：默认 universe/rebalance/benchmark、草稿态、指标为空曲线平', async () => {
+    const s = await svc.create(USER, { name: '新策略', factors: [{ name: '价值', weight: 60 }, { name: '成长', weight: 40 }] });
 
     expect(s.id).toMatch(/^s/);
     expect(s.name).toBe('新策略');
@@ -117,8 +118,8 @@ describe('B-INT-02 StrategiesServiceImpl（策略业务）', () => {
     expect(btEngine.runBacktest).not.toHaveBeenCalled();
   });
 
-  it('create：权重合计 ≠100 按比例折算到精确 100（50/40/30 → 41.7/33.3/25.0）', () => {
-    const s = svc.create({
+  it('create：权重合计 ≠100 按比例折算到精确 100（50/40/30 → 41.7/33.3/25.0）', async () => {
+    const s = await svc.create(USER, {
       name: '新策略',
       factors: [{ name: '价值', weight: 50 }, { name: '成长', weight: 40 }, { name: '动量', weight: 30 }],
     });
@@ -126,14 +127,14 @@ describe('B-INT-02 StrategiesServiceImpl（策略业务）', () => {
     expect(s.factors.map((f) => f.weight)).toEqual([41.7, 33.3, 25]);
   });
 
-  it('create：universe 含中证1000 时默认基准为中证1000指数', () => {
-    const s = svc.create({ name: '新策略', universe: '中证1000', factors: [{ name: '价值', weight: 100 }] });
+  it('create：universe 含中证1000 时默认基准为中证1000指数', async () => {
+    const s = await svc.create(USER, { name: '新策略', universe: '中证1000', factors: [{ name: '价值', weight: 100 }] });
     expect(s.benchmark).toBe('中证1000指数');
   });
 
   it('create：权重全 0 抛 400 INVALID_ARGUMENT，且不落库', async () => {
     await expectApiError(
-      () => svc.create({ name: '新策略', factors: [{ name: '价值', weight: 0 }, { name: '成长', weight: 0 }] }),
+      () => svc.create(USER, { name: '新策略', factors: [{ name: '价值', weight: 0 }, { name: '成长', weight: 0 }] }),
       400,
       'INVALID_ARGUMENT',
     );
@@ -143,15 +144,15 @@ describe('B-INT-02 StrategiesServiceImpl（策略业务）', () => {
   /* ---------- update：保存 = 归一化 + 自动重新回测（API-10） ---------- */
 
   it('update：策略不存在抛 404 NOT_FOUND', async () => {
-    store.getStrategy.mockReturnValue(undefined);
-    await expectApiError(() => svc.update('nope', { name: '改名' }), 404, 'NOT_FOUND');
+    store.getStrategy.mockResolvedValue(undefined);
+    await expectApiError(() => svc.update(USER, 'nope', { name: '改名' }), 404, 'NOT_FOUND');
   });
 
-  it('update：只改传入字段，并自动重新回测 draft→done、报告写回、重新落库', () => {
+  it('update：只改传入字段，并自动重新回测 draft→done、报告写回、重新落库', async () => {
     const stored = seedStrategy();
-    store.getStrategy.mockReturnValue(stored);
+    store.getStrategy.mockResolvedValue(stored);
 
-    const s = svc.update('sx', {
+    const s = await svc.update(USER, 'sx', {
       name: '改名后的策略',
       factors: [{ name: '价值', weight: 40 }, { name: '成长', weight: 40 }, { name: '动量', weight: 40 }],
     });
@@ -167,14 +168,14 @@ describe('B-INT-02 StrategiesServiceImpl（策略业务）', () => {
     expect(s.metrics).toEqual(fakeBt().metrics);
     expect(s.curve).toEqual(fakeBt().curve);
     expect(s.holdings).toEqual(fakeBt().holdings);
-    expect(store.saveStrategy).toHaveBeenCalledWith(s);
+    expect(store.saveStrategy).toHaveBeenCalledWith(USER, s);
   });
 
   it('update：权重全 0 抛 400，配置不被回测污染', async () => {
     const stored = seedStrategy();
-    store.getStrategy.mockReturnValue(stored);
+    store.getStrategy.mockResolvedValue(stored);
     await expectApiError(
-      () => svc.update('sx', { factors: [{ name: '价值', weight: 0 }] }),
+      () => svc.update(USER, 'sx', { factors: [{ name: '价值', weight: 0 }] }),
       400,
       'INVALID_ARGUMENT',
     );
@@ -184,11 +185,11 @@ describe('B-INT-02 StrategiesServiceImpl（策略业务）', () => {
 
   /* ---------- backtest：种子来源 + topK 截断 + 状态保持 ---------- */
 
-  it('backtest：seedKey 由 id|universe|rebalance|因子权重 构成，topK 上限截到 10', () => {
+  it('backtest：seedKey 由 id|universe|rebalance|因子权重 构成，topK 上限截到 10', async () => {
     const stored = seedStrategy({ status: 'done' });
-    store.getStrategy.mockReturnValue(stored);
+    store.getStrategy.mockResolvedValue(stored);
 
-    svc.backtest('sx', { topK: 30 });
+    await svc.backtest(USER, 'sx', { topK: 30 });
 
     const input = btEngine.runBacktest.mock.calls[0][0];
     expect(input.seedKey).toBe(`sx|沪深300|每月调仓|${JSON.stringify(stored.factors)}`);
@@ -196,36 +197,36 @@ describe('B-INT-02 StrategiesServiceImpl（策略业务）', () => {
     expect(input.universe).toBe('沪深300');
   });
 
-  it('backtest：结果写回策略，非草稿状态保持不变，topK 正常透传', () => {
+  it('backtest：结果写回策略，非草稿状态保持不变，topK 正常透传', async () => {
     const stored = seedStrategy({ status: 'done' });
-    store.getStrategy.mockReturnValue(stored);
+    store.getStrategy.mockResolvedValue(stored);
 
-    const s = svc.backtest('sx', { topK: 5 });
+    const s = await svc.backtest(USER, 'sx', { topK: 5 });
 
     expect(btEngine.runBacktest.mock.calls[0][0].holdingsCount).toBe(5);
     expect(s.status).toBe('done');
     expect(s.metrics).toEqual(fakeBt().metrics);
     expect(s.curve).toEqual(fakeBt().curve);
     expect(s.benchCurve).toEqual(fakeBt().benchCurve);
-    expect(store.saveStrategy).toHaveBeenCalledWith(s);
+    expect(store.saveStrategy).toHaveBeenCalledWith(USER, s);
   });
 
   it('backtest：策略不存在抛 404 NOT_FOUND', async () => {
-    store.getStrategy.mockReturnValue(undefined);
-    await expectApiError(() => svc.backtest('nope', {}), 404, 'NOT_FOUND');
+    store.getStrategy.mockResolvedValue(undefined);
+    await expectApiError(() => svc.backtest(USER, 'nope', {}), 404, 'NOT_FOUND');
   });
 
   /* ---------- getReport：报告视图 ---------- */
 
   it('getReport：返回 metrics/curve/benchCurve/holdings 四字段；策略不存在抛 404', async () => {
     const stored = seedStrategy({ status: 'done', metrics: fakeBt().metrics });
-    store.getStrategy.mockReturnValue(stored);
+    store.getStrategy.mockResolvedValue(stored);
 
-    const report = svc.getReport('sx');
+    const report = await svc.getReport(USER, 'sx');
     expect(Object.keys(report).sort()).toEqual(['benchCurve', 'curve', 'holdings', 'metrics']);
     expect(report.metrics).toEqual(fakeBt().metrics);
 
-    store.getStrategy.mockReturnValue(undefined);
-    await expectApiError(() => svc.getReport('nope'), 404, 'NOT_FOUND');
+    store.getStrategy.mockResolvedValue(undefined);
+    await expectApiError(() => svc.getReport(USER, 'nope'), 404, 'NOT_FOUND');
   });
 });
