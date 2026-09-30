@@ -5,6 +5,7 @@ import { AppModule } from './app.module';
 import { ApiException } from './common/api.exception';
 import { ApiErrorFilter } from './common/api-error.filter';
 import { FileConsoleLogger } from './common/file-console.logger';
+import { HttpAccessInterceptor } from './common/http-access.interceptor';
 
 async function bootstrap() {
   // bufferLogs：启动期间的日志先缓存，useLogger 挂上文件日志器时自动冲刷落盘
@@ -15,6 +16,8 @@ async function bootstrap() {
   app.enableCors({ origin: true, credentials: true });
 
   app.useGlobalFilters(new ApiErrorFilter());
+  // 请求访问日志：每请求一行进 logs/backend/，"到没到后端"一锤定音
+  app.useGlobalInterceptors(new HttpAccessInterceptor());
 
   app.useGlobalPipes(
     new ValidationPipe({

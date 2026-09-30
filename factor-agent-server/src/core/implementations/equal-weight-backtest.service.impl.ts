@@ -131,6 +131,34 @@ export class EqualWeightBacktestServiceImpl extends EqualWeightBacktestService {
       benchCurve: aggregate.benchCurve,
       benchName: bench.name,
       metrics: toBacktestMetricItems(aggregate),
+      // 本次回测真实参数（前端"回测参数"块按卡片渲染，不再显示策略页配置项）
+      params: [
+        {
+          label: '回测区间',
+          value: `${toDashDate(Number(p.startDate))} ~ ${toDashDate(Number(p.endDate))}`,
+          hint: `因子交易日范围内的实际回测起止（因子表可用区间 ${coverage.min}~${coverage.max}）`,
+        },
+        {
+          label: '调仓频率',
+          value: `${frequencyLabel} · ${rebalanceDates.length} 期`,
+          hint: '区间内交易日按频率分组，每组最后一个交易日调仓',
+        },
+        {
+          label: '每期持仓',
+          value: `≤${p.topK} 只`,
+          hint: '各因子截面分位数等权合成综合分，按综合分取前 K 等权；可入选不足 K 时不补齐',
+        },
+        {
+          label: '业绩基准',
+          value: bench.name,
+          hint: `指数日收盘对齐组合交易日（数据表 ${INDEX_TABLE}）`,
+        },
+        {
+          label: '交易费用',
+          value: '未计',
+          hint: '收益未扣手续费/滑点；换手为单边口径（上期持仓 − 两期重叠）÷ 上期持仓',
+        },
+      ],
     };
     const summary = {
       ok: true,

@@ -61,7 +61,8 @@ function AgentCardView({ card, saved, onSave, onAskBacktest, onAskOptimize, noti
         <PerfChart curve={card.curve} benchCurve={card.benchCurve} benchName={card.benchName} />
         <MetricGrid metrics={card.metrics} />
         <div className="agent-card-text">{card.note}</div>
-        <ParamsBlock />
+        {/* 本次回测真实参数；旧卡片无 params 时回退策略配置项 */}
+        <ParamsBlock items={card.params} />
       </>
     );
   } else if (card.type === "report") {
@@ -153,13 +154,22 @@ function MessageRow({ m, saved, onSave, onAskBacktest, onAskOptimize, notify }: 
   );
 }
 
-function TypingRow() {
+function TypingRow({ steps }: { steps?: { stage: string; ok?: boolean }[] }) {
   return (
     <div className="msg agent">
       <div className="msg-avatar"><IconLogo size={18} /></div>
       <div className="msg-content">
         <div className="msg-bubble">
           <div className="typing"><i /><i /><i /></div>
+          {steps && steps.length > 0 && (
+            <div className="chat-steps">
+              {steps.map((s, i) => (
+                <span className={`chat-step ${s.ok === true ? "ok" : s.ok === false ? "bad" : ""}`} key={i}>
+                  {s.stage}<em>{s.ok === true ? "✓" : s.ok === false ? "✕" : "…"}</em>
+                </span>
+              ))}
+            </div>
+          )}
         </div>
       </div>
     </div>
@@ -172,6 +182,8 @@ export function ChatPage(props: {
   conversations: Conversation[];
   currentId: string;
   typingId: string | null;
+  /** 在途消息的流式过程步骤（SSE 节点级事件，见 useConversations） */
+  live?: { convId: string; steps: { stage: string; ok?: boolean }[] } | null;
   loading: boolean;
   savedCardIds: string[];
   notify: (m: string) => void;
@@ -184,18 +196,19 @@ export function ChatPage(props: {
   onGotoStrategies: () => void;
 }) {
   const {
-    conversations, currentId, typingId, loading, savedCardIds, notify,
+    conversations, currentId, typingId, live, loading, savedCardIds, notify,
     onCreate, onSwitch, onDelete, onClear, onSubmit, onSaveStrategy, onGotoStrategies,
   } = props;
   const current = conversations.find(c => c.id === currentId) ?? conversations[0];
   const inputRef = useRef<HTMLInputElement>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
   const typingHere = current ? typingId === current.id : false;
+  const liveSteps = typingHere && live && live.convId === current?.id ? live.steps : undefined;
 
   useEffect(() => {
     const el = bodyRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [current?.messages.length, typingHere]);
+  }, [current?.messages.length, typingHere, liveSteps?.length]);
 
   const send = () => {
     const text = inputRef.current?.value.trim();
@@ -269,7 +282,7 @@ export function ChatPage(props: {
                 onAskOptimize={() => onSubmit("请求优化建议")}
               />
             ))}
-            {typingHere && <TypingRow />}
+            {typingHere && <TypingRow steps={liveSteps} />}
           </div>
         </div>
 

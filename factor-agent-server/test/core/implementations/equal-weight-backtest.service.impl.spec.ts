@@ -291,6 +291,16 @@ describe('EqualWeightBacktestServiceImpl（全流程 stub，不触库）', () =>
     expect(card.metrics.map((m) => m.label)).toEqual(['年化收益', '最大回撤', '夏普比率', '胜率', '年化换手(单边)']);
     expect(card.benchName).toBe('沪深300');
 
+    // 卡片携带本次回测真实参数（前端"回测参数"块按卡片渲染，不显示策略页配置项）
+    const labels = card.params?.map((p) => p.label) ?? [];
+    expect(labels).toEqual(['回测区间', '调仓频率', '每期持仓', '业绩基准', '交易费用']);
+    const byLabel = Object.fromEntries((card.params ?? []).map((p) => [p.label, p]));
+    expect(byLabel['回测区间']?.value).toBe('2024-01-02 ~ 2024-03-29'); // baseInput 区间转短横线日期
+    expect(byLabel['调仓频率']?.value).toBe('每月 · 3 期');
+    expect(byLabel['每期持仓']?.value).toBe('≤2 只');
+    expect(byLabel['业绩基准']?.value).toBe('沪深300');
+    expect(byLabel['交易费用']?.value).toBe('未计');
+
     expect(summary.调仓期数).toBe(3);
     expect(summary.因子).toContain('EBIT');
     expect(summary.因子).toContain('EBITDA（升序，值小优）');

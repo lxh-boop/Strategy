@@ -10,14 +10,15 @@ export function logRootDir(): string {
 /* ==========================================================
    全局日志器：控制台输出沿用 NestJS ConsoleLogger，同时把每条日志按天追加落盘。
 
-     文件位置：logs/app-YYYY-MM-DD.log（目录见 logRootDir）
+     文件位置：logs/backend/YYYY-MM-DD.log（目录见 logRootDir，前后端日志分文件夹）
      行格式： [YYYY-MM-DD HH:mm:ss] [级别] [上下文] 正文（error 的异常栈随行附加）
 
    main.ts 里 app.useLogger() 后全局生效——各处 new Logger(context) 的输出
-   （含智能体 agent/tools 节点日志）都会同时进控制台和日志文件。
+   （含智能体 agent/tools 节点日志与 HttpAccess 访问日志）都会同时进控制台和日志文件。
+   前端上报日志另落 logs/frontend/YYYY-MM-DD.log（common/client-log.ts），互不混写。
    ========================================================== */
 export class FileConsoleLogger extends ConsoleLogger {
-  private readonly logDir = logRootDir();
+  private readonly logDir = join(logRootDir(), 'backend');
 
   constructor() {
     super();
@@ -60,7 +61,7 @@ export class FileConsoleLogger extends ConsoleLogger {
       ...(stack ? [stack] : []),
     ];
     try {
-      appendFileSync(join(this.logDir, `app-${day}.log`), lines.join('\n') + '\n');
+      appendFileSync(join(this.logDir, `${day}.log`), lines.join('\n') + '\n');
     } catch {
       // 磁盘满/权限等写不进去就算了，日志器自身不能成为新的故障源
     }

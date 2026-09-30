@@ -14,7 +14,7 @@
 | API-04 | DELETE `/api/conversations/:id` | 删除会话 | 待认领 | ✅ 已实现<br>**功能**：删除会话，成功返回 204<br>**参数**：路径参数 `id`<br>**依赖接口**：B-INT-01（remove）→ SVC-D08 | f0388f2（2026-09-28） |
 | API-05 | POST `/api/conversations/:id/clear` | 清空会话（保留会话，恢复欢迎语、标题重置） | 待认领 | ✅ 已实现<br>**功能**：清空会话：保留会话本体、恢复欢迎语、标题重置<br>**参数**：路径参数 `id`<br>**依赖接口**：B-INT-01（clear）→ SVC-D09 | f0388f2（2026-09-28） |
 | API-06 | GET `/api/conversations/:id/messages` | 拉取历史消息（列表已带全量，留给分页场景） | 待认领 | ✅ 已实现<br>**功能**：拉取会话历史消息<br>**参数**：路径参数 `id`<br>**依赖接口**：B-INT-01（getMessages）→ SVC-D06 | f0388f2（2026-09-28） |
-| API-07 | POST `/api/conversations/:id/messages` | **发消息（核心链路）**：调智能体，返回 `{userMessage, agentMessage}`，agent 消息可含卡片；M11 将改造为 SSE 流式 | 待认领 | ✅ 已实现<br>**功能**：发消息核心链路：校验 → 调智能体 → 落库命名，返回 `{userMessage, agentMessage}`，可含 report/backtest/stocks 卡片<br>**参数**：路径 `id` + Body `{ text }`（必填，≤2000 字）<br>**依赖接口**：B-INT-01（sendMessage）→ SVC-C01（智能体）+ SVC-D10 / SVC-D11（落库 / 命名） | f0388f2（2026-09-28） |
+| API-07 | POST `/api/conversations/:id/messages` | **发消息（核心链路）**：调智能体，返回 `{userMessage, agentMessage}`，agent 消息可含卡片；流式形态见 API-25 | 待认领 | ✅ 已实现<br>**功能**：发消息核心链路：校验 → 调智能体 → 落库命名，返回 `{userMessage, agentMessage}`，可含 report/backtest/stocks 卡片<br>**参数**：路径 `id` + Body `{ text }`（必填，≤2000 字）<br>**依赖接口**：B-INT-01（sendMessage）→ SVC-C01（智能体）+ SVC-D10 / SVC-D11（落库 / 命名） | f0388f2（2026-09-28） |
 | API-08 | GET `/api/strategies` | 策略列表（含曲线、指标、持仓） | 待认领 | ✅ 已实现<br>**功能**：策略列表，含曲线、指标、持仓<br>**参数**：无<br>**依赖接口**：B-INT-02（list）→ SVC-D01 | f0388f2（2026-09-28） |
 | API-09 | POST `/api/strategies` | 创建策略（草稿）；对话卡片"保存为我的策略"也走此接口 | 待认领 | ✅ 已实现<br>**功能**：创建策略（草稿）<br>**参数**：Body `{ name（必填）; factors ≥1 项 [{name, weight≥0}]（必填）; universe? / rebalance? / benchmark?（可选）}`<br>**依赖接口**：B-INT-02（create）→ SVC-D03 | f0388f2（2026-09-28） |
 | API-10 | PATCH `/api/strategies/:id` | 更新配置 = **保存并自动重新回测**，返回更新后完整 Strategy | 待认领 | ✅ 已实现<br>**功能**：更新配置 = 保存并自动重新回测，返回更新后完整 Strategy<br>**参数**：路径 `id` + Body 全部可选 `{ name? / universe? / rebalance? / benchmark? / factors?（≥1 项）}`<br>**依赖接口**：B-INT-02（update）→ SVC-D03 + SVC-D19（回测）+ SVC-D21（normalizeWeights） | f0388f2（2026-09-28） |
@@ -49,3 +49,10 @@
 | API-20 | GET `/api/strategies/:id/report/export` | 回测报告导出 PDF | 待认领 | ⬜ 未实现 | |
 
 > **预留编号段**：API-25 起为新接口追加位，新增接口按序顺延，不回收、不复用。
+
+## 新增接口（API-25 ~）
+
+| 编号 | 接口 | 说明 | 负责人 | 状态 | 完成提交/日期 |
+|---|---|---|---|---|---|
+| API-25 | POST `/api/conversations/:id/chat/stream` | 发消息流式：SSE 推节点级过程事件 | chenhaotao | ✅ 已实现<br>**功能**：发消息流式：事件序列 start → tool_call/tool_result* → final（final 响应体与 API-07 完全一致），失败走 error 帧收尾；HTTP 恒 200；不做 token 级推理流式（粒度=图节点/工具）<br>**参数**：路径 `id` + Body `{ text }`（同 API-07）；EventSource 不支持 POST，前端须 fetch 读流；客户端中断不影响落库<br>**依赖接口**：B-INT-01（sendMessageStream）→ SVC-C01（replyStream） | 6655f33（2026-09-30）；前端已接入（api.ts sendMessageStream + ChatPage 过程步骤） |
+| API-26 | POST `/api/client-logs` | 前端日志上报落盘 | chenhaotao | ✅ 已实现<br>**功能**：前端日志上报：校验后追加写入 `logs/frontend/YYYY-MM-DD.log`（与后端 `logs/backend/` 分文件夹）；公开接口（登录前报错也要能收）；前端侧限流 30 条/分钟 + 10s 去重<br>**参数**：Body `{ level(error/warn/info 必填), message(≤2000 必填), detail?(对象), page?(≤200) }`，返回 `{ok:true}`<br>**依赖接口**：无（common/client-log.ts 直写文件） | 2026-09-30（前端 reportClientLog + 全局钩子已埋） |

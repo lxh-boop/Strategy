@@ -91,8 +91,16 @@ const StrategyGraphState = Annotation.Root({
   backtestFreq: Annotation<string>,
   /** 回测产物卡片：tools 节点执行 run_equal_weight_backtest 成功时写入，reply() 收尾取出放进
    *  AgentReply——卡片绕过 LLM 直达前端，模型只拿指标摘要写文案。
-   *  last-write-wins：同一次图执行内多次回测以最后一次为准 */
+   *  last-write-wins：同一次图执行内多次回测以最后一次为准（作"未指定展示哪次"时的默认卡） */
   card: Annotation<AgentCard | undefined>,
+  /** 回合内卡片登记表：card_N → 卡片。tools 节点每成功一次回测登记一张并把编号写进回执；
+   *  模型可在最终文案末尾用【展示卡片:card_N】指定展示哪一次（多次回测择优，runGraph 收尾
+   *  解析选择，标记行剔除后不展示给用户）；未标记/编号无效 → 落回 card 通道的默认卡。
+   *  信任边界：注册表只存后端产出的真卡，模型仅能引用编号，无法注入或篡改卡片内容 */
+  cardRegistry: Annotation<Record<string, AgentCard>>({
+    reducer: (a, b) => ({ ...a, ...b }),
+    default: () => ({}),
+  }),
   /** 过程事件接收端：replyStream() 发起时一次性写入，agent/tools 节点在日志埋点处同步发事件。
    *  不设 reducer（节点不返回它，一直保持初值）；不发起流式时为 undefined，节点侧全部可选调用 */
   onProgress: Annotation<AgentProgressSink | undefined>,
@@ -156,7 +164,7 @@ export class LangGraphAgentService extends AgentService {
       this.llm = new ChatOpenAI({
         apiKey,
         modelName: model,
-        temperature: 0.6,
+        temperature: 0.1,
         // 推理模型（如 glm-5.3-flash）的 reasoning_content 与正文/工具调用共用 max_tokens，
         // 给足余量，避免思考爆发时正文被截成空
         maxTokens: 16_384,
@@ -201,13 +209,21 @@ export class LangGraphAgentService extends AgentService {
         const additions: BaseMessage[] = [];
         let card: AgentCard | undefined;
         let backtestFreq: string | undefined;
+        // 回合内卡片登记表：编号 = 既有张数 + 1，跨多次 tools 节点执行经 reducer 累积
+        const registry = { ...(state.cardRegistry ?? {}) };
         for (const call of last.tool_calls ?? []) {
           const runner = this.toolRunners[call.name];
           const outcome = runner
             ? await this.guard(() => runner(call.args))
             : { result: { error: `未知工具: ${call.name}` } };
           additions.push(new ToolMessage({ content: JSON.stringify(outcome.result), tool_call_id: call.id ?? '' }));
-          if (outcome.card) card = outcome.card; // 回测失败时无卡片，保持上一次的值也无妨（reply 只在本次执行收尾取一次）
+          if (outcome.card) {
+            card = outcome.card; // 回测失败时无卡片，保持上一次的值也无妨（默认展示卡取最后一次成功）
+            const cardId = `card_${Object.keys(registry).length + 1}`;
+            registry[cardId] = outcome.card;
+            // 回执带编号：模型可在最终文案用【展示卡片:card_N】择优指定展示哪一次（多次回测场景）
+            outcome.result['卡片编号'] = cardId;
+          }
           if (outcome.backtestFreq) backtestFreq = outcome.backtestFreq;
           const line = `tools节点 ${call.name}(${toLogPreview(call.args)}) => ${this.toolResultPreview(call.name, outcome.result)}`;
           this.logger.log(line);
@@ -220,7 +236,12 @@ export class LangGraphAgentService extends AgentService {
             detail: this.toolEventDetail(call.name, outcome.result),
           });
         }
-        return { messages: additions, ...(card ? { card } : {}), ...(backtestFreq ? { backtestFreq } : {}) };
+        return {
+          messages: additions,
+          ...(card ? { card } : {}),
+          ...(backtestFreq ? { backtestFreq } : {}),
+          cardRegistry: registry,
+        };
       })
       .addEdge(START, 'agent')
       .addConditionalEdges('agent', (state: StrategyGraphStateType) => {
@@ -271,7 +292,14 @@ export class LangGraphAgentService extends AgentService {
       const last = state.messages[state.messages.length - 1] as AIMessage;
       const text = extractText(last).trim();
       if (!text) throw new LlmTextError('返回内容为空');
-      return state.card ? { text, card: state.card } : { text };
+      // 多次回测择优：模型用【展示卡片:card_N】指定展示哪一次；未指定/编号无效 → 最后一次成功的
+      const picked = applyCardSelection(text, state.cardRegistry ?? {}, state.card);
+      if (picked.markerId) {
+        this.logger.log(
+          `最终展示卡片: ${picked.markerId}${picked.card ? '' : '（编号无效，回落默认）'}，文案标记行已剔除`,
+        );
+      }
+      return picked.card ? { text: picked.text, card: picked.card } : { text: picked.text };
     } catch (error) {
       const reply = this.errorReply(error, conversation.id);
       onProgress?.({ type: 'error', message: reply.text });
@@ -454,6 +482,7 @@ export class LangGraphAgentService extends AgentService {
       '回复规则：',
       '- 最终回复不超过 90 字，只能引用工具返回的数据，严禁编造数字或个股，不输出 JSON，结尾用短句提醒不构成投资建议；',
       '- 工具回执含"需要澄清"时，按其中"行动"指引向用户提问，不要当作错误转述；',
+      '- 本回合跑了多次回测时，每份回执带「卡片编号」：按用户意图选最符合的一次（如优化场景选指标最优的），在回复最末尾单独一行写【展示卡片:card_N】指定展示哪次（该行不会展示给用户）；只回测了一次则不写；',
       '- 查询无数据行时如实告知，不要编造；',
       '- 与因子数据无关的问候或闲聊：直接简短回复（不超过 90 字），不要调用工具。',
     ].join('\n');
@@ -479,6 +508,21 @@ export function formatTableCatalog(catalog: FactorTableInfo[]): string {
     return `- ${t.table}（${t.title}）：${t.description}${key}`;
   });
   return ['【数据表目录】（与 list_factor_tables 返回一致，无需再调用该工具）', ...lines].join('\n');
+}
+
+/** 多次回测择优：从最终文案解析【展示卡片:card_N】标记（兼容全角/半角冒号与空格）——
+ *  命中注册表 → 用该卡并剔除标记行（不展示给用户）；编号无效 → 落回默认卡但同样剔除；
+ *  未标记 → 原样返回默认卡（= 最后一次成功的回测）。标记行剔除失败不存在的情形不存在：
+ *  正则命中才剔除。markerId 供日志观测（选了哪张/是否回落） */
+export function applyCardSelection(
+  text: string,
+  registry: Record<string, AgentCard>,
+  defaultCard?: AgentCard,
+): { text: string; card?: AgentCard; markerId?: string } {
+  const marker = /【\s*展示卡片\s*[:：]\s*(card_\d+)\s*】/.exec(text);
+  if (!marker) return { text, card: defaultCard };
+  const markerId = marker[1];
+  return { text: text.replace(marker[0], '').trim(), card: registry[markerId] ?? defaultCard, markerId };
 }
 
 /** AIMessage.content 兼容 string / 内容块数组；正文为空时兜底退回推理模型的思考内容 */

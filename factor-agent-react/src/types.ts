@@ -44,6 +44,10 @@ export interface BacktestCard extends CardBase {
   benchCurve: number[];
   benchName?: string;
   metrics: MetricItem[];
+  /** 本次回测实际使用的参数（真实口径，后端 TOOL-C07 产出）：
+   *  回测区间 / 调仓频率·期数 / 每期持仓 / 业绩基准 / 交易费用；
+   *  缺省（历史消息旧卡片）时前端回退显示策略配置项 */
+  params?: BtParamItem[];
 }
 
 export interface ReportCard extends CardBase {
@@ -84,6 +88,14 @@ export interface Conversation {
   messages: ChatMessage[];
   updatedAt: number;
 }
+
+/* ----- 发消息流式过程事件（SSE 节点级推送，契约 §3.1 chat/stream） -----
+   粒度 = 工具调用的开始与结果，不做 token 级推理流式；
+   stage 为工具中文名（可直接展示），最终回复以 final 事件为准 */
+export type ChatProgressEvent =
+  | { type: "start" }
+  | { type: "tool_call"; name: string; stage: string; args: string }
+  | { type: "tool_result"; name: string; stage: string; ok: boolean; detail: string };
 
 /* ----- 策略 ----- */
 export type StrategyStatus = "running" | "done" | "draft";

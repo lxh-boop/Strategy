@@ -13,7 +13,7 @@
 | TOOL-C04 | `list_factor_tables()` | LLM 工具：返回 `SQL/tables.md` 表目录（表名/中文名/说明/唯一键）；选取因子前必须先调用 | chenhaotao | ✅ 已实现 | 345a98f（2026-09-29） |
 | TOOL-C05 | `list_factor_fields(tables[])` | LLM 工具：按表名列表（可多表）返回字段明细（字段名/中文名/类型/可空/描述）；表名必须来自 TOOL-C04，非法表进 notFound 并附可用表 | chenhaotao | ✅ 已实现 | 345a98f（2026-09-29） |
 | TOOL-C06 | `read_factor_data(table, fields[], date, security)` | LLM 工具：调 SVC-D22 查库并把行 JSON 回给模型；显式四参数，格式/白名单由 SVC-D22 校验 | chenhaotao | ✅ 已实现 | 345a98f（2026-09-29） |
-| TOOL-C07 | `run_equal_weight_backtest(factors[], startDate, endDate, frequency, everyNTd?, topK?, benchmark?)` | LLM 工具：选完因子后直接**多因子等权合成**回测出净值卡片（各因子截面分位数等权平均成综合分，按综合分 Top-K；每因子可带 order 方向；无需先用 TOOL-C06 抽样验证数据）。调 SVC-D24；卡片走图状态 card 通道绕过 LLM，模型只拿指标摘要；**frequency 必填无默认值**（weekly/biweekly/monthly/quarterly/semiannual/annual/custom+everyNTd 5~120），缺失时返回澄清指引给模型、由模型向用户追问（非错误转述） | chenhaotao | ✅ 已实现 | ae87773（2026-09-29） |
+| TOOL-C07 | `run_equal_weight_backtest(factors[], startDate, endDate, frequency, everyNTd?, topK?, benchmark?)` | LLM 工具：选完因子后直接**多因子等权合成**回测出净值卡片（各因子截面分位数等权平均成综合分，按综合分 Top-K；每因子可带 order 方向；无需先用 TOOL-C06 抽样验证数据）。调 SVC-D24；卡片走图状态 card 通道绕过 LLM，模型只拿指标摘要**frequency 必填无默认值**（weekly/biweekly/monthly/quarterly/semiannual/annual/custom+everyNTd 5~120），缺失时返回澄清指引给模型、由模型向用户追问（非错误转述） | chenhaotao | ✅ 已实现 | ae87773（2026-09-29）；2026-09-30 多次回测登记 card_N，模型【展示卡片:card_N】择优指定展示哪次（默认=最后一次成功，标记行剔除不展示，中间尝试仅留日志审计，卡片仍绕过 LLM 直传） |
 | C-INT-01 | `loadFactorKnowledge(): string` | **已废弃（2026-09-29）**：`docs/factors.md` 删除，因子知识改由 `SQL/` 字典 + SVC-D22 配套解析按需加载（TOOL-C04/C05） | chenhaotao | ➖ 废弃 | 345a98f（2026-09-29） |
 
 ## 智谱直连客户端（模块 C 提供）
@@ -22,7 +22,7 @@
 |---|---|---|---|---|---|
 | SVC-Z01 | `ZhipuService.configured` / `defaultModel` | Key 是否配置、当前模型名（API-01 的数据源） | 待认领 | ⬜ 未实现 | |
 | SVC-Z02 | `ZhipuService.chat(messages, options)` | 智谱直连 chat（主链路不经此，agent 用 LangChain ChatOpenAI 直连） | 待认领 | ⬜ 未实现 | |
-| SVC-Z03 | `ZhipuService.chatStream(messages, options)` | 流式直连，为 SSE 流式回复预留 | 待认领 | ⬜ 未实现 | |
+| SVC-Z03 | `ZhipuService.chatStream(messages, options)` | 流式直连（推理 token 级），为 SSE 流式回复预留 | 待认领 | ➖ 暂缓 | 2026-09-30 拍板：流式粒度=节点级过程事件（API-25），推理流式不启用 |
 
 ## 核心领域层（模块 D 提供）
 

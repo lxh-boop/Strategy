@@ -4,6 +4,7 @@ import { APP_GUARD } from '@nestjs/core';
 import configuration from './config/configuration';
 import { AppController } from './app.controller';
 import { JwtAuthGuard } from './common/jwt-auth.guard';
+import { ClientLogsController } from './common/client-logs.controller';
 import { CoreModule } from './core/core.module';
 import { ZhipuModule } from './zhipu/zhipu.module';
 import { AgentModule } from './agent/agent.module';
@@ -28,7 +29,7 @@ import { UserModule } from './user/user.module';
     MarketModule,
     UserModule,
   ],
-  controllers: [AppController],
+  controllers: [AppController, ClientLogsController],
   // M13：全局 JWT 守卫，默认全部接口需要登录，@Public() 豁免
   providers: [{ provide: APP_GUARD, useClass: JwtAuthGuard }],
 })

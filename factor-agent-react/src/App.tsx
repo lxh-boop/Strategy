@@ -170,6 +170,7 @@ function MainApp({ user }: { user: UserPublic }) {
               conversations={conv.conversations}
               currentId={conv.currentId}
               typingId={conv.typingId}
+              live={conv.live}
               loading={conv.loading}
               savedCardIds={savedCardIds}
               notify={notify}

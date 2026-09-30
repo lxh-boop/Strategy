@@ -1,5 +1,5 @@
 import { useEffect, type ReactNode } from "react";
-import type { MetricItem } from "../types";
+import type { BtParamItem, MetricItem } from "../types";
 import { useConfig } from "../config";
 
 /* 通用弹窗：遮罩点击 / Esc 关闭 */
@@ -38,14 +38,17 @@ export function MetricGrid({ metrics }: { metrics: MetricItem[] }) {
   );
 }
 
-/* 回测参数说明（悬停查看口径）；参数项由后端 GET /api/backtest-params 下发 */
-export function ParamsBlock() {
+/* 回测参数说明（悬停查看口径）：
+   - 缺省（策略页/旧卡片）：显示 GET /api/backtest-params 下发的配置项；
+   - 传入 items（智能体回测卡片）：显示本次回测真实使用的参数（后端 TOOL-C07 产出） */
+export function ParamsBlock({ items }: { items?: BtParamItem[] }) {
   const { btParams } = useConfig();
+  const rows = items && items.length > 0 ? items : btParams;
   return (
     <>
       <div className="btp-title">回测参数（悬停查看口径）</div>
       <div className="bt-params">
-        {btParams.map(p => (
+        {rows.map(p => (
           <div className="btp-item" key={p.label} title={p.hint}>
             <div className="btp-label">{p.label}</div>
             <div className="btp-val">{p.value}</div>

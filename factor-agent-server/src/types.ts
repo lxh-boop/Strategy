@@ -44,6 +44,9 @@ export interface BacktestCard extends CardBase {
   benchCurve: number[];
   benchName?: string;
   metrics: MetricItem[];
+  /** 本次回测实际使用的参数（真实口径，区别于 GET /backtest-params 下发的策略配置项）：
+   *  回测区间 / 调仓频率·期数 / 每期持仓 / 业绩基准 / 交易费用，前端回测卡片按行渲染 */
+  params?: { label: string; value: string; hint?: string }[];
 }
 
 export interface ReportCard extends CardBase {
