@@ -3,7 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage } from '@langchain/core/messages';
 import { Annotation, END, START, StateGraph } from '@langchain/langgraph';
 import { ChatOpenAI } from '@langchain/openai';
-import { AgentCard, AgentReply, ChatMessage, Conversation } from '../../types';
+import { AgentCard, AgentProgressSink, AgentReply, ChatMessage, Conversation } from '../../types';
 import { ApiException } from '../../common/api.exception';
 import { appendConversationLog } from '../../common/conversation-log';
 import {
@@ -12,9 +12,23 @@ import {
   EqualWeightBacktestService,
 } from '../../core/equal-weight-backtest.service';
 import { FactorDataService } from '../../core/factor-data.service';
-import { FactorFieldInfo, loadTableCatalog, loadTableFieldDetails } from '../../core/factor-schema';
+import {
+  FactorFieldInfo,
+  FactorTableInfo,
+  loadTableCatalog,
+  loadTableFieldDetails,
+  loadTableFields,
+} from '../../core/factor-schema';
 import { AgentService } from '../agent.service';
 import { AGENT_TOOL_SPECS, ListFactorFieldsArgs, ReadFactorDataArgs } from './tool-specs';
+
+/** 工具 → 进度事件里的阶段名（前端可直接展示的中文） */
+const TOOL_STAGE: Record<string, string> = {
+  list_factor_tables: '查看数据表',
+  list_factor_fields: '查看因子字段',
+  read_factor_data: '读取因子数据',
+  run_equal_weight_backtest: '等权回测计算',
+};
 
 /* ==========================================================
    智能体实现：LangGraph tool-calling，四个工具构成
@@ -28,7 +42,9 @@ import { AGENT_TOOL_SPECS, ListFactorFieldsArgs, ReadFactorDataArgs } from './to
         ▼
      最终文案（只能引用工具返回的数据）
 
-   - 表与字段知识全部按需加载（工具返回），prompt 不常驻任何表名字段名；
+   - 表目录原文照录注入 system prompt，仅对"数据会话"常驻（执行过任一因子工具的会话，
+     见 dataConversations：只进不出，进程重启重置）——数据会话首轮仍走 list_factor_tables
+     探索，从下一轮起免探索直达字段/读数/回测；字段知识仍按需经 list_factor_fields 加载；
    - 白名单由服务端两道闸保证：list 工具校验表名，readTable 内部全量校验；
    - 工具执行走注册表（toolRunners）按名分发、guard() 统一兜底：
      澄清信号（ClarificationSignal）引导模型向用户提问，ApiException 原因给模型自纠；
@@ -75,8 +91,19 @@ const StrategyGraphState = Annotation.Root({
   backtestFreq: Annotation<string>,
   /** 回测产物卡片：tools 节点执行 run_equal_weight_backtest 成功时写入，reply() 收尾取出放进
    *  AgentReply——卡片绕过 LLM 直达前端，模型只拿指标摘要写文案。
-   *  last-write-wins：同一次图执行内多次回测以最后一次为准 */
+   *  last-write-wins：同一次图执行内多次回测以最后一次为准（作"未指定展示哪次"时的默认卡） */
   card: Annotation<AgentCard | undefined>,
+  /** 回合内卡片登记表：card_N → 卡片。tools 节点每成功一次回测登记一张并把编号写进回执；
+   *  模型可在最终文案末尾用【展示卡片:card_N】指定展示哪一次（多次回测择优，runGraph 收尾
+   *  解析选择，标记行剔除后不展示给用户）；未标记/编号无效 → 落回 card 通道的默认卡。
+   *  信任边界：注册表只存后端产出的真卡，模型仅能引用编号，无法注入或篡改卡片内容 */
+  cardRegistry: Annotation<Record<string, AgentCard>>({
+    reducer: (a, b) => ({ ...a, ...b }),
+    default: () => ({}),
+  }),
+  /** 过程事件接收端：replyStream() 发起时一次性写入，agent/tools 节点在日志埋点处同步发事件。
+   *  不设 reducer（节点不返回它，一直保持初值）；不发起流式时为 undefined，节点侧全部可选调用 */
+  onProgress: Annotation<AgentProgressSink | undefined>,
   /** 对话消息流：本图的核心通道。
    *  reducer 必须用 concat 而不是覆盖——agent 节点每轮只返回 1 条 AIMessage（含工具调用
    *  或最终文本），tools 节点返回 N 条 ToolMessage（每个工具调用一条回执），靠 concat
@@ -105,12 +132,28 @@ export class LangGraphAgentService extends AgentService {
     invoke(state: Partial<StrategyGraphStateType>, config?: { recursionLimit?: number }): Promise<StrategyGraphStateType>;
   } | null;
 
+  /** 数据会话门：执行过任一因子工具的会话 id —— 此类会话的 system prompt 注入表目录原文，
+   *  模型免"看表"探索；纯闲聊会话永不注入。只进不出：进入有"调了工具"的可靠信号，退出没有
+   *  （某轮闲聊不代表后续不查数），且误留只多几百输入 token、误摘要多付一轮探索；
+   *  进程重启清空，各数据会话首轮重新探索即自愈 */
+  private readonly dataConversations = new Set<string>();
+
   constructor(
     config: ConfigService,
     private readonly factorData: FactorDataService,
     private readonly backtest: EqualWeightBacktestService,
   ) {
     super();
+    // 漂移检查（启动一次）：tables.md 已登记但 <表名>.md 字典缺失/无字段行的表，提醒补齐
+    const catalog = loadTableCatalog();
+    if (!catalog.length) {
+      this.logger.warn('表目录不可读（SQL/tables.md 缺失或为空），system prompt 目录注入将禁用');
+    } else {
+      const missing = catalog.filter((t) => (loadTableFields(t.table) ?? new Set<string>()).size === 0);
+      if (missing.length) {
+        this.logger.warn(`以下表已登记但字段字典缺失或为空: ${missing.map((t) => t.table).join(', ')}`);
+      }
+    }
     const apiKey = config.get<string>('zhipu.apiKey') ?? '';
     const model = config.get<string>('zhipu.model') ?? 'glm-4-flash';
     const baseURL = config.get<string>('zhipu.baseUrl') ?? 'https://open.bigmodel.cn/api/paas/v4';
@@ -121,7 +164,7 @@ export class LangGraphAgentService extends AgentService {
       this.llm = new ChatOpenAI({
         apiKey,
         modelName: model,
-        temperature: 0.6,
+        temperature: 0.1,
         // 推理模型（如 glm-5.3-flash）的 reasoning_content 与正文/工具调用共用 max_tokens，
         // 给足余量，避免思考爆发时正文被截成空
         maxTokens: 16_384,
@@ -152,26 +195,53 @@ export class LangGraphAgentService extends AgentService {
           : `agent节点 → 最终回复: ${toLogPreview(extractText(output))}`;
         this.logger.log(line);
         appendConversationLog(state.conversationId, line);
+        // 进度事件：与日志同一埋点，参数只带短预览（前端示意用）
+        for (const c of calls) {
+          const stage = TOOL_STAGE[c.name] ?? c.name;
+          state.onProgress?.({ type: 'tool_call', name: c.name, stage, args: toEventPreview(c.args) });
+        }
         return { messages: [output] };
       })
       .addNode('tools', async (state: StrategyGraphStateType) => {
         const last = state.messages[state.messages.length - 1] as AIMessage;
+        // 会话门：任一工具调用（含失败重试）即证明是数据会话，后续轮注入表目录免探索
+        this.dataConversations.add(state.conversationId);
         const additions: BaseMessage[] = [];
         let card: AgentCard | undefined;
         let backtestFreq: string | undefined;
+        // 回合内卡片登记表：编号 = 既有张数 + 1，跨多次 tools 节点执行经 reducer 累积
+        const registry = { ...(state.cardRegistry ?? {}) };
         for (const call of last.tool_calls ?? []) {
           const runner = this.toolRunners[call.name];
           const outcome = runner
             ? await this.guard(() => runner(call.args))
             : { result: { error: `未知工具: ${call.name}` } };
           additions.push(new ToolMessage({ content: JSON.stringify(outcome.result), tool_call_id: call.id ?? '' }));
-          if (outcome.card) card = outcome.card; // 回测失败时无卡片，保持上一次的值也无妨（reply 只在本次执行收尾取一次）
+          if (outcome.card) {
+            card = outcome.card; // 回测失败时无卡片，保持上一次的值也无妨（默认展示卡取最后一次成功）
+            const cardId = `card_${Object.keys(registry).length + 1}`;
+            registry[cardId] = outcome.card;
+            // 回执带编号：模型可在最终文案用【展示卡片:card_N】择优指定展示哪一次（多次回测场景）
+            outcome.result['卡片编号'] = cardId;
+          }
           if (outcome.backtestFreq) backtestFreq = outcome.backtestFreq;
           const line = `tools节点 ${call.name}(${toLogPreview(call.args)}) => ${this.toolResultPreview(call.name, outcome.result)}`;
           this.logger.log(line);
           appendConversationLog(state.conversationId, line);
+          state.onProgress?.({
+            type: 'tool_result',
+            name: call.name,
+            stage: TOOL_STAGE[call.name] ?? call.name,
+            ok: !(outcome.result as { error?: unknown }).error,
+            detail: this.toolEventDetail(call.name, outcome.result),
+          });
         }
-        return { messages: additions, ...(card ? { card } : {}), ...(backtestFreq ? { backtestFreq } : {}) };
+        return {
+          messages: additions,
+          ...(card ? { card } : {}),
+          ...(backtestFreq ? { backtestFreq } : {}),
+          cardRegistry: registry,
+        };
       })
       .addEdge(START, 'agent')
       .addConditionalEdges('agent', (state: StrategyGraphStateType) => {
@@ -184,6 +254,22 @@ export class LangGraphAgentService extends AgentService {
 
   /** 运行智能体：文本回复必给；本次执行跑成过等权回测则附带净值卡片（卡片绕过 LLM） */
   async reply(conversation: Conversation, userText: string): Promise<AgentReply> {
+    return this.runGraph(conversation, userText, undefined);
+  }
+
+  /** reply 的流式形态：节点级过程事件（工具开始/结果、失败）经 onProgress 推送，
+   *  返回值与 reply() 完全一致——事件只是附加推送，最终结果以返回值为准 */
+  async replyStream(
+    conversation: Conversation,
+    userText: string,
+    routeText: string,
+    onProgress: AgentProgressSink,
+  ): Promise<AgentReply> {
+    void routeText; // 与 reply 同口径：路由上下文当前未参与模型输入
+    return this.runGraph(conversation, userText, onProgress);
+  }
+
+  private async runGraph(conversation: Conversation, userText: string, onProgress?: AgentProgressSink): Promise<AgentReply> {
     // ① 未配置 Key：开发模式，纯文本提示
     if (!this.app || !this.llm) {
       return { text: '当前为开发模式（未配置智谱 Key），因子查询功能需配置 ZHIPU_API_KEY 后使用。' };
@@ -193,10 +279,12 @@ export class LangGraphAgentService extends AgentService {
     try {
       this.logger.log(`图执行开始 会话=${conversation.id} 提问: ${toLogPreview(userText)}`);
       appendConversationLog(conversation.id, `提问: ${toLogPreview(userText)}`);
+      onProgress?.({ type: 'start' });
       const state = await this.app.invoke(
         {
           conversationId: conversation.id,
           userText,
+          onProgress,
           messages: this.prepareMessages(conversation, userText),
         },
         { recursionLimit: 15 },
@@ -204,9 +292,18 @@ export class LangGraphAgentService extends AgentService {
       const last = state.messages[state.messages.length - 1] as AIMessage;
       const text = extractText(last).trim();
       if (!text) throw new LlmTextError('返回内容为空');
-      return state.card ? { text, card: state.card } : { text };
+      // 多次回测择优：模型用【展示卡片:card_N】指定展示哪一次；未指定/编号无效 → 最后一次成功的
+      const picked = applyCardSelection(text, state.cardRegistry ?? {}, state.card);
+      if (picked.markerId) {
+        this.logger.log(
+          `最终展示卡片: ${picked.markerId}${picked.card ? '' : '（编号无效，回落默认）'}，文案标记行已剔除`,
+        );
+      }
+      return picked.card ? { text: picked.text, card: picked.card } : { text: picked.text };
     } catch (error) {
-      return this.errorReply(error, conversation.id);
+      const reply = this.errorReply(error, conversation.id);
+      onProgress?.({ type: 'error', message: reply.text });
+      return reply;
     }
   }
 
@@ -339,25 +436,57 @@ export class LangGraphAgentService extends AgentService {
     return `成功 形状=${rows.length}行×${cols}列`;
   }
 
+  /** 工具回执 → 进度事件的一行摘要（回测报关键指标、读数报行数、其余报规模或失败原因） */
+  private toolEventDetail(name: string, result: unknown): string {
+    const r = (result ?? {}) as Record<string, unknown>;
+    if (typeof r.error === 'string') return '失败：' + r.error.slice(0, 60);
+    if (name === 'read_factor_data' && Array.isArray(r.数据)) {
+      return r.数据.length ? `返回 ${r.数据.length} 行` : '无数据行';
+    }
+    if (name === 'run_equal_weight_backtest') {
+      return `${r.年化收益 ?? ''}，回撤 ${r.最大回撤 ?? ''}，换手 ${r.年化换手单边 ?? ''}`;
+    }
+    if (name === 'list_factor_tables' && Array.isArray(r.tables)) return `${r.tables.length} 张表`;
+    if (name === 'list_factor_fields' && Array.isArray(r.tables)) return `${r.tables.length} 张表的字段明细`;
+    return '完成';
+  }
+
   /* ----- 消息构造 ----- */
 
   private prepareMessages(conversation: Conversation, userText: string): BaseMessage[] {
-    const system = [
-      '你是"因子智投（AlphaSage）"多因子选股智能体，面向专业投资者，基于本地因子数据库回答数据问题。',
-      '工具流程：先 list_factor_tables 看有哪些表、list_factor_fields 看因子字段（表名/字段名只能来自这两个工具的返回，禁止凭记忆编造），' +
-      '再按需调用 read_factor_data 查单点数据、或 run_equal_weight_backtest 做多因子等权回测——各工具的参数含义与约束以工具 schema 为准。',
-      '回复规则：',
-      '- 最终回复不超过 90 字，只能引用工具返回的数据，严禁编造数字或个股，不输出 JSON，结尾用短句提醒不构成投资建议；',
-      '- 工具回执含"需要澄清"时，按其中"行动"指引向用户提问，不要当作错误转述；',
-      '- 查询无数据行时如实告知，不要编造；',
-      '- 与因子数据无关的问候或闲聊：直接简短回复（不超过 90 字），不要调用工具。',
-    ].join('\n');
-
     const history = conversation.messages.slice(-6).map((m: ChatMessage) =>
       m.role === 'agent' ? new AIMessage({ content: m.bubble }) : new HumanMessage({ content: m.bubble }),
     );
 
-    return [new SystemMessage({ content: system }), ...history, new HumanMessage({ content: userText })];
+    return [
+      new SystemMessage({ content: this.buildSystemPrompt(conversation.id) }),
+      ...history,
+      new HumanMessage({ content: userText }),
+    ];
+  }
+
+  /** system prompt：数据会话（执行过任一因子工具，见 dataConversations）在提示末尾注入表目录
+   *  原文，模型免"看表"探索直达字段/读数/回测；目录现读现拼（微秒级读盘），字典更新即时生效；
+   *  纯闲聊会话或目录不可读 → 回退 list_factor_tables 探索指令（工具保留作兜底） */
+  private buildSystemPrompt(conversationId: string): string {
+    const catalog = this.dataConversations.has(conversationId) ? loadTableCatalog() : [];
+    const flow = catalog.length
+      ? '工具流程：数据表目录已附在本提示末尾，直接从中选定数据表，再调 list_factor_fields 查看该表的因子字段' +
+        '（表名只能来自目录，字段名只能来自 list_factor_fields 的返回，禁止凭记忆编造），' +
+        '然后按需调用 read_factor_data 查单点数据、或 run_equal_weight_backtest 做多因子等权回测——各工具的参数含义与约束以工具 schema 为准。'
+      : '工具流程：先 list_factor_tables 看有哪些表、list_factor_fields 看因子字段（表名/字段名只能来自这两个工具的返回，禁止凭记忆编造），' +
+        '再按需调用 read_factor_data 查单点数据、或 run_equal_weight_backtest 做多因子等权回测——各工具的参数含义与约束以工具 schema 为准。';
+    const system = [
+      '你是"因子智投（AlphaSage）"多因子选股智能体，面向专业投资者，基于本地因子数据库回答数据问题。',
+      flow,
+      '回复规则：',
+      '- 最终回复不超过 90 字，只能引用工具返回的数据，严禁编造数字或个股，不输出 JSON，结尾用短句提醒不构成投资建议；',
+      '- 工具回执含"需要澄清"时，按其中"行动"指引向用户提问，不要当作错误转述；',
+      '- 本回合跑了多次回测时，每份回执带「卡片编号」：按用户意图选最符合的一次（如优化场景选指标最优的），在回复最末尾单独一行写【展示卡片:card_N】指定展示哪次（该行不会展示给用户）；只回测了一次则不写；',
+      '- 查询无数据行时如实告知，不要编造；',
+      '- 与因子数据无关的问候或闲聊：直接简短回复（不超过 90 字），不要调用工具。',
+    ].join('\n');
+    return catalog.length ? `${system}\n\n${formatTableCatalog(catalog)}` : system;
   }
 
   /** 从 LangChain 异常中提取上游可读原因（首行，截断到 120 字），如 "429 余额不足或无可用资源包,请充值." */
@@ -369,6 +498,31 @@ export class LangGraphAgentService extends AgentService {
       .filter(Boolean)[0] ?? '未知错误';
     return `调用返回「${firstLine.length > 120 ? firstLine.slice(0, 120) + '…' : firstLine}」`;
   }
+}
+
+/** 表目录 → system prompt 目录块：原文照录（表名/中文名/描述/唯一键），不压缩改写——
+ *  模型选表依据与 list_factor_tables 回执同源同文，注入不损失精度 */
+export function formatTableCatalog(catalog: FactorTableInfo[]): string {
+  const lines = catalog.map((t) => {
+    const key = t.uniqueKey ? ` 唯一键: ${t.uniqueKey}` : '';
+    return `- ${t.table}（${t.title}）：${t.description}${key}`;
+  });
+  return ['【数据表目录】（与 list_factor_tables 返回一致，无需再调用该工具）', ...lines].join('\n');
+}
+
+/** 多次回测择优：从最终文案解析【展示卡片:card_N】标记（兼容全角/半角冒号与空格）——
+ *  命中注册表 → 用该卡并剔除标记行（不展示给用户）；编号无效 → 落回默认卡但同样剔除；
+ *  未标记 → 原样返回默认卡（= 最后一次成功的回测）。标记行剔除失败不存在的情形不存在：
+ *  正则命中才剔除。markerId 供日志观测（选了哪张/是否回落） */
+export function applyCardSelection(
+  text: string,
+  registry: Record<string, AgentCard>,
+  defaultCard?: AgentCard,
+): { text: string; card?: AgentCard; markerId?: string } {
+  const marker = /【\s*展示卡片\s*[:：]\s*(card_\d+)\s*】/.exec(text);
+  if (!marker) return { text, card: defaultCard };
+  const markerId = marker[1];
+  return { text: text.replace(marker[0], '').trim(), card: registry[markerId] ?? defaultCard, markerId };
 }
 
 /** AIMessage.content 兼容 string / 内容块数组；正文为空时兜底退回推理模型的思考内容 */
@@ -384,6 +538,15 @@ function extractText(message: AIMessage): string {
 
 /** 节点日志单条内容的预览上限：超出截断并标注总字数，避免工具回执把日志刷爆 */
 const LOG_PREVIEW_LIMIT = 500;
+
+/** 进度事件里参数的预览上限（比日志更短，前端示意即可） */
+const EVENT_PREVIEW_LIMIT = 120;
+
+/** 进度事件用的短预览：复用日志预览再截到事件上限 */
+function toEventPreview(value: unknown): string {
+  const text = toLogPreview(value);
+  return text.length > EVENT_PREVIEW_LIMIT ? `${text.slice(0, EVENT_PREVIEW_LIMIT)}…` : text;
+}
 
 /** 节点产物 → 日志字符串：字符串原样，其余 JSON 化（失败兜底 String()，日志路径不允许打断图执行） */
 function toLogPreview(value: unknown): string {

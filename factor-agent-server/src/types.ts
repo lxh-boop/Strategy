@@ -44,6 +44,9 @@ export interface BacktestCard extends CardBase {
   benchCurve: number[];
   benchName?: string;
   metrics: MetricItem[];
+  /** 本次回测实际使用的参数（真实口径，区别于 GET /backtest-params 下发的策略配置项）：
+   *  回测区间 / 调仓频率·期数 / 每期持仓 / 业绩基准 / 交易费用，前端回测卡片按行渲染 */
+  params?: { label: string; value: string; hint?: string }[];
 }
 
 export interface ReportCard extends CardBase {
@@ -69,6 +72,19 @@ export interface AgentReply {
   text: string;
   card?: AgentCard; // 普通对话（chat）与 LLM 失败的回复没有卡片
 }
+
+/* ----- 智能体过程事件（SSE 节点级推送；不涉及推理流式） -----
+   粒度 = 图节点/工具的开始与结果，一条一个结构化事件；
+   stage 为工具中文名（前端可直接展示），detail 为一行结果摘要。
+   最终文案与卡片不走过程事件，以接口返回值 / final 事件为准。 */
+export type AgentProgressEvent =
+  | { type: 'start' }
+  | { type: 'tool_call'; name: string; stage: string; args: string }
+  | { type: 'tool_result'; name: string; stage: string; ok: boolean; detail: string }
+  | { type: 'error'; message: string };
+
+/** 过程事件接收端（conversations 层写 SSE 用） */
+export type AgentProgressSink = (event: AgentProgressEvent) => void;
 
 /* ----- 对话 ----- */
 export interface ChatMessage {

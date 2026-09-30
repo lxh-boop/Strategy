@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { AgentReply, Conversation } from '../types';
+import { AgentProgressSink, AgentReply, Conversation } from '../types';
 
 /* ==========================================================
    智能体引擎接口（契约层）—— 业务层（会话模块）唯一可见的能力：
@@ -18,4 +18,20 @@ export abstract class AgentService {
    * @returns text 为回复文案（GLM 失败时=失败原因，且无卡片）；card 可选 report/backtest/stocks
    */
   abstract reply(conversation: Conversation, userText: string, routeText: string): Promise<AgentReply>;
+
+  /**
+   * reply 的流式形态：执行过程经 onProgress 推送节点级事件
+   * （看表/看字段/读数/回测的 tool_call 与 tool_result，见 AgentProgressEvent），
+   * 返回值与 reply() 完全一致；事件只是附加推送，最终结果以返回值为准。
+   * 默认实现不产生任何事件、直接委托 reply()——实现方可选择只覆写 reply()。
+   */
+  replyStream(
+    conversation: Conversation,
+    userText: string,
+    routeText: string,
+    onProgress: AgentProgressSink,
+  ): Promise<AgentReply> {
+    void onProgress;
+    return this.reply(conversation, userText, routeText);
+  }
 }

@@ -7,14 +7,15 @@
    这里写的约束是给模型看的行为指引，服务端校验不依赖本文件。
    ========================================================== */
 
-/** 工具 1：列出全部可用数据表（tables.md 目录），选取因子前必须先调用 */
+/** 工具 1：列出全部可用数据表（tables.md 目录）。表目录通常已注入 system prompt，本工具仅作兜底 */
 export const LIST_FACTOR_TABLES_SPEC = {
   type: 'function' as const,
   function: {
     name: 'list_factor_tables',
     description:
       '列出因子数据库中全部可用数据表（表名/中文名/说明/唯一键）。' +
-      '为用户选取因子之前必须先调用本工具了解有哪些表，禁止凭记忆编造表名。',
+      '系统提示通常已附完整表目录，此时无需调用本工具；仅当提示中没有表目录、或需确认目录有更新时调用。' +
+      '禁止凭记忆编造表名。',
     parameters: { type: 'object', properties: {} },
   },
 };
@@ -26,7 +27,7 @@ export const LIST_FACTOR_FIELDS_SPEC = {
     name: 'list_factor_fields',
     description:
       '列出指定数据表的全部因子字段（字段名/中文名/类型/可空/说明），一次可查多张表。' +
-      '表名必须来自 list_factor_tables 的返回；选出要用的因子后调用 read_factor_data 读数。',
+      '表名必须来自系统提示中的表目录（或 list_factor_tables 的返回）；选出要用的因子后调用 read_factor_data 读数。',
     parameters: {
       type: 'object',
       properties: {
@@ -49,7 +50,7 @@ export const READ_FACTOR_DATA_SPEC = {
     name: 'read_factor_data',
     description:
       '按 表/因子字段集合/交易日/证券代码 读取因子数据。' +
-      'table 与 fields 必须来自 list_factor_tables / list_factor_fields 的返回，' +
+      'table 必须来自系统提示中的表目录，fields 必须来自 list_factor_fields 的返回，' +
       'date 为纯数字交易日（如 20210506），security 为证券代码（如 000002.XSHE）。',
     parameters: {
       type: 'object',
@@ -77,7 +78,7 @@ export const RUN_EQUAL_WEIGHT_BACKTEST_SPEC = {
     description:
       '对已选定的因子组做多因子等权回测并生成净值卡片：每个调仓日各因子先算截面分位数、' +
       '等权平均成综合分，按综合分取 Top-K 等权建仓，输出年化收益、最大回撤、夏普、胜率、' +
-      '年化换手与净值/基准曲线。factors 中的表名与字段名必须来自 list_factor_tables / ' +
+      '年化换手与净值/基准曲线。factors 中的表名必须来自系统提示中的表目录，字段名必须来自 ' +
       'list_factor_fields 的返回；回测无需先用 read_factor_data 抽样验证数据；' +
       'frequency 为必填参数且无默认值，用户未指明调仓频率时必须先向用户询问，禁止自行假设。',
     parameters: {
@@ -92,7 +93,7 @@ export const RUN_EQUAL_WEIGHT_BACKTEST_SPEC = {
           items: {
             type: 'object',
             properties: {
-              table: { type: 'string', description: '因子表名，来自工具 1 的返回' },
+              table: { type: 'string', description: '因子表名，来自系统提示中的表目录' },
               field: { type: 'string', description: '因子字段名，来自工具 2 的返回' },
               order: {
                 type: 'string',

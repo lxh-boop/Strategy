@@ -82,8 +82,17 @@ interface Strategy {
   note: "股票池与调仓：…"
 }
 
-// ② backtest —— 纯回测报告
-{ type: "backtest", title, tag, curve, benchCurve, benchName, metrics, note }
+// ② backtest —— 等权回测报告（智能体 TOOL-C07 产出）
+{
+  type: "backtest", title, tag, curve, benchCurve, benchName, metrics, note,
+  params?: [                       // 本次回测真实使用的参数（悬停 hint 为口径说明）；
+    { label: "回测区间", value: "2024-01-02 ~ 2024-03-29", hint: "…" },   // 缺省时前端回退
+    { label: "调仓频率", value: "每周 · 36 期", hint: "…" },              // 显示策略页配置项
+    { label: "每期持仓", value: "≤50 只", hint: "…" },
+    { label: "业绩基准", value: "沪深300", hint: "…" },
+    { label: "交易费用", value: "未计", hint: "…" },
+  ]
+}
 
 // ③ stocks —— 选股筛选结果
 {
@@ -168,7 +177,8 @@ interface UserProfile {
 | DELETE | `/api/conversations/:id` | 删除会话 |
 | POST | `/api/conversations/:id/clear` | 清空会话消息 |
 | GET | `/api/conversations/:id/messages` | 拉取历史消息 |
-| POST | `/api/conversations/:id/messages` | 发送消息并获取智能体回复 |
+| POST | `/api/conversations/:id/messages` | 发送消息并获取智能体回复（同步） |
+| POST | `/api/conversations/:id/chat/stream` | 发送消息（SSE 流式，节点级过程事件） |
 
 **发送消息请求**
 
@@ -176,7 +186,7 @@ interface UserProfile {
 { "text": "帮我构建一个小盘动量策略" }
 ```
 
-**响应（同步返回；若做流式见 §5）**
+**响应（同步返回；流式见下方「发送消息（流式）」）**
 
 ```json
 {
@@ -189,6 +199,30 @@ interface UserProfile {
   }
 }
 ```
+
+**发送消息（流式）`POST /api/conversations/:id/chat/stream`**
+
+- 请求体与同步接口相同（`{ "text": "…" }`），鉴权同其他接口（Bearer token）；
+- 响应为 `text/event-stream`，每帧 `data: {JSON}\n\n`，事件序列：
+
+```
+start → tool_call / tool_result（0~n 对）→ final → 连接结束
+```
+
+- 过程帧（节点级，**不做 token 级推理流式**）：
+
+```json
+{ "type": "start" }
+{ "type": "tool_call",   "name": "list_factor_fields", "stage": "查看因子字段", "args": "{\"tables\":[…]（≤120 字预览）}" }
+{ "type": "tool_result", "name": "list_factor_fields", "stage": "查看因子字段", "ok": true, "detail": "1 张表的字段明细" }
+```
+
+- 终结帧 `final`：响应体与同步接口完全一致（`{ userMessage, agentMessage }`），消息以此为准；
+- 失败帧 `{ "type": "error", "code": "…", "message": "…" }` 后连接结束；HTTP 恒 200（开流后状态码不可改），
+  仅鉴权失败等开流前错误返回非 200 JSON 错误体；
+- 客户端须用 fetch + `res.body.getReader()` 读流（**EventSource 不支持 POST**）；客户端中途断开
+  不影响后端落库，重开会话可见已持久化消息。前端实现：`api.ts sendMessageStream` +
+  `useConversations` 的 `live` 步骤（ChatPage 打字气泡内渲染）。
 
 后端需要实现的多轮/路由逻辑（当前前端模拟的行为，即产品语义）：
 
@@ -287,6 +321,30 @@ GET /api/factors
 > 产品边界（2026-09-28）：大模型统一智谱 GLM、行情数据统一使用平台内部数据，
 > 均由服务端配置，**不提供用户级模型/数据源配置**；个人中心可配置项仅
 > 可配置项：notify / report / risk。模型（统一智谱 GLM）与数据来源（平台内部数据）由平台统一提供，不作为设置项下发。
+
+---
+
+### 3.7 客户端日志上报（内部，API-26）
+
+`POST /api/client-logs`（公开接口，登录前报错也要能收）：
+
+```json
+{ "level": "error", "message": "发送消息失败", "detail": { "convId": "c1", "code": "TIMEOUT" }, "page": "/chat" }
+```
+
+- `level` ∈ error/warn/info（必填）；`message` ≤2000 字（必填）；`detail` 对象、`page` 字符串（可选）；
+- 返回 `{ "ok": true }`，校验失败 400；前端 `reportClientLog` 有限流（30 条/分钟 + 10s 去重）；
+- 落盘 `logs/frontend/YYYY-MM-DD.log`，与后端日志分文件夹存放：
+
+```
+logs/
+├── backend/YYYY-MM-DD.log        # 后端全局日志（含 HttpAccess 请求访问日志：每请求一行"方法 路径 → 状态 · 耗时"）
+├── frontend/YYYY-MM-DD.log       # 前端上报日志（错误钩子 + 接口失败 + 发送失败上下文）
+└── conversations/<会话id>.log    # 每会话的智能体完整链路（提问 → 工具 → 回复）
+```
+
+排查"发送失败"：先看 frontend 文件（前端报了什么、哪个接口、错误码），再看 backend 文件
+（HttpAccess 有无对应行——无则请求没到后端，问题在链路层）。
 
 ---
 

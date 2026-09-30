@@ -228,6 +228,17 @@ svg { width: 18px; height: 18px; flex-shrink: 0; }
 .typing i { width: 7px; height: 7px; border-radius: 50%; background: var(--text-3); animation: blink 1.2s infinite; }
 .typing i:nth-child(2) { animation-delay: .2s; }
 .typing i:nth-child(3) { animation-delay: .4s; }
+
+/* 发送消息流式过程步骤（SSE 节点级事件，chat/stream） */
+.chat-steps { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.chat-step {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 11px; color: var(--text-2);
+  background: rgba(127, 140, 165, 0.12); border-radius: 999px; padding: 2px 9px;
+}
+.chat-step em { font-style: normal; color: var(--text-3); }
+.chat-step.ok em { color: #0a9e63; }
+.chat-step.bad em { color: var(--up); }
 @keyframes blink { 0%, 60%, 100% { opacity: .25; transform: translateY(0); } 30% { opacity: 1; transform: translateY(-3px); } }
 
 /* 智能体回复中的结构化卡片 */
