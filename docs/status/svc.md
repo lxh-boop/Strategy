@@ -6,13 +6,14 @@
 
 | 编号 | 接口 | 说明 | 负责人 | 状态 | 完成提交/日期 |
 |---|---|---|---|---|---|
-| SVC-C01 | `AgentService.reply(conversation, userText, routeText): Promise<AgentReply>` | 智能体唯一公开方法。出参 `{ text, card? }`：text 为文案（GLM 失败时=失败原因）；card 契约保留但当前实现不产卡片（随 mock 链路下线）。routeText 参数保留、当前未使用 | chenhaotao | ✅ 已实现 | 345a98f 重写（2026-09-29） |
+| SVC-C01 | `AgentService.reply(conversation, userText, routeText): Promise<AgentReply>` | 智能体唯一公开方法。出参 `{ text, card? }`：text 为文案（GLM 失败时=失败原因）；card 在本次执行跑成等权回测时为净值卡片（TOOL-C07，卡片绕过 LLM 直达前端），其余场景无卡片。routeText 参数保留、当前未使用 | chenhaotao | ✅ 已实现 | 345a98f 重写（2026-09-29） |
 | TOOL-C01 | `select_factors(factors[], universe?, rebalance?, name?, tag?)` | **已废弃（2026-09-29）**：旧"选风格因子"工具，随 mock 回测链路下线，由 TOOL-C05+TOOL-C06 取代 | chenhaotao | ➖ 废弃 | 345a98f（2026-09-29） |
 | TOOL-C02 | `run_backtest()` | **已废弃（2026-09-29）**：旧 mock 回测工具，真库链路无回测 | chenhaotao | ➖ 废弃 | 345a98f（2026-09-29） |
 | TOOL-C03 | `query_factors(...)` | **规划取消**：原单工具因子查询演化为 TOOL-C04~C06 三个按需工具 | chenhaotao | ➖ 废弃 | 345a98f（2026-09-29） |
 | TOOL-C04 | `list_factor_tables()` | LLM 工具：返回 `SQL/tables.md` 表目录（表名/中文名/说明/唯一键）；选取因子前必须先调用 | chenhaotao | ✅ 已实现 | 345a98f（2026-09-29） |
 | TOOL-C05 | `list_factor_fields(tables[])` | LLM 工具：按表名列表（可多表）返回字段明细（字段名/中文名/类型/可空/描述）；表名必须来自 TOOL-C04，非法表进 notFound 并附可用表 | chenhaotao | ✅ 已实现 | 345a98f（2026-09-29） |
 | TOOL-C06 | `read_factor_data(table, fields[], date, security)` | LLM 工具：调 SVC-D22 查库并把行 JSON 回给模型；显式四参数，格式/白名单由 SVC-D22 校验 | chenhaotao | ✅ 已实现 | 345a98f（2026-09-29） |
+| TOOL-C07 | `run_equal_weight_backtest(factors[], startDate, endDate, frequency, everyNTd?, topK?, benchmark?)` | LLM 工具：选完因子后直接**多因子等权合成**回测出净值卡片（各因子截面分位数等权平均成综合分，按综合分 Top-K；每因子可带 order 方向；无需先用 TOOL-C06 抽样验证数据）。调 SVC-D24；卡片走图状态 card 通道绕过 LLM，模型只拿指标摘要；**frequency 必填无默认值**（weekly/biweekly/monthly/quarterly/semiannual/annual/custom+everyNTd 5~120），缺失时返回澄清指引给模型、由模型向用户追问（非错误转述） | chenhaotao | ✅ 已实现 | ae87773（2026-09-29） |
 | C-INT-01 | `loadFactorKnowledge(): string` | **已废弃（2026-09-29）**：`docs/factors.md` 删除，因子知识改由 `SQL/` 字典 + SVC-D22 配套解析按需加载（TOOL-C04/C05） | chenhaotao | ➖ 废弃 | 345a98f（2026-09-29） |
 
 ## 智谱直连客户端（模块 C 提供）
@@ -50,6 +51,7 @@
 | SVC-D21 | 共享常量与工具导出 | `normalizeWeights`、`toMetricItems`、`mkBench`、`todayStr`、`nowTime`、`WELCOME_TEXT`、`BT_DEFAULTS`、`CURVE_*`、`STOCK_POOL`、`LastReport`/`StockMeta` 类型 | 待认领 | ⬜ 未实现 | |
 | SVC-D22 | `FactorDataService.readTable({table, fields[], date, security})` + 字典解析 `loadTableCatalog/loadTableFieldDetails/loadTableFields/listKnownTables` | MySQL 因子取数 + 字段字典解析：白名单两道闸、防注入、值参数化；字典现读 `SQL/*.md` 改文档即生效（TOOL-C04~C06 的数据源） | chenhaotao | ✅ 已实现 | 345a98f（2026-09-29） |
 | SVC-D23 | `UserStoreService`：账号 `createUser` / `findByUsername` / `findUserById` / `bumpTokenVersion` / `touchLastLogin`；用户隔离读写 `listStrategies(userId)` / `getStrategy(userId, id)` / `saveStrategy(userId, s)` / `deleteStrategy(userId, id)` / `listConversations(userId)` / `getConversation(userId, id)` / `newConversation(userId)` / `deleteConversation(userId, id)` / `clearConversation(userId, id)` / `appendMessages(userId, id, msgs)` / `renameConversationFromFirstMessage(userId, id, text)` / `getSettings(userId)` / `updateSetting(userId, key, patch)` | 用户库持久化（M13）：`alphasage_user` 库（192.168.0.30），独立连接池 `USER_DB_*`（与只读因子库 MYSQL_* 分开）；实现 `MysqlUserStoreService`（多行写入放事务、消息按自增 id 排序、会话列表按 updated_at 倒序）+ `MemoryUserStoreService`（未配 USER_DB 时兜底）；表结构 `docs/db/user-tables.sql`（已在共享库执行） | CZT123526 | ✅ 已实现 | 3e0efd9（2026-09-29） |
+| SVC-D24 | `EqualWeightBacktestService.runEqualWeightBacktest(input): {card, summary}`；配套 `FactorDataService` 批量方法 `readTradeDates/readCrossSection/readDailyCloses/readIndexDaily` | **多因子等权合成**回测（TOOL-C07 数据源）：调仓日按频率分组（7 档）、逐调仓日各因子全截面 → 截面分位数等权平均成综合分（因子可各自 asc/desc）→ Top-K，**逐年拉持仓并集前复权收盘**（内存峰值=一年数据）、持有期日度等权；个股日收益=前复权收盘相邻日相除（mkt_equd_adj.CLOSE_PRICE_1，含分红送转）；换手率单边口径、按实际期数年化；基准 mkt_idxd。纯编排不触库，数据全部走 SVC-D22 同池同白名单。字典新增 `SQL/mkt_equd_adj.md`、`SQL/mkt_idxd.md`（通联字典原文照录，tmp_dict/gen_backtest_tables.py 生成） | chenhaotao | ✅ 已实现 | ae87773（2026-09-29） |
 
 ## 外部接口
 

@@ -8,8 +8,15 @@ import { IDENT_RE } from '../../src/core/factor-data.service';
 
 describe('factor-schema（SQL 字段字典解析）', () => {
   describe('listKnownTables（表名白名单）', () => {
-    it('返回 tables.md 中登记的三张表', () => {
-      expect(listKnownTables()).toEqual(['equ_factor_cf', 'equ_factor_derive', 'mkt_adjf']);
+    it('返回 tables.md 中登记的六张表', () => {
+      expect(listKnownTables()).toEqual([
+        'equ_factor_cf',
+        'equ_factor_derive',
+        'equ_factor_obos',
+        'mkt_adjf',
+        'mkt_equd_adj',
+        'mkt_idxd',
+      ]);
     });
   });
 
@@ -40,10 +47,40 @@ describe('factor-schema（SQL 字段字典解析）', () => {
       expect(fields.has('END_DATE')).toBe(true);
     });
 
-    it('各表字段数与字典一致（23 / 49 / 15）', () => {
+    it('mkt_equd_adj：字段清单含前复权收盘与定位列（等权回测数据源）', () => {
+      const fields = loadTableFields('mkt_equd_adj')!;
+      expect(fields.has('TICKER_SYMBOL')).toBe(true);
+      expect(fields.has('EXCHANGE_CD')).toBe(true);
+      expect(fields.has('TRADE_DATE')).toBe(true);
+      expect(fields.has('CLOSE_PRICE_1')).toBe(true);
+      expect(fields.has('ACCUM_ADJ_FACTOR')).toBe(true);
+    });
+
+    it('mkt_idxd：字段清单含指数收盘列（回测基准数据源）', () => {
+      const fields = loadTableFields('mkt_idxd')!;
+      expect(fields.has('TICKER_SYMBOL')).toBe(true);
+      expect(fields.has('TRADE_DATE')).toBe(true);
+      expect(fields.has('CLOSE_INDEX')).toBe(true);
+      expect(fields.has('PRE_CLOSE_INDEX')).toBe(true);
+    });
+
+    it('equ_factor_obos：字段清单含系统列与超买超卖因子列', () => {
+      const fields = loadTableFields('equ_factor_obos')!;
+      expect(fields.has('SECURITY_ID')).toBe(true);
+      expect(fields.has('TRADE_DATE')).toBe(true);
+      expect(fields.has('REVS5')).toBe(true);
+      expect(fields.has('RSI')).toBe(true);
+      expect(fields.has('KDJ_J')).toBe(true);
+      expect(fields.has('ILLIQUIDITY')).toBe(true);
+    });
+
+    it('各表字段数与字典一致（23 / 49 / 68 / 15 / 20 / 15）', () => {
       expect(loadTableFields('equ_factor_cf')!.size).toBe(23);
       expect(loadTableFields('equ_factor_derive')!.size).toBe(49);
+      expect(loadTableFields('equ_factor_obos')!.size).toBe(68);
       expect(loadTableFields('mkt_adjf')!.size).toBe(15);
+      expect(loadTableFields('mkt_equd_adj')!.size).toBe(20);
+      expect(loadTableFields('mkt_idxd')!.size).toBe(15);
     });
 
     it('全部字段都是合法标识符（可安全反引号拼接）', () => {

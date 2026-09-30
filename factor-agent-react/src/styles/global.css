@@ -312,8 +312,8 @@ svg { width: 18px; height: 18px; flex-shrink: 0; }
 .btp-label { font-size: 11px; color: var(--text-3); }
 .btp-val { font-size: 12px; font-weight: 600; margin-top: 1px; white-space: nowrap; }
 
-/* 回测指标网格 */
-.backtest-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 14px; }
+/* 回测指标网格（auto-fit：列数随条目数自适应，4 项/5 项均一行排开） */
+.backtest-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(72px, 1fr)); gap: 10px; margin-bottom: 14px; }
 .bt-item { background: #f8f9fd; border-radius: 10px; padding: 10px 12px; }
 .bt-label { font-size: 11px; color: var(--text-3); }
 .bt-val { font-size: 17px; font-weight: 700; font-variant-numeric: tabular-nums; }
