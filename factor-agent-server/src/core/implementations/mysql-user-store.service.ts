@@ -18,7 +18,8 @@ import { AgentCard, ChatMessage, Conversation, Strategy } from '../../types';
    - 值全部参数化；发消息/清空会话等多行写入放同一事务；
    - 会话列表按 updated_at 倒序（ON UPDATE 不会因消息写入触发，
      appendMessages 必须显式 UPDATE conversations.updated_at）；
-   - 消息顺序按自增 id（ORDER BY id）。
+   - 消息一行存一次问答（ask 用户提问 + answer 智能体回复；ask 为 NULL
+     的行是开场欢迎语），顺序按自增 id（ORDER BY id），读时拆回 ChatMessage[]。
    ========================================================== */
 
 interface UserDbRow {
@@ -52,12 +53,14 @@ interface ConversationDbRow {
   updated_at: string;
 }
 
-interface MessageDbRow {
+/** messages 行 = 一次问答：ask 用户提问（NULL=开场欢迎语）+ answer 智能体回复 */
+interface MessagePairDbRow {
   id: number;
-  role: string;
-  bubble: string;
+  ask: string | null;
+  answer: string;
   card: unknown;
-  time: string;
+  askTime: string;
+  answerTime: string;
 }
 
 @Injectable()
@@ -182,15 +185,15 @@ export class MysqlUserStoreService extends UserStoreService {
     );
     if (convs.length === 0) return [];
     const placeholders = convs.map(() => '?').join(', ');
-    const messages = await this.selectRows<MessageDbRow & { conversation_id: string }>(
-      `SELECT conversation_id, id, role, bubble, card, time FROM messages WHERE conversation_id IN (${placeholders}) ORDER BY conversation_id, id`,
+    const messages = await this.selectRows<MessagePairDbRow & { conversation_id: string }>(
+      `SELECT conversation_id, id, ask, answer, card, ask_time AS askTime, answer_time AS answerTime FROM messages WHERE conversation_id IN (${placeholders}) ORDER BY conversation_id, id`,
       convs.map((c) => c.id),
       '查询会话消息失败',
     );
     const byConv = new Map<string, ChatMessage[]>();
     for (const m of messages) {
       const list = byConv.get(m.conversation_id) ?? [];
-      list.push(this.toMessage(m));
+      list.push(...this.toMessages(m));
       byConv.set(m.conversation_id, list);
     }
     return convs.map((c) => this.toConversation(c, byConv.get(c.id) ?? []));
@@ -216,8 +219,8 @@ export class MysqlUserStoreService extends UserStoreService {
     await this.withConn(async (conn) => {
       await conn.execute('INSERT INTO conversations (id, user_id, username, title) VALUES (?, ?, ?, ?)', [id, userId, username, '新对话']);
       await conn.execute(
-        'INSERT INTO messages (conversation_id, username, role, bubble, card, time) VALUES (?, ?, ?, ?, NULL, ?)',
-        [id, username, 'agent', WELCOME_TEXT, nowTime()],
+        "INSERT INTO messages (conversation_id, username, ask, answer, card, ask_time, answer_time) VALUES (?, ?, NULL, ?, NULL, '', ?)",
+        [id, username, WELCOME_TEXT, nowTime()],
       );
     });
     const conv = await this.readConversation(userId, id);
@@ -243,8 +246,8 @@ export class MysqlUserStoreService extends UserStoreService {
       await conn.execute('DELETE FROM messages WHERE conversation_id = ?', [id]);
       await conn.execute("UPDATE conversations SET title = '新对话', updated_at = NOW() WHERE id = ?", [id]);
       await conn.execute(
-        'INSERT INTO messages (conversation_id, username, role, bubble, card, time) VALUES (?, ?, ?, ?, NULL, ?)',
-        [id, username, 'agent', WELCOME_TEXT, nowTime()],
+        "INSERT INTO messages (conversation_id, username, ask, answer, card, ask_time, answer_time) VALUES (?, ?, NULL, ?, NULL, '', ?)",
+        [id, username, WELCOME_TEXT, nowTime()],
       );
     });
     return this.readConversation(userId, id);
@@ -254,11 +257,28 @@ export class MysqlUserStoreService extends UserStoreService {
     const conv = await this.readConversation(userId, id);
     if (!conv) return undefined;
     const username = await this.usernameOf(userId);
+    // 气泡序列合成问答行：user 开启新行，agent 回填最近未回答的提问，无提问可回填则为欢迎语行（ask NULL）
+    const pairs: { ask: string | null; askTime: string; answer: string; answerTime: string; card: string | null }[] = [];
+    let open = -1;
+    for (const m of msgs) {
+      if (m.role === 'user') {
+        pairs.push({ ask: m.bubble, askTime: m.time, answer: '', answerTime: '', card: null });
+        open = pairs.length - 1;
+      } else if (open >= 0) {
+        const p = pairs[open];
+        p.answer = m.bubble;
+        p.answerTime = m.time;
+        p.card = m.card ? JSON.stringify(m.card) : null;
+        open = -1;
+      } else {
+        pairs.push({ ask: null, askTime: '', answer: m.bubble, answerTime: m.time, card: m.card ? JSON.stringify(m.card) : null });
+      }
+    }
     await this.withConn(async (conn) => {
-      for (const m of msgs) {
+      for (const p of pairs) {
         await conn.execute(
-          'INSERT INTO messages (conversation_id, username, role, bubble, card, time) VALUES (?, ?, ?, ?, ?, ?)',
-          [id, username, m.role, m.bubble, m.card ? JSON.stringify(m.card) : null, m.time],
+          'INSERT INTO messages (conversation_id, username, ask, answer, card, ask_time, answer_time) VALUES (?, ?, ?, ?, ?, ?, ?)',
+          [id, username, p.ask, p.answer, p.card, p.askTime, p.answerTime],
         );
       }
       // ON UPDATE CURRENT_TIMESTAMP 只在本行字段变更时触发，这里必须显式更新
@@ -338,10 +358,14 @@ export class MysqlUserStoreService extends UserStoreService {
     return { id: r.id, title: r.title, messages, updatedAt: Date.parse(String(r.updated_at).replace(' ', 'T')) };
   }
 
-  private toMessage(r: MessageDbRow): ChatMessage {
-    const msg: ChatMessage = { role: r.role as ChatMessage['role'], bubble: r.bubble, time: r.time };
+  /** 一行问答拆回气泡序列：有提问先出用户气泡，智能体回复必出 */
+  private toMessages(r: MessagePairDbRow): ChatMessage[] {
+    const out: ChatMessage[] = [];
+    if (r.ask) out.push({ role: 'user', bubble: r.ask, time: r.askTime });
+    const msg: ChatMessage = { role: 'agent', bubble: r.answer, time: r.answerTime };
     if (r.card) msg.card = r.card as AgentCard;
-    return msg;
+    out.push(msg);
+    return out;
   }
 
   /** 读单个会话（含消息）；跨用户的 id 一律视为不存在 */
@@ -352,12 +376,12 @@ export class MysqlUserStoreService extends UserStoreService {
       '查询会话失败',
     );
     if (!convs[0]) return undefined;
-    const msgs = await this.selectRows<MessageDbRow>(
-      'SELECT id, role, bubble, card, time FROM messages WHERE conversation_id = ? ORDER BY id',
+    const msgs = await this.selectRows<MessagePairDbRow>(
+      'SELECT id, ask, answer, card, ask_time AS askTime, answer_time AS answerTime FROM messages WHERE conversation_id = ? ORDER BY id',
       [id],
       '查询会话消息失败',
     );
-    return this.toConversation(convs[0], msgs.map((m) => this.toMessage(m)));
+    return this.toConversation(convs[0], msgs.flatMap((m) => this.toMessages(m)));
   }
 
   private isDupEntry(error: unknown): boolean {

@@ -6,12 +6,14 @@
 --       JSON 列的结构与 src/types.ts 的 Strategy/ChatMessage 字段级一致；
 --       username 大小写不敏感唯一（utf8mb4_unicode_ci：Zhang 与 zhang 视为同一账号，
 --       注册与登录查找必须同一 collation 口径，勿在列上另指定 _bin）；
---       messages 顺序以自增 id 为准（ORDER BY id），不另设序号列（并发安全）；
---       messages.time 由应用层在写入时刻生成（HH:mm），不从 created_at 反推（避免时区偏差）
+--       messages 一行存一次问答（ask 用户提问 + answer 智能体回复），顺序以自增 id
+--       为准（ORDER BY id），不另设序号列（并发安全）；ask 为 NULL 的行是开场欢迎语
+--       （仅 AI 开场，无提问）；ask_time/answer_time 由应用层在写入时刻生成（HH:mm），
+--       不从 created_at 反推（避免时区偏差）
 -- 幂等：IF NOT EXISTS + 唯一键防重，可重复执行
 -- 注意：conversations.updated_at 的 ON UPDATE 只在本行变更时触发——appendMessages
 --       必须显式 UPDATE conversations SET updated_at=CURRENT_TIMESTAMP（会话列表按它倒序），
---       且同一次发消息的 user+agent 两行 INSERT 放同一事务；
+--       且同一次发消息的问答行 INSERT 放同一事务；
 --       register 并发撞名捕获 ER_DUP_ENTRY 映射 409 USERNAME_TAKEN（勿漏成 500）；
 --       strategies 相关 DTO 需补 MaxLength（name≤80、universe/benchmark≤40、rebalance≤20），
 --       否则严格模式超长插入直接 500
@@ -73,17 +75,19 @@ CREATE TABLE IF NOT EXISTS conversations (
   CONSTRAINT fk_conv_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='会话';
 
--- 5. 消息表（结构与 ChatMessage 一致；顺序按自增 id；card 当前链路为 NULL，契约保留）
+-- 5. 消息表（一行 = 一次问答：ask 用户提问 + answer 智能体回复；ask 为 NULL 的行是
+--    开场欢迎语；顺序按自增 id；card 当前链路为 NULL，契约保留。
+--    2026-10-08 由"一行一条消息（role/bubble）"合并而来，旧数据备份在 messages_bak_20261008）
 CREATE TABLE IF NOT EXISTS messages (
   id              BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   conversation_id VARCHAR(36) NOT NULL COMMENT '所属会话',
   username        VARCHAR(24) NOT NULL DEFAULT '' COMMENT '冗余用户名：默认空串兼容旧代码，新代码总是显式写入',
-  role            VARCHAR(10)  NOT NULL COMMENT 'user / agent',
-  CONSTRAINT chk_msg_role CHECK (role IN ('user','agent')),
-  bubble          TEXT         NOT NULL COMMENT '文案内容（≤2000 字，DTO 层校验）',
-  card            JSON         NULL COMMENT '卡片（report/backtest/stocks，契约保留）',
-  time            VARCHAR(8)   NOT NULL DEFAULT '' COMMENT '展示用 HH:mm，写入时刻由应用层生成',
+  ask             TEXT         NULL COMMENT '用户提问（≤2000 字，DTO 层校验）；NULL = 开场欢迎语（无提问）',
+  answer          TEXT         NOT NULL COMMENT '智能体回复',
+  card            JSON         NULL COMMENT '回答附带卡片（report/backtest/stocks，契约保留）',
+  ask_time        VARCHAR(8)   NOT NULL DEFAULT '' COMMENT '提问展示用 HH:mm（欢迎语行为空串），写入时刻由应用层生成',
+  answer_time     VARCHAR(8)   NOT NULL DEFAULT '' COMMENT '回答展示用 HH:mm，写入时刻由应用层生成',
   created_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   KEY idx_conv_id (conversation_id, id),
-  CONSTRAINT fk_msg_conv FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='会话消息';
+  CONSTRAINT fk_msg_conv2 FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='会话消息（一行=一次问答；ask 为 NULL 的行是开场欢迎语）';
