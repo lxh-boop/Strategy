@@ -114,7 +114,15 @@ export const RUN_EQUAL_WEIGHT_BACKTEST_SPEC = {
             'quarterly 每季 / semiannual 每半年 / annual 每年 / custom 自定义每 N 个交易日',
         },
         everyNTd: { type: 'integer', description: '仅 frequency=custom 时必填：每 N 个交易日调仓一次，5~120' },
-        topK: { type: 'integer', description: '每期持仓只数，默认 50，上限 200' },
+        topK: {
+          type: 'integer',
+          description: '每期持仓只数，默认 50，上限 200。用户提到 topN/持仓 N 只/选 N 只时必须按用户说的数值传入（top5 → 5），禁止擅自换成默认值',
+        },
+        feeRate: {
+          type: 'number',
+          description: '单边交易费率（小数，0.001 = 每边 0.1%，双边合计 2×feeRate，已在每期换手日计提）。' +
+            '用户提到手续费/费用时必须传入；用户未提及时省略（默认不计费用）',
+        },
         benchmark: {
           type: 'string',
           enum: ['hs300', 'csi500', 'sse'],

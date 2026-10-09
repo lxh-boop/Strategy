@@ -4,3 +4,7 @@ dist/
 
 # 通联字典 chm 源 + SQL 字典生成脚本（临时工作目录，产物 SQL/*.md 已入库）
 tmp_dict/
+.agents/
+
+# 会话临时产物（UI 体检截图/对比图）
+tmp/

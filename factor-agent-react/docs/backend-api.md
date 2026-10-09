@@ -282,6 +282,54 @@ start → tool_call / tool_result（0~n 对）→ final → 连接结束
 
 参数以查询串或请求体附在回测相关接口上；后端应提供默认值。
 
+### 3.3.1 由回测卡片创建策略（API-27，M14）
+
+**POST /api/strategies/from-backtest**（需登录）：把对话里 TOOL-C07 产出的等权回测卡片
+保存为「我的策略」。服务端用同一等权引擎按传入配置**重跑回测**后建策略——返回的
+曲线/指标与卡片一致（同数据同配置确定性复现），不做前端拼装。
+
+**请求**
+
+```json
+{
+  "name": "HSIGMA+DDNSR+HBETA 小值优组合",
+  "config": {
+    "factors": [
+      { "table": "equ_factor_hsigma", "field": "HSIGMA", "order": "asc" },
+      { "table": "equ_factor_ddnsr",  "field": "DDNSR",  "order": "asc" },
+      { "table": "equ_factor_hbeta",  "field": "HBETA",  "order": "asc" }
+    ],
+    "startDate": "20240901",
+    "endDate": "20260901",
+    "frequency": "weekly",
+    "topK": 10,
+    "benchmark": "hs300",
+    "feeRate": 0.001
+  }
+}
+```
+
+- `feeRate`：可选，单边交易费率（0~0.05 的小数，0.001 = 每边 0.1%）；缺省 0 = 不计费用。
+  费用在每期换手日的组合收益中计提（首期建仓 1×feeRate，之后买卖双边 2×feeRate×单边换手）；
+  卡片"回测参数"的交易费用行会显示实际口径
+
+- `factors`：1~10 项，`order` 取 `desc`（值大优）/ `asc`（值小优）；表/字段经字典白名单校验
+- `startDate`/`endDate`：YYYYMMDD（8 位数字）
+- `frequency`：`weekly / biweekly / monthly / quarterly / semiannual / annual / custom`
+- `everyNTd`：frequency=custom 时必填，5~120（每 N 个交易日）
+- `topK`：1~200；`benchmark`：`hs300 / csi500 / sse`
+
+**响应**：完整 `Strategy`（`status=done`，metrics/curve/benchCurve 为真引擎结果，
+`factors` 为等权折算的展示权重，`backtestConfig` 记录可复现配置）。
+
+**语义约定**：
+
+1. 带 `backtestConfig` 的策略，其**重新回测（API-11）走等权真引擎**（按存储配置重跑），
+   不走 mock；
+2. 带 `backtestConfig` 的策略**不支持改权重/股票池/调仓/基准**（API-10 传这些字段返回
+   400）——引擎是等权合成，展示权重仅作图例；改名（仅 name）允许；
+3. 配置同时随 TOOL-C07 卡片下发（卡片新增 `config` 字段，结构同上），前端据此渲染保存按钮。
+
 ### 3.4 选股筛选
 
 ```json

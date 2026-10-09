@@ -2,9 +2,9 @@ import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Param, Patch, Post
 import { Strategy } from '../types';
 import { UserId } from '../common/current-user.decorator';
 import { StrategiesService } from './strategies.service';
-import { BacktestParamsDto, CreateStrategyDto, UpdateStrategyDto } from './dto';
+import { BacktestParamsDto, CreateFromBacktestDto, CreateStrategyDto, UpdateStrategyDto } from './dto';
 
-/** API-08 ~ API-13（M13 起需 Bearer，数据按 token 用户隔离） */
+/** API-08 ~ API-13、API-27（M13 起需 Bearer，数据按 token 用户隔离） */
 @Controller('api/strategies')
 export class StrategiesController {
   constructor(private readonly strategies: StrategiesService) {}
@@ -17,6 +17,12 @@ export class StrategiesController {
   @Post()
   async create(@UserId() userId: number, @Body() dto: CreateStrategyDto): Promise<Strategy> {
     return this.strategies.create(userId, dto);
+  }
+
+  /** API-27：由 TOOL-C07 回测卡片创建策略（服务端按配置重跑等权真引擎） */
+  @Post('from-backtest')
+  async createFromBacktest(@UserId() userId: number, @Body() dto: CreateFromBacktestDto): Promise<Strategy> {
+    return this.strategies.createFromBacktest(userId, dto);
   }
 
   /** 更新配置 = 保存并自动重新回测 */
