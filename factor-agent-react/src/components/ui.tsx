@@ -1,27 +1,76 @@
-import { useEffect, type ReactNode } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 import type { BtParamItem, MetricItem } from "../types";
 import { useConfig } from "../config";
+import { IconClose } from "./icons";
 
-/* 通用弹窗：遮罩点击 / Esc 关闭 */
-export function Modal({ children, onClose }: { children: ReactNode; onClose: () => void }) {
+/* 通用弹窗：遮罩点击 / Esc 关闭；打开时移入焦点并做 Tab 循环，关闭归还焦点 */
+export function Modal({ children, onClose, ariaLabel }: { children: ReactNode; onClose: () => void; ariaLabel?: string }) {
+  const boxRef = useRef<HTMLDivElement>(null);
+
   useEffect(() => {
+    const box = boxRef.current;
+    const prev = document.activeElement as HTMLElement | null;
+    box?.focus();
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape") { onClose(); return; }
+      if (e.key !== "Tab" || !box) return;
+      /* 焦点陷阱：Tab/Shift+Tab 在弹窗内循环，不漏到背后的页面 */
+      const items = box.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      );
+      if (!items.length) return;
+      const first = items[0];
+      const last = items[items.length - 1];
+      if (e.shiftKey && document.activeElement === first) { last.focus(); e.preventDefault(); }
+      else if (!e.shiftKey && document.activeElement === last) { first.focus(); e.preventDefault(); }
     };
     document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      prev?.focus?.();
+    };
   }, [onClose]);
 
   return (
     <div className="modal-mask" onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
-      <div className="modal">{children}</div>
+      <div className="modal" role="dialog" aria-modal="true" aria-label={ariaLabel} ref={boxRef} tabIndex={-1}>
+        {children}
+      </div>
     </div>
   );
 }
 
-/* Toast 轻提示（全局挂载一个，受控显示） */
+/* 破坏性操作确认弹窗：全站删除/清空统一走这里（替代原生 confirm） */
+export function ConfirmModal({ title, message, confirmText = "删除", busy = false, onConfirm, onClose }: {
+  title: string;
+  message: string;
+  confirmText?: string;
+  busy?: boolean;
+  onConfirm: () => void;
+  onClose: () => void;
+}) {
+  return (
+    <Modal onClose={onClose} ariaLabel={title}>
+      <div className="modal-head">
+        <div className="modal-title">{title}</div>
+        <button className="icon-btn" aria-label="关闭" onClick={onClose}><IconClose /></button>
+      </div>
+      <div className="modal-body">
+        <div className="agent-card-text" style={{ margin: 0 }}>{message}</div>
+      </div>
+      <div className="modal-foot">
+        <button className="btn btn-ghost" disabled={busy} onClick={onClose}>取消</button>
+        <button className="btn btn-danger" disabled={busy} onClick={onConfirm}>
+          {busy ? "处理中…" : confirmText}
+        </button>
+      </div>
+    </Modal>
+  );
+}
+
+/* Toast 轻提示（全局挂载一个，受控显示）；aria-live 让读屏软件也能听到 */
 export function Toast({ msg }: { msg: string | null }) {
-  return <div id="toast" className={msg ? "show" : ""}>{msg ?? ""}</div>;
+  return <div id="toast" role="status" aria-live="polite" className={msg ? "show" : ""}>{msg ?? ""}</div>;
 }
 
 /* 绩效指标网格 */

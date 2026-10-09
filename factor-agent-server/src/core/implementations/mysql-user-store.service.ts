@@ -44,6 +44,8 @@ interface StrategyDbRow {
   curve: unknown;
   bench_curve: unknown;
   holdings: unknown;
+  dates: unknown;
+  backtest_config: unknown;
   updated_at: string;
 }
 
@@ -128,7 +130,7 @@ export class MysqlUserStoreService extends UserStoreService {
 
   async listStrategies(userId: number): Promise<Strategy[]> {
     const rows = await this.selectRows<StrategyDbRow>(
-      'SELECT id, name, universe, rebalance, benchmark, factors, status, metrics, curve, bench_curve, holdings, updated_at FROM strategies WHERE user_id = ? ORDER BY created_at, id',
+      'SELECT id, name, universe, rebalance, benchmark, factors, status, metrics, curve, bench_curve, holdings, dates, backtest_config, updated_at FROM strategies WHERE user_id = ? ORDER BY created_at, id',
       [userId],
       '查询策略列表失败',
     );
@@ -137,7 +139,7 @@ export class MysqlUserStoreService extends UserStoreService {
 
   async getStrategy(userId: number, id: string): Promise<Strategy | undefined> {
     const rows = await this.selectRows<StrategyDbRow>(
-      'SELECT id, name, universe, rebalance, benchmark, factors, status, metrics, curve, bench_curve, holdings, updated_at FROM strategies WHERE user_id = ? AND id = ? LIMIT 1',
+      'SELECT id, name, universe, rebalance, benchmark, factors, status, metrics, curve, bench_curve, holdings, dates, backtest_config, updated_at FROM strategies WHERE user_id = ? AND id = ? LIMIT 1',
       [userId, id],
       '查询策略失败',
     );
@@ -147,17 +149,20 @@ export class MysqlUserStoreService extends UserStoreService {
   async saveStrategy(userId: number, strategy: Strategy): Promise<void> {
     try {
       await this.exec(
-        `INSERT INTO strategies (id, user_id, name, universe, rebalance, benchmark, factors, status, metrics, curve, bench_curve, holdings)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) AS new
+        `INSERT INTO strategies (id, user_id, name, universe, rebalance, benchmark, factors, status, metrics, curve, bench_curve, holdings, dates, backtest_config)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) AS new
          ON DUPLICATE KEY UPDATE name = new.name, universe = new.universe, rebalance = new.rebalance,
            benchmark = new.benchmark, factors = new.factors, status = new.status, metrics = new.metrics,
-           curve = new.curve, bench_curve = new.bench_curve, holdings = new.holdings`,
+           curve = new.curve, bench_curve = new.bench_curve, holdings = new.holdings, dates = new.dates,
+           backtest_config = new.backtest_config`,
         [
           strategy.id, userId, strategy.name, strategy.universe, strategy.rebalance, strategy.benchmark,
           JSON.stringify(strategy.factors), strategy.status,
           strategy.metrics ? JSON.stringify(strategy.metrics) : null,
           JSON.stringify(strategy.curve), JSON.stringify(strategy.benchCurve),
           JSON.stringify(strategy.holdings),
+          strategy.dates ? JSON.stringify(strategy.dates) : null,
+          strategy.backtestConfig ? JSON.stringify(strategy.backtestConfig) : null,
         ],
         '保存策略失败',
       );
@@ -351,6 +356,8 @@ export class MysqlUserStoreService extends UserStoreService {
       curve: (r.curve ?? []) as number[],
       benchCurve: (r.bench_curve ?? []) as number[],
       holdings: (r.holdings ?? []) as Strategy['holdings'],
+      dates: (r.dates ?? undefined) as Strategy['dates'],
+      backtestConfig: (r.backtest_config ?? undefined) as Strategy['backtestConfig'],
     };
   }
 

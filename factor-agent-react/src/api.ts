@@ -6,6 +6,7 @@
    ========================================================== */
 import type {
   AgentCard,
+  BacktestRunConfig,
   ChatMessage,
   ChatProgressEvent,
   Conversation,
@@ -162,16 +163,24 @@ export type ChatStreamFrame =
  * 事件序列 start → tool_call/tool_result* → final；HTTP 恒 200（开流后状态码不可改），
  * 失败以 error 帧收尾（此处抛 ApiError）；中途断开且未收到 final 时抛 AGENT_ERROR，
  * 后端落库不受影响（重开会话可见已持久化的消息）。
+ * signal：调用方的"停止生成"取消信号——取消后抛 ABORTED（消息已送达后端，
+ * 服务端会继续处理并落库，前端只是不再等待回复）。
  */
 export async function sendMessageStream(
   id: string,
   text: string,
   onEvent: (e: ChatProgressEvent) => void,
+  signal?: AbortSignal,
 ): Promise<SendMessageResult> {
   let res: Response;
   const token = getToken();
   // 空闲超时：SSE 流式总时长不定（工具循环可能很久），按"距上次收到数据"计——90s 无数据判死链路
   const controller = new AbortController();
+  let userAborted = false;
+  if (signal) {
+    if (signal.aborted) userAborted = true;
+    else signal.addEventListener("abort", () => { userAborted = true; controller.abort(); }, { once: true });
+  }
   const IDLE_MS = 90_000;
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
   const armIdle = () => {
@@ -190,6 +199,7 @@ export async function sendMessageStream(
       signal: controller.signal,
     });
   } catch (e) {
+    if (userAborted) throw new ApiError("ABORTED", "已停止生成");
     const reason = e instanceof DOMException && e.name === "AbortError" ? "timeout" : "network";
     reportClientLog("error", `流式连接失败 POST /conversations/${id}/chat/stream`, { reason });
     if (reason === "timeout") throw new ApiError("TIMEOUT", `连接超时（${IDLE_MS / 1000}s 无响应），请稍后重试`);
@@ -254,6 +264,7 @@ export async function sendMessageStream(
     if (buffer.trim()) handleLine(buffer.trim()); // 残包兜底（正常：final 后服务端即结束流）
   } catch (e) {
     if (e instanceof DOMException && e.name === "AbortError") {
+      if (userAborted) throw new ApiError("ABORTED", "已停止生成");
       throw new ApiError("TIMEOUT", `连接超时（${IDLE_MS / 1000}s 未收到数据），请稍后重试`);
     }
     throw e;
@@ -286,6 +297,10 @@ export const updateStrategy = (id: string, patch: Partial<NewStrategyInput>) =>
   http<Strategy>("PATCH", `/strategies/${id}`, patch);
 export const backtestStrategy = (id: string) => http<Strategy>("POST", `/strategies/${id}/backtest`, {});
 export const deleteStrategy = (id: string) => http<void>("DELETE", `/strategies/${id}`);
+
+/** API-27：把 TOOL-C07 回测卡片保存为策略——服务端按 config 重跑等权真引擎（数字与卡片一致） */
+export const createStrategyFromBacktest = (name: string, config: BacktestRunConfig) =>
+  http<Strategy>("POST", "/strategies/from-backtest", { name, config });
 
 /* ----- 行情配置（契约 §3.4 / §3.5，配置型数据由后端下发） ----- */
 

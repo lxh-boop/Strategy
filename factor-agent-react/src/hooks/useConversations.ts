@@ -35,6 +35,8 @@ export function useConversations(notify?: (msg: string) => void) {
   notifyRef.current = notify;
   /** 每个会话同时只允许一条在途消息 */
   const inFlight = useRef(new Set<string>());
+  /** 在途消息的取消句柄（停止生成按钮用），convId → AbortController */
+  const stops = useRef(new Map<string, AbortController>());
 
   const failMsg = (e: unknown, fallback: string) =>
     notifyRef.current?.(e instanceof ApiError ? e.message : fallback);
@@ -125,6 +127,8 @@ export function useConversations(notify?: (msg: string) => void) {
     inFlight.current.add(convId);
 
     const startedAt = Date.now();
+    const stopCtl = new AbortController();
+    stops.current.set(convId, stopCtl);
     try {
       const { userMessage, agentMessage } = await apiSendStream(convId, text, ev => {
         if (ev.type === "start") {
@@ -145,7 +149,7 @@ export function useConversations(notify?: (msg: string) => void) {
             return { ...p, steps };
           });
         }
-      });
+      }, stopCtl.signal);
       if (agentMessage.card) withCardId(agentMessage.card);
       setConversations(prev => prev.map(c => {
         if (c.id !== convId) return c;
@@ -160,6 +164,11 @@ export function useConversations(notify?: (msg: string) => void) {
         return cur ? [cur, ...prev.filter(c => c.id !== convId)] : prev;
       });
     } catch (e) {
+      /* 用户主动停止：消息已送达后端（服务端会继续处理并落库），不回滚乐观消息 */
+      if (e instanceof ApiError && e.code === "ABORTED") {
+        notifyRef.current?.("已停止生成；这条回复稍后可能仍会出现在会话中");
+        return;
+      }
       setConversations(prev => prev.map(c =>
         c.id === convId
           ? { ...c, messages: c.messages.filter(m => m !== optimistic) }
@@ -175,10 +184,14 @@ export function useConversations(notify?: (msg: string) => void) {
       failMsg(e, "发送失败，请稍后重试");
     } finally {
       inFlight.current.delete(convId);
+      stops.current.delete(convId);
       setTypingId(prev => (prev === convId ? null : prev));
       setLive(p => (p && p.convId === convId ? null : p));
     }
   };
+
+  /** 停止当前会话的流式生成（消息已送达，仅取消前端等待） */
+  const stop = (convId: string) => { stops.current.get(convId)?.abort(); };
 
   return {
     conversations,
@@ -191,5 +204,6 @@ export function useConversations(notify?: (msg: string) => void) {
     deleteConversation,
     clearConversation,
     submit,
+    stop,
   };
 }

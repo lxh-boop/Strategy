@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { BacktestParamsDto, CreateStrategyDto, UpdateStrategyDto } from './dto';
+import { BacktestParamsDto, CreateFromBacktestDto, CreateStrategyDto, UpdateStrategyDto } from './dto';
 import { Strategy } from '../types';
 
 /* ==========================================================
@@ -14,6 +14,9 @@ type StrategyReport = Pick<Strategy, 'metrics' | 'curve' | 'benchCurve' | 'holdi
 export abstract class StrategiesService {
   abstract list(userId: number): Promise<Strategy[]>;
   abstract create(userId: number, dto: CreateStrategyDto): Promise<Strategy>;
+
+  /** API-27：由 TOOL-C07 回测卡片配置创建策略——服务端按配置重跑等权真引擎（数字与卡片一致） */
+  abstract createFromBacktest(userId: number, dto: CreateFromBacktestDto): Promise<Strategy>;
 
   /** 更新配置并自动重新回测（契约：保存 = 重新回测，同一动作） */
   abstract update(userId: number, id: string, dto: UpdateStrategyDto): Promise<Strategy>;

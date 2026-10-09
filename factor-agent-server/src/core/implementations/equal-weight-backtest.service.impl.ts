@@ -95,7 +95,9 @@ export class EqualWeightBacktestServiceImpl extends EqualWeightBacktestService {
     const portfolioReturns: number[] = [];
     const returnDates: number[] = [];
     const turnovers: number[] = [];
+    const periodFirstIdx: number[] = []; // 每期首个日收益在 portfolioReturns 中的下标（费用计提点）
     for (let i = 0; i < rebalanceDates.length; i++) {
+      periodFirstIdx.push(portfolioReturns.length);
       const periodEnd = i + 1 < rebalanceDates.length ? rebalanceDates[i + 1] : Number(p.endDate);
       for (const day of coverage.dates) {
         if (day <= rebalanceDates[i] || day > periodEnd) continue;
@@ -103,6 +105,18 @@ export class EqualWeightBacktestServiceImpl extends EqualWeightBacktestService {
         returnDates.push(day);
       }
       if (i > 0) turnovers.push(this.periodTurnover(holdings[i - 1], holdings[i]));
+    }
+
+    // ⑤b 交易费用：在第 i 期的首个收益日计提。首期建仓只买（单边 1×feeRate）；
+    //    之后每期卖旧买新，双边合计 2×单边换手×feeRate。未换手（换手 0）不计。
+    if (p.feeRate > 0) {
+      for (let i = 0; i < rebalanceDates.length; i++) {
+        const cost = i === 0 ? p.feeRate : 2 * (turnovers[i - 1] ?? 0) * p.feeRate;
+        const idx = periodFirstIdx[i];
+        if (cost > 0 && idx < portfolioReturns.length) {
+          portfolioReturns[idx] = (1 + portfolioReturns[idx]) * (1 - cost) - 1;
+        }
+      }
     }
 
     // ⑥ 基准曲线（指数日收益，按组合交易日对齐）
@@ -126,7 +140,7 @@ export class EqualWeightBacktestServiceImpl extends EqualWeightBacktestService {
       note:
         `因子 ${factorExpr}（各因子截面分位数等权合成） ｜ 区间 ${p.startDate}~${p.endDate} ｜ ` +
         `${frequencyLabel}调仓 ${rebalanceDates.length} 期 ｜ 每期持仓≤${p.topK} 只 ｜ ` +
-        `单边换手，未计交易费用 ｜ 个股缺行情日按 0 收益`,
+        `单边换手${p.feeRate > 0 ? `，费用单边 ${(p.feeRate * 100).toFixed(2)}%` : '，未计交易费用'} ｜ 个股缺行情日按 0 收益`,
       curve: aggregate.curve,
       benchCurve: aggregate.benchCurve,
       benchName: bench.name,
@@ -155,10 +169,24 @@ export class EqualWeightBacktestServiceImpl extends EqualWeightBacktestService {
         },
         {
           label: '交易费用',
-          value: '未计',
-          hint: '收益未扣手续费/滑点；换手为单边口径（上期持仓 − 两期重叠）÷ 上期持仓',
+          value: p.feeRate > 0 ? `单边 ${(p.feeRate * 100).toFixed(2)}%` : '未计',
+          hint: p.feeRate > 0
+            ? `每期换手日在组合收益中计提：首期建仓 1×${(p.feeRate * 100).toFixed(2)}%，之后买卖双边 ${(2 * p.feeRate * 100).toFixed(2)}%×单边换手；换手为单边口径（上期持仓 − 两期重叠）÷ 上期持仓`
+            : '收益未扣手续费/滑点（feeRate=0）；换手为单边口径（上期持仓 − 两期重叠）÷ 上期持仓',
         },
       ],
+      // 可复现配置：前端"保存为我的策略"（API-27）按它请求服务端重跑；结构同 BacktestRunConfig
+      config: {
+        factors: p.factors,
+        startDate: p.startDate,
+        endDate: p.endDate,
+        frequency: p.frequency,
+        ...(p.everyNTd !== undefined ? { everyNTd: p.everyNTd } : {}),
+        topK: p.topK,
+        benchmark: p.benchmark,
+      },
+      // 逐点交易日（YYYYMMDD）：前端 x 轴按真实日期打刻度，杜绝"推测日期"
+      dates: returnDates,
     };
     const summary = {
       ok: true,
@@ -172,6 +200,9 @@ export class EqualWeightBacktestServiceImpl extends EqualWeightBacktestService {
       夏普比率: aggregate.metrics.sharpe.toFixed(2),
       胜率: aggregate.metrics.winRate.toFixed(1) + '%',
       年化换手单边: formatPct(aggregate.annualTurnoverPct, 0),
+      交易费用: p.feeRate > 0
+        ? `单边 ${(p.feeRate * 100).toFixed(2)}%/次，已在每期换手日计提（首期建仓单边、之后双边×换手）`
+        : '未计（feeRate=0，收益未扣手续费）',
       基准: `${bench.name} 年化 ${formatPct(aggregate.benchAnnual)}，超额 ${formatPct(aggregate.metrics.annual - aggregate.benchAnnual)}`,
       最后一期持仓示例: holdings[holdings.length - 1].slice(0, 5),
       提示: '回测卡片已生成并将随回复展示；请用不超过 90 字总结以上结果，只能引用返回数字，不要编造，结尾用短句提醒不构成投资建议。',
@@ -180,7 +211,7 @@ export class EqualWeightBacktestServiceImpl extends EqualWeightBacktestService {
       `${factorExpr} ${p.startDate}~${p.endDate} ${frequencyLabel}: 期数=${rebalanceDates.length} ` +
         `年化=${summary.年化收益} 回撤=${summary.最大回撤} 换手=${summary.年化换手单边}`,
     );
-    return { card, summary };
+    return { card, summary, metrics: aggregate.metrics };
   }
 
   /** 每年的拉取窗口 [当年首个调仓日, 次年首个调仓日或 endDate]，逐年独立建收盘 Map */

@@ -84,6 +84,8 @@ export interface EqualWeightBacktestInput {
   everyNTd?: unknown;
   topK?: unknown;
   benchmark?: unknown;
+  /** 单边交易费率（小数，0.001 = 每边 0.1%）；缺省 0 = 不计费用。双边合计 2×feeRate，换手日计提 */
+  feeRate?: unknown;
 }
 
 /** 归一化后的合法入参 */
@@ -95,12 +97,16 @@ export interface NormalizedBacktestInput {
   everyNTd?: number;
   topK: number;
   benchmark: BenchmarkKey;
+  /** 单边费率（0~0.05），0 = 不计费用 */
+  feeRate: number;
 }
 
-/** 回测产物：前端卡片 + 给 LLM 的文字摘要（卡片绕过 LLM，摘要只含指标数字） */
+/** 回测产物：前端卡片 + 给 LLM 的文字摘要 + 原始指标（策略库等数字消费方使用） */
 export interface EqualWeightBacktestOutput {
   card: BacktestCard;
   summary: Record<string, unknown>;
+  /** RawMetrics 口径（annual/drawdown/sharpe/winRate，已四舍五入），与 card.metrics 展示串同源 */
+  metrics: RawMetrics;
 }
 
 /* ----- 入参归一化与校验（纯函数；字典白名单由实现层补一道） ----- */
@@ -174,7 +180,9 @@ export function assertBacktestInput(raw: EqualWeightBacktestInput): NormalizedBa
       可选值:
         'weekly 每周 / biweekly 每半月 / monthly 每月 / quarterly 每季 / semiannual 每半年 / annual 每年 / ' +
         'custom 每 N 个交易日（需同时传 everyNTd，5~120）',
-      行动: '不要把本回执当错误转述给用户；请直接向用户询问期望的调仓频率，等用户答复后再调用本工具',
+      行动: '不要把本回执当错误转述给用户；请直接向用户询问期望的调仓频率，等用户答复后再调用本工具。' +
+        '再次调用时必须把用户此前已明确的参数一并传入（持仓只数 topK——用户说 top5 就传 5、业绩基准 benchmark、' +
+        '单边费率 feeRate 等），只追问缺失的参数，禁止把用户说过的数值偷偷换成默认值',
     });
   }
   const frequency = String(raw.frequency).trim() as BacktestFrequency;
@@ -195,6 +203,12 @@ export function assertBacktestInput(raw: EqualWeightBacktestInput): NormalizedBa
     throw new ApiException('INVALID_ARGUMENT', 400, 'frequency 非 custom 时不要传 everyNTd（自定义间隔仅 custom 支持）');
   }
 
+  // 单边交易费率：缺省 0（不计费用）；双边合计 = 2 × feeRate，在每次换手的调仓日计提
+  const feeRate = raw.feeRate === undefined || raw.feeRate === null || raw.feeRate === '' ? 0 : Number(raw.feeRate);
+  if (!Number.isFinite(feeRate) || feeRate < 0 || feeRate > 0.05) {
+    throw new ApiException('INVALID_ARGUMENT', 400, `feeRate 须为 0~0.05 的小数（每边费率，如 0.001 = 每边 0.1%）: ${raw.feeRate}`);
+  }
+
   let topK = raw.topK === undefined || raw.topK === null || raw.topK === '' ? TOP_K_DEFAULT : Number(raw.topK);
   if (!Number.isInteger(topK) || topK < 1 || topK > TOP_K_MAX) {
     throw new ApiException('INVALID_ARGUMENT', 400, `topK 必须是 1~${TOP_K_MAX} 的整数: ${raw.topK}`);
@@ -205,7 +219,7 @@ export function assertBacktestInput(raw: EqualWeightBacktestInput): NormalizedBa
     throw new ApiException('INVALID_ARGUMENT', 400, `benchmark 只允许 hs300（沪深300）/ csi500（中证500）/ sse（上证指数）: ${raw.benchmark}`);
   }
 
-  return { factors, startDate, endDate, frequency, everyNTd, topK, benchmark };
+  return { factors, startDate, endDate, frequency, everyNTd, topK, benchmark, feeRate };
 }
 
 /* ----- 多因子等权合成选股（纯函数） ----- */

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import type { SettingIcon, UserProfile } from "../types";
 import { PROFILE } from "../data/mock";
-import { ApiError, clearToken, getProfile, logout as apiLogout, updateSetting } from "../api";
+import { ApiError, clearToken, getProfile, logout as apiLogout, updateSetting, type UserPublic } from "../api";
 import { RadarChart } from "../components/charts";
 import { Modal } from "../components/ui";
 import {
@@ -68,9 +68,17 @@ function ChoiceModal({ title, choices, selected, onClose, onSave, notify }: {
 
 /* ----- 页面 ----- */
 
-export function ProfilePage({ notify }: { notify: (m: string) => void }) {
-  /* 先用内置兜底数据渲染，随后以 GET /api/user/profile 的结果为准 */
-  const [profile, setProfile] = useState<UserProfile>(PROFILE);
+export function ProfilePage({ notify, user }: { notify: (m: string) => void; user: UserPublic }) {
+  /* 初始态：身份字段用真实登录用户（不用 mock 里的演示人设），其余等 GET /api/user/profile 回填 */
+  const [profile, setProfile] = useState<UserProfile>({
+    ...PROFILE,
+    name: user.nickname,
+    org: "",
+    plan: "",
+    registerDate: "—",
+    lastLogin: "—",
+    radar: [],
+  });
   const [editing, setEditing] = useState<null | "risk">(null);
 
   useEffect(() => {
@@ -140,12 +148,11 @@ export function ProfilePage({ notify }: { notify: (m: string) => void }) {
         <div className="profile-left">
           <div className="card user-card">
             <div className="uc-top">
-              <div className="avatar uc-avatar">陈</div>
+              <div className="avatar uc-avatar" aria-hidden="true">{user.nickname.slice(0, 1) || "友"}</div>
               <div>
                 <div className="uc-name">{profile.name}</div>
-                <div className="uc-desc">{profile.org}</div>
+                {profile.org && <div className="uc-desc">{profile.org}</div>}
               </div>
-              <span className="uc-plan">{profile.plan}</span>
             </div>
             <div className="uc-divider" />
             <div className="uc-rows">
@@ -177,7 +184,11 @@ export function ProfilePage({ notify }: { notify: (m: string) => void }) {
                 return (
                   <div key={s.key}
                     className={"setting-row" + (!isToggle ? " clickable" : "")}
-                    onClick={!isToggle ? () => setEditing("risk") : undefined}>
+                    role={!isToggle ? "button" : undefined}
+                    tabIndex={!isToggle ? 0 : undefined}
+                    aria-label={!isToggle ? `配置${s.title}` : undefined}
+                    onClick={!isToggle ? () => setEditing("risk") : undefined}
+                    onKeyDown={!isToggle ? e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setEditing("risk"); } } : undefined}>
                     <div className="setting-left">
                       <Icon />
                       <div className="setting-info">
@@ -187,7 +198,7 @@ export function ProfilePage({ notify }: { notify: (m: string) => void }) {
                     </div>
                     {isToggle ? (
                       <label className="switch" onClick={e => e.stopPropagation()}>
-                        <input type="checkbox" checked={s.on === true}
+                        <input type="checkbox" checked={s.on === true} aria-label={s.title}
                           onChange={e => toggleSetting(s.key, e.target.checked)} />
                         <span className="track" />
                       </label>
@@ -198,15 +209,6 @@ export function ProfilePage({ notify }: { notify: (m: string) => void }) {
                 );
               })}
             </div>
-          </div>
-
-          <div className="card plan-card">
-            <div className="plan-info">
-              <div className="plan-tag">专业版会员</div>
-              <div className="plan-desc">因子库全量开放 · 每月 200 次回测额度 · 内部数据直连</div>
-              <div className="plan-expire">2026-12-31 到期</div>
-            </div>
-            <button className="btn btn-outline-light" onClick={() => notify("续费流程即将上线（演示）")}>续费升级</button>
           </div>
         </div>
       </div>

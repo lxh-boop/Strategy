@@ -57,6 +57,7 @@ CREATE TABLE IF NOT EXISTS strategies (
   curve       JSON         NULL COMMENT '净值曲线（起点 100，30 点）',
   bench_curve JSON         NULL COMMENT '基准曲线',
   holdings    JSON         NULL COMMENT '持仓明细',
+  backtest_config JSON     NULL COMMENT '等权回测可复现配置（API-27 卡片策略专用；NULL=普通策略走 mock 引擎）',
   created_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   KEY idx_user (user_id),

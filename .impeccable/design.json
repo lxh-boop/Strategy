@@ -1,0 +1,131 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-10-09T00:00:00+08:00",
+  "title": "Design System: 因子智投 AlphaSage",
+  "extensions": {
+    "colorMeta": {
+      "alpha-indigo": { "role": "primary", "displayName": "Alpha靛蓝", "canonical": "#4f5df0", "tonalRamp": ["#1b2358", "#2a3494", "#3d4bd8", "#4f5df0", "#7b86f5", "#a7aef9", "#cdd2fb", "#eef0fe"] },
+      "brand-flare": { "role": "primary", "displayName": "品牌焰蓝→焰紫渐变", "canonical": "linear-gradient(135deg, #5b6cff, #8f5bff)", "tonalRamp": ["#2a3494", "#3d4bd8", "#5b6cff", "#7b86f5", "#8f5bff", "#a78ef9", "#c5b2fb", "#e6defe"] },
+      "terminal-navy": { "role": "neutral", "displayName": "终端藏青", "canonical": "#0f1524", "tonalRamp": ["#0a0e17", "#0f1524", "#141c33", "#232e4d", "#454f66", "#6a7488", "#97a1b5", "#dbe2f0"] },
+      "lab-paper": { "role": "neutral", "displayName": "实验纸", "canonical": "#f3f5f9", "tonalRamp": ["#182130", "#3a4356", "#4c5568", "#646e80", "#9aa3b2", "#c9cfdd", "#e4e8f0", "#f3f5f9"] },
+      "rise-red": { "role": "semantic", "displayName": "涨红", "canonical": "#d92f36", "tonalRamp": ["#4d1216", "#7c1e24", "#b3242b", "#d92f36", "#e5555c", "#ef8b90", "#f6bfc2", "#fdeced"] },
+      "fall-green": { "role": "semantic", "displayName": "跌绿", "canonical": "#087d52", "tonalRamp": ["#063a24", "#096041", "#087d52", "#0a9e63", "#35b581", "#6fcaa4", "#a8dfc5", "#e2f6ec"] },
+      "signal-amber": { "role": "secondary", "displayName": "Signal琥珀", "canonical": "#f59e0b", "tonalRamp": ["#452c03", "#7a4f06", "#b45309", "#f59e0b", "#f7b23d", "#fac57a", "#fddbb0", "#fff3df"] }
+    },
+    "typographyMeta": {
+      "headline": { "displayName": "Headline", "purpose": "页面标题 20px/700/-0.01em。" },
+      "body": { "displayName": "Body", "purpose": "正文、气泡、表格内容；对话列 max-width 860px。" },
+      "label": { "displayName": "Label", "purpose": "指标标签、时间戳、徽章，12px/500。" },
+      "data": { "displayName": "Data", "purpose": "统计与指标值，tabular-nums 等宽、右对齐，颜色承载涨跌语义。" }
+    },
+    "shadows": [
+      { "name": "ambient", "value": "0 1px 2px rgba(23,29,43,.04), 0 4px 16px rgba(23,29,43,.05)", "purpose": "卡片默认柔景深。" },
+      { "name": "hover-lift", "value": "0 6px 24px rgba(23,29,43,.10)", "purpose": "策略卡 hover 抬升。" },
+      { "name": "overlay", "value": "0 12px 40px rgba(16,22,35,.16)", "purpose": "弹窗与 Toast 悬浮层。" },
+      { "name": "glow-primary", "value": "0 4px 14px rgba(79,93,240,.30)", "purpose": "主按钮同色辉光。" },
+      { "name": "glow-brand", "value": "0 6px 18px rgba(91,108,255,.35)", "purpose": "导航激活态品牌辉光。" }
+    ],
+    "motion": [
+      { "name": "quick", "value": "all 0.15s ease", "purpose": "控件 hover/状态过渡。" },
+      { "name": "overlay", "value": "all 0.25s ease", "purpose": "Toast 进出、开关轨迹。" },
+      { "name": "rise", "value": "translateY(18px) → 0, 0.22s ease", "purpose": "弹窗入场 slideUp。" }
+    ],
+    "breakpoints": [
+      { "name": "narrow-workspace", "value": "1100px" },
+      { "name": "compact-workspace", "value": "900px" },
+      { "name": "icon-rail", "value": "760px" }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "主行动按钮：纯靛蓝 + 同色辉光，每视图最多一个。",
+      "html": "<button class=\"ds-btn-primary\">保存为我的策略</button>",
+      "css": ".ds-btn-primary { display: inline-flex; align-items: center; gap: 6px; border: none; border-radius: var(--rounded-md, 8px); padding: 9px 16px; font: 500 13px/1.4 \"PingFang SC\", \"Microsoft YaHei\", \"Segoe UI\", system-ui, sans-serif; background: var(--colors-alpha-indigo, #4f5df0); color: #fff; white-space: nowrap; box-shadow: 0 4px 14px rgba(79,93,240,.30); transition: all .15s ease; cursor: pointer; } .ds-btn-primary:hover { background: var(--colors-alpha-indigo-deep, #3d4bd8); box-shadow: 0 6px 18px rgba(79,93,240,.38); } .ds-btn-primary:focus-visible { outline: none; box-shadow: 0 0 0 3px rgba(79,93,240,.25); }"
+    },
+    {
+      "name": "Ghost Button",
+      "kind": "button",
+      "refersTo": "button-ghost",
+      "description": "次级行动：透明底 + 发丝线 + 墨灰字。",
+      "html": "<button class=\"ds-btn-ghost\">重新回测</button>",
+      "css": ".ds-btn-ghost { display: inline-flex; align-items: center; gap: 6px; border-radius: var(--rounded-md, 8px); padding: 9px 16px; font: 500 13px/1.4 \"PingFang SC\", \"Microsoft YaHei\", \"Segoe UI\", system-ui, sans-serif; background: transparent; color: var(--colors-lab-ink-soft, #4c5568); border: 1px solid var(--colors-lab-hairline, #e4e8f0); transition: all .15s ease; cursor: pointer; } .ds-btn-ghost:hover { color: var(--colors-lab-ink, #182130); border-color: var(--colors-lab-ink-faint, #646e80); background: var(--colors-tile-wash, #f7f8fb); }"
+    },
+    {
+      "name": "Text Input",
+      "kind": "input",
+      "refersTo": "input-text",
+      "description": "文本输入：白底发丝线，聚焦靛蓝边 + 12% 聚焦环。",
+      "html": "<input class=\"ds-text-input\" placeholder=\"例如：帮我用换手率和动量因子建一个组合\">",
+      "css": ".ds-text-input { width: 100%; box-sizing: border-box; border: 1px solid var(--colors-lab-hairline, #e4e8f0); border-radius: var(--rounded-md, 8px); padding: 10px 14px; font: 400 14px/1.6 \"PingFang SC\", \"Microsoft YaHei\", \"Segoe UI\", system-ui, sans-serif; color: var(--colors-lab-ink, #182130); background: var(--colors-lab-card, #fff); outline: none; caret-color: var(--colors-alpha-indigo, #4f5df0); } .ds-text-input:focus { border-color: var(--colors-alpha-indigo, #4f5df0); box-shadow: 0 0 0 3px rgba(79,93,240,.12); }"
+    },
+    {
+      "name": "Card",
+      "kind": "card",
+      "refersTo": "card",
+      "description": "标准容器：12px 圆角 + 发丝线 + 柔景深。",
+      "html": "<div class=\"ds-card\"><div class=\"ds-card-title\">沪深300 · 动量反转组合</div><div class=\"ds-card-sub\">更新于 2026-10-09 14:32</div></div>",
+      "css": ".ds-card { background: var(--colors-lab-card, #fff); border: 1px solid var(--colors-lab-hairline, #e4e8f0); border-radius: var(--rounded-lg, 12px); padding: 18px; box-shadow: 0 1px 2px rgba(23,29,43,.04), 0 4px 16px rgba(23,29,43,.05); } .ds-card-title { font: 600 15px/1.5 \"PingFang SC\", \"Microsoft YaHei\", \"Segoe UI\", system-ui, sans-serif; color: var(--colors-lab-ink, #182130); margin-bottom: 4px; } .ds-card-sub { font-size: 12px; color: var(--colors-lab-ink-faint, #646e80); margin-bottom: 12px; }"
+    },
+    {
+      "name": "Stat Card",
+      "kind": "custom",
+      "refersTo": "card",
+      "description": "统计卡：顶缘品牌渐变发丝是受控渐变铭牌位之一。",
+      "html": "<div class=\"ds-stat\"><div class=\"ds-stat-label\">策略总数</div><div class=\"ds-stat-value\">3<small>个</small></div></div>",
+      "css": ".ds-stat { position: relative; overflow: hidden; background: var(--colors-lab-card, #fff); border: 1px solid var(--colors-lab-hairline, #e4e8f0); border-radius: var(--rounded-lg, 12px); padding: 16px 18px; box-shadow: 0 1px 2px rgba(23,29,43,.04), 0 4px 16px rgba(23,29,43,.05); } .ds-stat::before { content: \"\"; position: absolute; top: 0; left: 0; right: 0; height: 3px; background: linear-gradient(90deg, #5b6cff, #8f5bff); opacity: .85; } .ds-stat-label { font: 500 12px/1.5 \"PingFang SC\", \"Microsoft YaHei\", \"Segoe UI\", system-ui, sans-serif; color: var(--colors-lab-ink-faint, #646e80); } .ds-stat-value { font: 700 24px/1.3 \"PingFang SC\", \"Microsoft YaHei\", \"Segoe UI\", system-ui, sans-serif; font-variant-numeric: tabular-nums; color: var(--colors-lab-ink, #182130); margin-top: 4px; } .ds-stat-value small { font-size: 13px; font-weight: 500; color: var(--colors-lab-ink-faint, #646e80); margin-left: 2px; }"
+    },
+    {
+      "name": "Nav Item (active)",
+      "kind": "nav",
+      "refersTo": "button-primary",
+      "description": "深色操作台导航项，激活态品牌渐变 + 辉光。",
+      "html": "<div class=\"ds-nav\" style=\"background:linear-gradient(180deg,#0f1524,#141c33); padding:12px; border-radius:12px; width:200px;\"><button class=\"ds-nav-item\">对话选股</button><button class=\"ds-nav-item ds-nav-active\">我的策略<em class=\"ds-nav-badge\">3</em></button></div>",
+      "css": ".ds-nav-item { display: flex; align-items: center; gap: 10px; width: 100%; padding: 10px 12px; border: none; border-radius: var(--rounded-md, 8px); background: transparent; color: var(--colors-terminal-navy-text, #97a1b5); font: 400 14px/1.4 \"PingFang SC\", \"Microsoft YaHei\", \"Segoe UI\", system-ui, sans-serif; text-align: left; cursor: pointer; transition: all .15s ease; } .ds-nav-item:hover { background: rgba(255,255,255,.06); color: #d5dbe7; } .ds-nav-active { background: linear-gradient(135deg, #5b6cff, #8f5bff); color: #fff; font-weight: 600; box-shadow: 0 6px 18px rgba(91,108,255,.35); } .ds-nav-badge { margin-left: auto; font-style: normal; font-size: 12px; background: rgba(255,255,255,.28); border-radius: 20px; padding: 1px 8px; color: #fff; }"
+    },
+    {
+      "name": "Suggestion Chip",
+      "kind": "chip",
+      "description": "输入区上方的快捷指令药丸。",
+      "html": "<div style=\"display:flex; gap:8px;\"><button class=\"ds-chip\">近期强势因子回测</button><button class=\"ds-chip ds-chip-hover\">低波动选股</button></div>",
+      "css": ".ds-chip { border: 1px solid var(--colors-lab-hairline, #e4e8f0); background: var(--colors-lab-card, #fff); color: var(--colors-lab-ink-soft, #4c5568); font: 400 12px/1.4 \"PingFang SC\", \"Microsoft YaHei\", \"Segoe UI\", system-ui, sans-serif; border-radius: 999px; padding: 5px 13px; cursor: pointer; transition: all .15s ease; } .ds-chip.ds-chip-hover, .ds-chip:hover { border-color: var(--colors-alpha-indigo, #4f5df0); color: var(--colors-alpha-indigo, #4f5df0); background: var(--colors-alpha-indigo-wash, #eef0fe); }"
+    },
+    {
+      "name": "Empty State",
+      "kind": "custom",
+      "description": "设计过的空态：渐变浅底图标章 + 标题 + 去向引导 + CTA。",
+      "html": "<div class=\"ds-empty\"><div class=\"ds-empty-icon\">📈</div><div class=\"ds-empty-title\">还没有策略</div><div class=\"ds-empty-desc\">在对话里保存一份回测，或直接新建多因子组合。</div><button class=\"ds-btn-primary\">新建策略</button></div>",
+      "css": ".ds-empty { display: flex; flex-direction: column; align-items: center; gap: 4px; text-align: center; padding: 52px 24px; background: var(--colors-lab-card, #fff); border: 1px dashed #d3d9e5; border-radius: var(--rounded-lg, 12px); } .ds-empty-icon { width: 52px; height: 52px; border-radius: 14px; margin-bottom: 8px; background: linear-gradient(135deg, rgba(91,108,255,.14), rgba(143,91,255,.10)); display: flex; align-items: center; justify-content: center; } .ds-empty-title { font: 600 15px/1.5 \"PingFang SC\", \"Microsoft YaHei\", \"Segoe UI\", system-ui, sans-serif; color: var(--colors-lab-ink, #182130); } .ds-empty-desc { font-size: 13px; color: var(--colors-lab-ink-faint, #646e80); max-width: 42ch; line-height: 1.6; } .ds-empty .ds-btn-primary { margin-top: 14px; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "深色操作台 × 冷白工作区（因子实验室·成熟形态）",
+    "overview": "第三代定稿：实验室里一台深色操作台（终端藏青侧边栏，极缓纵向明度渐变）锚定整个空间，冷白工作区里白色仪表面板以柔软景深浮着。品牌焰蓝→焰紫渐变作为受控印记回归——只出现在五个铭牌位（logo、导航激活、因子权重条、统计卡顶缘发丝、头像），主按钮用纯靛蓝加同色辉光。成熟感来自三层：重量锚（深浅铬材层级）、景深（发丝线 + 双层环境光）、工艺细节（themed 滚动条/选中色/表头着色/设计过的空态）。",
+    "keyCharacteristics": [
+      "深色操作台侧边栏 + 冷白工作区，深浅分离是第一层级",
+      "品牌渐变只出现在五个铭牌位，主按钮纯色 + 辉光",
+      "卡片柔景深：发丝线 + 双层环境光，hover 才抬升",
+      "全部数值 tabular-nums 等宽、右对齐；红涨绿跌是唯一语义红绿",
+      "紧凑高密度：12–14px 字号，间距 6–18px，圆角 12/8/6"
+    ],
+    "rules": [
+      { "name": "The 红涨绿跌 Rule", "body": "涨红跌绿不得反接，不得引入西式配色。", "section": "colors" },
+      { "name": "The Disciplined Flare Rule", "body": "渐变只允许出现在五个铭牌位（logo/导航激活/权重条/统计卡顶缘/头像）；主按钮纯靛蓝 + 辉光；页面级大面积装饰渐变一律禁止。", "section": "colors" },
+      { "name": "The Tabular Truth Rule", "body": "一切数值 tabular-nums、右对齐。", "section": "colors" },
+      { "name": "The Anchored Depth Rule", "body": "深侧边栏是全站唯一深色面；卡片用发丝线 + 双层环境光获得柔景深，hover 才抬升，弹窗用重悬浮层。", "section": "elevation" }
+    ],
+    "dos": [
+      "Do 渐变只落在五个铭牌位；强调用纯靛蓝 + 辉光。",
+      "Do 数值右对齐 tabular-nums；新控件 = 8px 圆角 + 发丝线 + 靛蓝聚焦环。",
+      "Do 浏览器表面（滚动条/选中色/光标）跟随体系着色。",
+      "Do 空态用 Empty State 组件，给用户下一步去向。"
+    ],
+    "donts": [
+      "Don't 页面级大面积装饰渐变、渐变文字。",
+      "Don't 让工作区出现第二块深色面板（操作台只有一块）。",
+      "Don't 语义色挪作装饰；红绿只属于涨跌与危险/成功。"
+    ]
+  }
+}
