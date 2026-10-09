@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import type { ReportCard, Strategy } from "./types";
+import type { BacktestCard, ReportCard, Strategy } from "./types";
 import {
   ApiError, backtestStrategy as apiBacktest, createStrategy,
-  deleteStrategy as apiDeleteStrategy, getHealth, getToken, listStrategies, updateStrategy,
+  createStrategyFromBacktest, deleteStrategy as apiDeleteStrategy, getHealth, getToken, listStrategies, updateStrategy,
   me as apiMe, AUTH_EXPIRED_EVENT, type HealthInfo, type NewStrategyInput, type UserPublic,
 } from "./api";
 import { useConversations } from "./hooks/useConversations";
@@ -108,6 +108,20 @@ function MainApp({ user }: { user: UserPublic }) {
     }
   };
 
+  /* 回测卡片（TOOL-C07）→ 保存为策略（API-27）：服务端按卡片 config 重跑等权真引擎，
+     数字与卡片一致；成功后卡片进"已保存 ✓"态 */
+  const saveBacktestCard = async (card: BacktestCard): Promise<void> => {
+    if (!card.config) return;
+    try {
+      const saved = await createStrategyFromBacktest(card.title.replace(/\s*等权回测$/, ""), card.config);
+      setStrategies(prev => [saved, ...prev]);
+      if (card.id) setSavedCardIds(prev => [...prev, card.id!]);
+      notify("策略已保存，可在「我的策略」中查看");
+    } catch (e) {
+      notify(e instanceof ApiError ? e.message : "保存策略失败");
+    }
+  };
+
   const navItems: { key: Page; label: string; icon: ReactNode }[] = [
     { key: "chat", label: "对话选股", icon: <IconChat /> },
     { key: "strategies", label: "我的策略", icon: <IconGrid /> },
@@ -142,7 +156,7 @@ function MainApp({ user }: { user: UserPublic }) {
                 onClick={() => setPage(item.key)}>
                 {item.icon}
                 <span>{item.label}</span>
-                {item.key === "strategies" && <em className="nav-badge">{strategies.length}</em>}
+                {item.key === "strategies" && strategies.length > 0 && <em className="nav-badge">{strategies.length}</em>}
               </button>
             ))}
           </nav>
@@ -155,13 +169,12 @@ function MainApp({ user }: { user: UserPublic }) {
             </div>
           </div>
 
-          <div className="sidebar-user" onClick={() => setPage("profile")}>
+          <button className="sidebar-user" onClick={() => setPage("profile")} aria-label="打开个人中心">
             <div className="avatar">{user.nickname.slice(0, 1) || "友"}</div>
             <div className="sidebar-user-info">
               <div className="sidebar-user-name">{user.nickname}</div>
-              <div className="sidebar-user-plan">团队版</div>
             </div>
-          </div>
+          </button>
         </aside>
 
         <main className="main">
@@ -173,13 +186,15 @@ function MainApp({ user }: { user: UserPublic }) {
               live={conv.live}
               loading={conv.loading}
               savedCardIds={savedCardIds}
-              notify={notify}
+              userNickname={user.nickname}
               onCreate={conv.createConversation}
               onSwitch={conv.switchConversation}
               onDelete={conv.deleteConversation}
               onClear={conv.clearConversation}
               onSubmit={conv.submit}
+              onStop={conv.stop}
               onSaveStrategy={saveStrategyFromCard}
+              onSaveBacktest={saveBacktestCard}
               onGotoStrategies={() => setPage("strategies")}
             />
           )}
@@ -194,7 +209,7 @@ function MainApp({ user }: { user: UserPublic }) {
               onDelete={id => deleteStrategyById(id).then(() => notify("策略已删除")).catch(() => {})}
             />
           )}
-          {page === "profile" && <ProfilePage notify={notify} />}
+          {page === "profile" && <ProfilePage notify={notify} user={user} />}
         </main>
 
         <Toast msg={toast} />
@@ -234,7 +249,7 @@ export default function App() {
 
   if (!authReady) {
     return (
-      <div style={{ position: "fixed", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", color: "#98a1b3", fontSize: 14 }}>
+      <div style={{ position: "fixed", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", color: "#646e80", fontSize: 14 }}>
         正在连接…
       </div>
     );

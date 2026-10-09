@@ -3,7 +3,7 @@ import type { ReactNode } from "react";
 function I({ children, size = 18 }: { children: ReactNode; size?: number }) {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
-      strokeLinecap="round" strokeLinejoin="round"
+      strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"
       style={{ width: size, height: size, flexShrink: 0 }}>
       {children}
     </svg>
@@ -16,6 +16,7 @@ export const IconGrid = () => <I><rect x="3" y="3" width="7" height="9" rx="1" /
 export const IconUser = () => <I><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" /><circle cx="12" cy="7" r="4" /></I>;
 export const IconPlus = ({ size = 15 }) => <I size={size}><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></I>;
 export const IconSend = ({ size = 15 }) => <I size={size}><line x1="22" y1="2" x2="11" y2="13" /><polygon points="22 2 15 22 11 13 2 9 22 2" /></I>;
+export const IconStop = ({ size = 15 }) => <I size={size}><rect x="6" y="6" width="12" height="12" rx="2" /></I>;
 export const IconAttach = () => <I><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" /></I>;
 export const IconTrash = () => <I><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" /></I>;
 export const IconInfo = () => <I><circle cx="12" cy="12" r="10" /><line x1="12" y1="16" x2="12" y2="12" /><line x1="12" y1="8" x2="12.01" y2="8" /></I>;
