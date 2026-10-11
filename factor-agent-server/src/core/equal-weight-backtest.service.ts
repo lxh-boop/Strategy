@@ -20,9 +20,10 @@ import { CrossSectionRow } from './factor-data.service';
    - 曲线起点 100；年化/夏普按 252 个交易日折算，无风险利率 0。
    ========================================================== */
 
-/* ----- 调仓频率（7 档枚举 + 自定义间隔；必填，无默认值） ----- */
+/* ----- 调仓频率（8 档枚举 + 自定义间隔；必填，无默认值） ----- */
 
 export type BacktestFrequency =
+  | 'daily'
   | 'weekly'
   | 'biweekly'
   | 'monthly'
@@ -33,6 +34,7 @@ export type BacktestFrequency =
 
 /** 频率 → 中文标签（卡片 tag / 工具摘要用） */
 export const FREQUENCY_LABELS: Record<BacktestFrequency, string> = {
+  daily: '每日',
   weekly: '每周',
   biweekly: '每半月',
   monthly: '每月',
@@ -42,9 +44,12 @@ export const FREQUENCY_LABELS: Record<BacktestFrequency, string> = {
   custom: '自定义',
 };
 
-/** custom 档的每 N 个交易日调仓约束：下限 5（更频退化为日度换手测试且查询超时），上限 120 */
+/** custom 档的每 N 个交易日调仓约束：下限 5（2~4 个交易日 v1 不做，更频场景用 daily 档），上限 120 */
 export const EVERY_N_TD_MIN = 5;
 export const EVERY_N_TD_MAX = 120;
+
+/** daily 档调仓期数上限（约两年交易日）：逐日全截面取数为 期数×因子数 次查询，超限耗时不可控 */
+export const DAILY_MAX_REBALANCES = 550;
 
 /* ----- 其余参数 ----- */
 
@@ -118,7 +123,7 @@ export class ClarificationSignal extends Error {
 const FREQUENCY_VALUES = Object.keys(FREQUENCY_LABELS) as BacktestFrequency[];
 
 const FREQUENCY_HINT =
-  '可选值 weekly（每周）/ biweekly（每半月）/ monthly（每月）/ quarterly（每季）/' +
+  '可选值 daily（每日）/ weekly（每周）/ biweekly（每半月）/ monthly（每月）/ quarterly（每季）/' +
   ' semiannual（每半年）/ annual（每年）/ custom（自定义，每 N 个交易日，需同时传 everyNTd）。' +
   '用户未指明调仓频率时请先向用户询问，不要自行假设。';
 
@@ -172,7 +177,7 @@ export function assertBacktestInput(raw: EqualWeightBacktestInput): NormalizedBa
     throw new ClarificationSignal({
       需要澄清: '调仓频率 frequency（必填，无默认值）',
       可选值:
-        'weekly 每周 / biweekly 每半月 / monthly 每月 / quarterly 每季 / semiannual 每半年 / annual 每年 / ' +
+        'daily 每日 / weekly 每周 / biweekly 每半月 / monthly 每月 / quarterly 每季 / semiannual 每半年 / annual 每年 / ' +
         'custom 每 N 个交易日（需同时传 everyNTd，5~120）',
       行动: '不要把本回执当错误转述给用户；请直接向用户询问期望的调仓频率，等用户答复后再调用本工具',
     });
@@ -208,6 +213,95 @@ export function assertBacktestInput(raw: EqualWeightBacktestInput): NormalizedBa
   return { factors, startDate, endDate, frequency, everyNTd, topK, benchmark };
 }
 
+/* ----- 回测区间溯源校验（纯函数） -----
+ * 策略 A：startDate/endDate 属"用户必填"参数——只能来自用户在对话中明确说过的时间
+ * （本轮或本会话早先轮次均可，即会话继承），模型凭经验补全的区间在服务端拦截。
+ * prompt/schema 描述是软约束，这里是硬保证；匹配取向"宁可漏放不可错杀"：
+ * 多日期格式/年份/相对时长/日历词宽松归一化，漏放的由最终文案的参数来源声明兜底可见。 */
+
+/** 中文数字 → 数值（相对时长解析用；"十二"类组合单独处理） */
+const CN_NUMERAL: Record<string, number> = {
+  一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9, 十: 10,
+};
+
+/** 解析相对时长里的数量（阿拉伯数字/中文数字/"十二"组合），无法解析返回 0 */
+function parseCount(raw: string): number {
+  if (/^\d+$/.test(raw)) return Number(raw);
+  if (CN_NUMERAL[raw] !== undefined) return CN_NUMERAL[raw];
+  const combo = /^([一二两三四五六七八九])十([一二三四五六七八九])?$/.exec(raw);
+  return combo ? CN_NUMERAL[combo[1]] * 10 + (combo[2] ? CN_NUMERAL[combo[2]] : 0) : 0;
+}
+
+/** 8 位日期 → UTC 天序号（跨度计算用，不依赖宿主对 YYYYMMDD 的解析行为） */
+function dayNumber(d: string): number {
+  return Date.UTC(Number(d.slice(0, 4)), Number(d.slice(4, 6)) - 1, Number(d.slice(6, 8))) / 86_400_000;
+}
+
+/** 端点日期的字面命中：YYYYMMDD、2024-01-01、2024/1/1、2024.1.1、2024年1月(1日)、202401 */
+function dateLiteralHit(d: string, text: string): boolean {
+  const y = d.slice(0, 4);
+  const mm = d.slice(4, 6);
+  const dd = d.slice(6, 8);
+  const mN = String(Number(mm));
+  const dN = String(Number(dd));
+  const forms = [
+    d,
+    `${y}-${mm}-${dd}`, `${y}-${mN}-${dN}`,
+    `${y}/${mm}/${dd}`, `${y}/${mN}/${dN}`,
+    `${y}.${mm}.${dd}`, `${y}.${mN}.${dN}`,
+    `${y}年${mm}月${dd}日`, `${y}年${mN}月${dN}日`, `${y}年${mN}月`,
+    d.slice(0, 6),
+  ];
+  return forms.some((f) => text.includes(f));
+}
+
+/**
+ * 回测区间出处判定：用户话语中存在能覆盖 [startDate, endDate] 的时间表达时返回 true。
+ * userUtterances 传本会话全部用户消息（含当前轮）——"会话继承"由此天然成立。
+ * 四条命中规则，任一命中即放行：
+ *   ① 起止两端的日期字面命中（多格式）；
+ *   ② 用户提过的年份覆盖起止两年（"2024 全年"/"2023 到 2025"）；
+ *   ③ 相对时长（近 N 年/近半年/近 N 个月）且实际跨度不超过表达上限（宽放 ~3%）；
+ *   ④ 日历词：今年/去年/前年按当前时间折算；裸"上/下半年"按两端同处一个半年。
+ */
+export function hasBacktestDateProvenance(
+  startDate: string,
+  endDate: string,
+  userUtterances: string[],
+  now: Date = new Date(),
+): boolean {
+  const text = userUtterances.join('\n');
+  if (!text.trim()) return false;
+
+  if (dateLiteralHit(startDate, text) && dateLiteralHit(endDate, text)) return true;
+
+  const mentionedYears = new Set(text.match(/(?:19|20)\d{2}(?!\d)/g) ?? []);
+  if (mentionedYears.has(startDate.slice(0, 4)) && mentionedYears.has(endDate.slice(0, 4))) return true;
+
+  let spanCap = 0;
+  for (const m of text.matchAll(/(?:近|最近|过去|这)\s*([0-9]+|[一二两三四五六七八九十]+)\s*年/g)) {
+    spanCap = Math.max(spanCap, parseCount(m[1]) * 370 + 15);
+  }
+  for (const m of text.matchAll(/(?:近|最近|过去|这)\s*([0-9]+|[一二两三四五六七八九十]+)\s*个?\s*月/g)) {
+    spanCap = Math.max(spanCap, parseCount(m[1]) * 32 + 10);
+  }
+  if (/(?:近|最近|过去|这)\s*半年/.test(text)) spanCap = Math.max(spanCap, 200);
+  if (spanCap > 0 && dayNumber(endDate) - dayNumber(startDate) <= spanCap) return true;
+
+  const nowY = now.getFullYear();
+  const startY = Number(startDate.slice(0, 4));
+  const endY = Number(endDate.slice(0, 4));
+  const bothInYear = (yy: number) => startY === yy && endY === yy;
+  if (bothInYear(nowY) && /今年/.test(text)) return true;
+  if (bothInYear(nowY - 1) && /去年/.test(text)) return true;
+  if (bothInYear(nowY - 2) && /前年/.test(text)) return true;
+  if (/(?:上|下)半年/.test(text) && startY === endY) {
+    const inUpper = (mm: number) => mm >= 1 && mm <= 6;
+    if (inUpper(Number(startDate.slice(4, 6))) === inUpper(Number(endDate.slice(4, 6)))) return true;
+  }
+  return false;
+}
+
 /* ----- 多因子等权合成选股（纯函数） ----- */
 
 /**
@@ -241,8 +335,8 @@ export function compositeTopK(factors: BacktestFactor[], sections: CrossSectionR
 /* ----- 调仓日生成（纯函数） ----- */
 
 /** 交易日（升序）按调仓频率分组，取每组最后一个交易日为调仓日。
- *  weekly 按自然周（周一为一周起点）；biweekly 按日历半月（每月 15 日含前/后）；
- *  custom 按每 everyNTd 个交易日切一组。 */
+ *  daily 每个交易日都是调仓日；weekly 按自然周（周一为一周起点）；
+ *  biweekly 按日历半月（每月 15 日含前/后）；custom 按每 everyNTd 个交易日切一组。 */
 export function groupRebalanceDates(dates: number[], frequency: BacktestFrequency, everyNTd?: number): number[] {
   if (!dates.length) return [];
   const lastOfGroup = new Map<string, number>();
@@ -261,6 +355,8 @@ function periodKey(d: number, frequency: BacktestFrequency): string {
   const m = Math.floor(d / 100) % 100;
   const day = d % 100;
   switch (frequency) {
+    case 'daily':
+      return String(d);
     case 'weekly':
       return mondayKey(y, m, day);
     case 'biweekly':
@@ -365,6 +461,11 @@ function round2(v: number): number {
 @Injectable()
 export abstract class EqualWeightBacktestService {
   abstract runEqualWeightBacktest(input: EqualWeightBacktestInput): Promise<EqualWeightBacktestOutput>;
+
+  /** 执行前快检（实现层做字典白名单校验）：确认门在 interrupt 之前调用，
+   *  让"字段不存在"这类注定失败的提案在用户确认前就被打回给模型自纠，
+   *  避免用户确认一轮之后引擎才报错、又得重新确认一轮 */
+  abstract preflight(factors: BacktestFactor[]): void;
 }
 
 /** 指标数组组装（供实现层拼卡片 metrics：四项绩效 + 年化换手） */

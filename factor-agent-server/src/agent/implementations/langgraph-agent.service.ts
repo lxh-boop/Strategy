@@ -1,15 +1,21 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage } from '@langchain/core/messages';
-import { Annotation, END, START, StateGraph } from '@langchain/langgraph';
+import { RunnableConfig } from '@langchain/core/runnables';
+import { Annotation, Command, END, GraphInterrupt, interrupt, MemorySaver, START, StateGraph } from '@langchain/langgraph';
 import { ChatOpenAI } from '@langchain/openai';
 import { AgentCard, AgentProgressSink, AgentReply, ChatMessage, Conversation } from '../../types';
 import { ApiException } from '../../common/api.exception';
 import { appendConversationLog } from '../../common/conversation-log';
 import {
+  assertBacktestInput,
+  BENCHMARKS,
   ClarificationSignal,
   EqualWeightBacktestInput,
   EqualWeightBacktestService,
+  FREQUENCY_LABELS,
+  hasBacktestDateProvenance,
+  NormalizedBacktestInput,
 } from '../../core/equal-weight-backtest.service';
 import { FactorDataService } from '../../core/factor-data.service';
 import {
@@ -46,6 +52,19 @@ const TOOL_STAGE: Record<string, string> = {
      见 dataConversations：只进不出，进程重启重置）——数据会话首轮仍走 list_factor_tables
      探索，从下一轮起免探索直达字段/读数/回测；字段知识仍按需经 list_factor_fields 加载；
    - 白名单由服务端两道闸保证：list 工具校验表名，readTable 内部全量校验；
+   - 回测区间溯源（策略A）：startDate/endDate 只能来自用户话语（本轮或会话早先轮次），
+     tools 节点调回测前经 hasBacktestDateProvenance 出处校验，无出处按 BACKTEST_PROVENANCE
+     分流：enforce 拦截转澄清（默认）/ shadow 只记日志放行 / off 关闭——
+     模型凭经验补区间在此硬拦，软约束在 tool-specs 与 system prompt；
+   - 回测参数确认门（human-in-the-loop，LangGraph interrupt + checkpointer）：
+     回测执行前 interrupt 暂停并把归一化参数（含默认值标注）抛给用户确认；
+     确认词 approve 直接执行，"授权调优" delegate 本轮内免确认（backtestDelegated 通道，
+     参数权限含区间溯源降级为日志），其余回复按 feedback 回灌模型（改参重发/放弃回测）；
+     checkpointer=MemorySaver（进程内存，重启丢暂停态即自愈），thread 按轮分配、
+     快照不跨轮累积——消息真相仍以 conversations 表为准，无双真相问题；
+     interrupt 的暂停信号靠抛 GraphInterrupt 实现，guard() 必须放行不可吞；
+   - onProgress（SSE 过程事件回调）从图状态迁至 config.configurable：回调函数不可
+     序列化进快照，config 不入检查点，节点经 progressSink(config) 取用，功能不变；
    - 工具执行走注册表（toolRunners）按名分发、guard() 统一兜底：
      澄清信号（ClarificationSignal）引导模型向用户提问，ApiException 原因给模型自纠；
    - 回测卡片绕过 LLM：tools 节点把卡片对象写入图状态 card 通道，
@@ -62,11 +81,19 @@ const TOOL_STAGE: Record<string, string> = {
 /** GLM 调用失败的信号（message 即可读上游原因），由 reply() 捕获后降级为纯报错回复 */
 class LlmTextError extends Error {}
 
-/** 工具回执统一形态：result 给模型（进 ToolMessage）；card/backtestFreq 为副作用产物，绕过模型走图状态 */
+/** 工具回执统一形态：result 给模型（进 ToolMessage）；card/backtestFreq 为副作用产物，绕过模型走图状态；
+ *  delegated 授权回执（tools 节点据此置图状态标记，本轮后续回测免确认） */
 interface ToolOutcome {
   result: Record<string, unknown>;
   card?: AgentCard;
   backtestFreq?: string;
+  delegated?: boolean;
+}
+
+/** 工具执行上下文：随调用传入的图状态只读片段（溯源校验语料、参数授权标记等） */
+interface ToolContext {
+  userUtterances: string[];
+  delegated: boolean;
 }
 
 /* ----- LangGraph 状态定义 -----
@@ -86,6 +113,10 @@ const StrategyGraphState = Annotation.Root({
   /* 当前用户消息原文：与 conversationId 同样入口写入一次、节点只读；
      独立成通道是为了把"用户说了什么"与消息流区分开，避免工具节点去 messages 里反查 */
   userText: Annotation<string>,
+  /** 会话用户话语：历史用户消息 + 当前消息，回测区间溯源校验的出处语料。
+   *  reply()/replyStream() 发起时一次性写入，图中节点只读；
+   *  语料含本会话全部历史，"早前轮次说过也算用户说过"（会话继承）由此天然成立 */
+  userUtterances: Annotation<string[]>,
   /** 回测交易频率：记录用户期望的调仓频率（如 "日频"、"每2周"），图中节点读写；无节点写入时为 undefined。
    *  注意：LangGraph state 只在一次图执行内存活，跨轮沿用需另接会话存储（暂未接线） */
   backtestFreq: Annotation<string>,
@@ -101,9 +132,10 @@ const StrategyGraphState = Annotation.Root({
     reducer: (a, b) => ({ ...a, ...b }),
     default: () => ({}),
   }),
-  /** 过程事件接收端：replyStream() 发起时一次性写入，agent/tools 节点在日志埋点处同步发事件。
-   *  不设 reducer（节点不返回它，一直保持初值）；不发起流式时为 undefined，节点侧全部可选调用 */
-  onProgress: Annotation<AgentProgressSink | undefined>,
+  /** 参数授权标记：用户在确认门回复"授权调优"后置 true，本轮（本次图执行）内后续回测免确认、
+   *  区间溯源降为只记日志——用户已把参数决定权交给 AI。授权只活一轮，图执行结束即收回，
+   *  下一轮回测重新走确认门 */
+  backtestDelegated: Annotation<boolean>,
   /** 对话消息流：本图的核心通道。
    *  reducer 必须用 concat 而不是覆盖——agent 节点每轮只返回 1 条 AIMessage（含工具调用
    *  或最终文本），tools 节点返回 N 条 ToolMessage（每个工具调用一条回执），靠 concat
@@ -127,9 +159,13 @@ export class LangGraphAgentService extends AgentService {
 
   /** 智谱 GLM（OpenAI 兼容协议）；未配置 Key 时为 null，走纯文本提示（开发模式） */
   private readonly llm: ChatOpenAI | null;
-  /** 编译后的 LangGraph 工具循环（最小结构类型，避免暴露复杂泛型） */
+  /** 编译后的 LangGraph 工具循环（最小结构类型，避免暴露复杂泛型）；
+   *  input 放宽为 object：正常轮传状态对象，确认门 resume 传 Command 实例 */
   private readonly app: {
-    invoke(state: Partial<StrategyGraphStateType>, config?: { recursionLimit?: number }): Promise<StrategyGraphStateType>;
+    invoke(
+      input: object,
+      config?: { configurable?: Record<string, unknown>; recursionLimit?: number },
+    ): Promise<StrategyGraphStateType>;
   } | null;
 
   /** 数据会话门：执行过任一因子工具的会话 id —— 此类会话的 system prompt 注入表目录原文，
@@ -137,6 +173,22 @@ export class LangGraphAgentService extends AgentService {
    *  （某轮闲聊不代表后续不查数），且误留只多几百输入 token、误摘要多付一轮探索；
    *  进程重启清空，各数据会话首轮重新探索即自愈 */
   private readonly dataConversations = new Set<string>();
+
+  /** 回测区间溯源模式：enforce 无出处拦截转澄清（默认）/ shadow 只记日志放行（观测误杀率）/
+   *  off 关闭。配置项 agent.backtestProvenance（环境变量 BACKTEST_PROVENANCE） */
+  private readonly provenanceMode: 'enforce' | 'shadow' | 'off';
+
+  /** 回测参数确认门：会话 id → 暂停中的 thread_id。interrupt 挂起时记录，
+   *  用户答复（确认/反馈）经 Command(resume) 在同一 thread 恢复；图正常收尾时删除。
+   *  进程内存：重启丢失 = 暂停中的确认作废，用户重发回测请求即自愈 */
+  private readonly pendingConfirms = new Map<string, string>();
+
+  /** 轮次序号：thread_id = `${conversationId}:${时间戳}:${seq}`，保证进程内唯一 */
+  private turnSeq = 0;
+
+  /** 检查点器（进程内存）：支撑 interrupt 暂停-恢复（回测参数确认门）。
+   *  thread 按轮分配（见 runGraph），快照不跨轮累积，消息真相仍以 conversations 表为准 */
+  private readonly checkpointer = new MemorySaver();
 
   constructor(
     config: ConfigService,
@@ -159,6 +211,7 @@ export class LangGraphAgentService extends AgentService {
     const baseURL = config.get<string>('zhipu.baseUrl') ?? 'https://open.bigmodel.cn/api/paas/v4';
     const timeoutMs = Number(config.get<number>('chat.timeoutMs') ?? 20_000);
     const thinking = config.get<string>('zhipu.thinking') ?? 'disabled';
+    this.provenanceMode = (config.get<string>('agent.backtestProvenance') ?? 'enforce') as 'enforce' | 'shadow' | 'off';
 
     if (apiKey.trim()) {
       this.llm = new ChatOpenAI({
@@ -187,7 +240,7 @@ export class LangGraphAgentService extends AgentService {
 
   private buildGraph(agent: { invoke(messages: BaseMessage[]): Promise<unknown> }) {
     return new StateGraph(StrategyGraphState)
-      .addNode('agent', async (state: StrategyGraphStateType) => {
+      .addNode('agent', async (state: StrategyGraphStateType, config: RunnableConfig) => {
         const output = (await agent.invoke(state.messages)) as AIMessage;
         const calls = output.tool_calls ?? [];
         const line = calls.length
@@ -198,11 +251,11 @@ export class LangGraphAgentService extends AgentService {
         // 进度事件：与日志同一埋点，参数只带短预览（前端示意用）
         for (const c of calls) {
           const stage = TOOL_STAGE[c.name] ?? c.name;
-          state.onProgress?.({ type: 'tool_call', name: c.name, stage, args: toEventPreview(c.args) });
+          progressSink(config)?.({ type: 'tool_call', name: c.name, stage, args: toEventPreview(c.args) });
         }
         return { messages: [output] };
       })
-      .addNode('tools', async (state: StrategyGraphStateType) => {
+      .addNode('tools', async (state: StrategyGraphStateType, config: RunnableConfig) => {
         const last = state.messages[state.messages.length - 1] as AIMessage;
         // 会话门：任一工具调用（含失败重试）即证明是数据会话，后续轮注入表目录免探索
         this.dataConversations.add(state.conversationId);
@@ -211,11 +264,18 @@ export class LangGraphAgentService extends AgentService {
         let backtestFreq: string | undefined;
         // 回合内卡片登记表：编号 = 既有张数 + 1，跨多次 tools 节点执行经 reducer 累积
         const registry = { ...(state.cardRegistry ?? {}) };
+        let outcomeDelegated = false;
         for (const call of last.tool_calls ?? []) {
           const runner = this.toolRunners[call.name];
           const outcome = runner
-            ? await this.guard(() => runner(call.args))
+            ? await this.guard(() =>
+                runner(call.args, {
+                  userUtterances: state.userUtterances,
+                  delegated: state.backtestDelegated === true,
+                }),
+              )
             : { result: { error: `未知工具: ${call.name}` } };
+          if (outcome.delegated) outcomeDelegated = true;
           additions.push(new ToolMessage({ content: JSON.stringify(outcome.result), tool_call_id: call.id ?? '' }));
           if (outcome.card) {
             card = outcome.card; // 回测失败时无卡片，保持上一次的值也无妨（默认展示卡取最后一次成功）
@@ -228,7 +288,7 @@ export class LangGraphAgentService extends AgentService {
           const line = `tools节点 ${call.name}(${toLogPreview(call.args)}) => ${this.toolResultPreview(call.name, outcome.result)}`;
           this.logger.log(line);
           appendConversationLog(state.conversationId, line);
-          state.onProgress?.({
+          progressSink(config)?.({
             type: 'tool_result',
             name: call.name,
             stage: TOOL_STAGE[call.name] ?? call.name,
@@ -240,6 +300,7 @@ export class LangGraphAgentService extends AgentService {
           messages: additions,
           ...(card ? { card } : {}),
           ...(backtestFreq ? { backtestFreq } : {}),
+          ...(outcomeDelegated ? { backtestDelegated: true } : {}),
           cardRegistry: registry,
         };
       })
@@ -249,7 +310,7 @@ export class LangGraphAgentService extends AgentService {
         return last.tool_calls?.length ? 'tools' : END;
       })
       .addEdge('tools', 'agent')
-      .compile();
+      .compile({ checkpointer: this.checkpointer });
   }
 
   /** 运行智能体：文本回复必给；本次执行跑成过等权回测则附带净值卡片（卡片绕过 LLM） */
@@ -275,36 +336,92 @@ export class LangGraphAgentService extends AgentService {
       return { text: '当前为开发模式（未配置智谱 Key），因子查询功能需配置 ZHIPU_API_KEY 后使用。' };
     }
 
-    // ② tool-calling 主链路
+    // ② 确认门恢复：会话有挂起的回测确认 → 本条消息是决策不是新提问，在同一 thread 上 resume
+    const pendingThread = this.pendingConfirms.get(conversation.id);
+    // ③ tool-calling 主链路：thread 按轮分配，快照只活一轮（消息真相仍以 conversations 表为准）
+    const threadId = `${conversation.id}:${Date.now()}:${this.turnSeq++}`;
     try {
-      this.logger.log(`图执行开始 会话=${conversation.id} 提问: ${toLogPreview(userText)}`);
+      if (pendingThread) {
+        try {
+          return await this.resumeConfirm(conversation, userText, pendingThread, onProgress);
+        } catch (error) {
+          // fail-open：恢复失败（GLM 报错等）清掉挂起映射退回普通对话，不把会话卡死在确认模式
+          this.pendingConfirms.delete(conversation.id);
+          this.logger.warn(`确认门恢复失败，已退出确认模式 会话=${conversation.id}: ${String(error)}`);
+          throw error;
+        }
+      }
+      this.logger.log(`图执行开始 会话=${conversation.id} thread=${threadId} 提问: ${toLogPreview(userText)}`);
       appendConversationLog(conversation.id, `提问: ${toLogPreview(userText)}`);
       onProgress?.({ type: 'start' });
       const state = await this.app.invoke(
         {
           conversationId: conversation.id,
           userText,
-          onProgress,
+          userUtterances: this.collectUserUtterances(conversation, userText),
           messages: this.prepareMessages(conversation, userText),
         },
-        { recursionLimit: 15 },
+        { configurable: { thread_id: threadId, onProgress }, recursionLimit: 15 },
       );
-      const last = state.messages[state.messages.length - 1] as AIMessage;
-      const text = extractText(last).trim();
-      if (!text) throw new LlmTextError('返回内容为空');
-      // 多次回测择优：模型用【展示卡片:card_N】指定展示哪一次；未指定/编号无效 → 最后一次成功的
-      const picked = applyCardSelection(text, state.cardRegistry ?? {}, state.card);
-      if (picked.markerId) {
-        this.logger.log(
-          `最终展示卡片: ${picked.markerId}${picked.card ? '' : '（编号无效，回落默认）'}，文案标记行已剔除`,
-        );
-      }
-      return picked.card ? { text: picked.text, card: picked.card } : { text: picked.text };
+      return this.collectReply(state, conversation.id, threadId);
     } catch (error) {
       const reply = this.errorReply(error, conversation.id);
       onProgress?.({ type: 'error', message: reply.text });
       return reply;
     }
+  }
+
+  /** 确认门恢复：确认词 → approve 直接执行；其余一切回复 → feedback 交模型消化
+   *  （调整参数重发会再次 interrupt，继续挂起等下一轮答复）。恢复后若图正常收尾，
+   *  collectReply 会清掉挂起映射 */
+  private async resumeConfirm(
+    conversation: Conversation,
+    userText: string,
+    threadId: string,
+    onProgress?: AgentProgressSink,
+  ): Promise<AgentReply> {
+    const trimmed = userText.trim();
+    const decision = DELEGATE_PATTERN.test(trimmed)
+      ? { action: 'delegate' as const }
+      : CONFIRM_PATTERN.test(trimmed)
+        ? { action: 'approve' as const }
+        : { action: 'feedback' as const, text: userText };
+    this.logger.log(
+      `确认门恢复 会话=${conversation.id} thread=${threadId} 决策=${decision.action} 答复: ${toLogPreview(userText)}`,
+    );
+    appendConversationLog(conversation.id, `确认门恢复 决策=${decision.action}: ${toLogPreview(userText)}`);
+    onProgress?.({ type: 'start' });
+    const state = await this.app!.invoke(new Command({ resume: decision }), {
+      configurable: { thread_id: threadId, onProgress },
+      recursionLimit: 15,
+    });
+    return this.collectReply(state, conversation.id, threadId);
+  }
+
+  /** invoke 结果收尾：中断 → 记挂起映射、返回参数确认文案；正常 → 卡片择优出回复并清挂起映射 */
+  private collectReply(state: StrategyGraphStateType, conversationId: string, threadId: string): AgentReply {
+    const interrupted = (
+      state as { __interrupt__?: Array<{ value: { params?: Record<string, string> } }> }
+    ).__interrupt__;
+    if (interrupted?.length) {
+      this.pendingConfirms.set(conversationId, threadId);
+      const params = interrupted[0]?.value?.params ?? {};
+      this.logger.log(`回测参数确认挂起 会话=${conversationId} thread=${threadId} 参数=${toLogPreview(params)}`);
+      appendConversationLog(conversationId, `回测参数确认挂起: ${toLogPreview(params)}`);
+      return { text: formatConfirmText(params) };
+    }
+    this.pendingConfirms.delete(conversationId);
+    const last = state.messages[state.messages.length - 1] as AIMessage;
+    const text = extractText(last).trim();
+    if (!text) throw new LlmTextError('返回内容为空');
+    // 多次回测择优：模型用【展示卡片:card_N】指定展示哪一次；未指定/编号无效 → 最后一次成功的
+    const picked = applyCardSelection(text, state.cardRegistry ?? {}, state.card);
+    if (picked.markerId) {
+      this.logger.log(
+        `最终展示卡片: ${picked.markerId}${picked.card ? '' : '（编号无效，回落默认）'}，文案标记行已剔除`,
+      );
+    }
+    return picked.card ? { text: picked.text, card: picked.card } : { text: picked.text };
   }
 
   /** GLM 失败 → 回复仅含失败原因（与前端展示约定一致），并同步记入会话日志 */
@@ -328,18 +445,20 @@ export class LangGraphAgentService extends AgentService {
    * 新增工具 = tool-specs.ts 加一条 schema + 这里加一行注册，不动图结构。 */
 
   /** 工具回执统一形态：result 给模型（进 ToolMessage）；card/backtestFreq 为副作用产物，绕过模型 */
-  private readonly toolRunners: Record<string, (args: unknown) => Promise<ToolOutcome>> = {
+  private readonly toolRunners: Record<string, (args: unknown, ctx: ToolContext) => Promise<ToolOutcome>> = {
     list_factor_tables: async () => ({ result: this.execListTables() }),
     list_factor_fields: async (args) => ({ result: this.execListFields(args as ListFactorFieldsArgs) }),
     read_factor_data: async (args) => ({ result: await this.execReadData(args as ReadFactorDataArgs) }),
-    run_equal_weight_backtest: async (args) => this.execRunBacktest(args as EqualWeightBacktestInput),
+    run_equal_weight_backtest: async (args, ctx) => this.execRunBacktest(args as EqualWeightBacktestInput, ctx),
   };
 
-  /** 统一兜底：澄清信号 → 指引模型向用户提问；ApiException → 原因给模型自纠；其他 → 通用失败并记日志 */
+  /** 统一兜底：澄清信号 → 指引模型向用户提问；ApiException → 原因给模型自纠；其他 → 通用失败并记日志。
+   *  例外：GraphInterrupt（确认门的暂停信号，靠抛错实现）必须原样穿透，吞掉=确认门失效 */
   private async guard(run: () => Promise<ToolOutcome>): Promise<ToolOutcome> {
     try {
       return await run();
     } catch (error) {
+      if (error instanceof GraphInterrupt) throw error;
       if (error instanceof ClarificationSignal) {
         return { result: error.guide };
       }
@@ -415,15 +534,91 @@ export class LangGraphAgentService extends AgentService {
     };
   }
 
-  /** 等权回测执行：成功 → 指标摘要给模型写文案 + 卡片经图状态绕过模型直达前端；
-   *  缺 frequency 抛 ClarificationSignal、其余异常由 guard() 统一分流 */
-  private async execRunBacktest(args: EqualWeightBacktestInput): Promise<ToolOutcome> {
-    const output = await this.backtest.runEqualWeightBacktest(args);
+  /** 等权回测执行：确认门（human-in-the-loop）——区间溯源快筛、归一化、白名单快检、
+   *  缺 frequency 澄清都通过后，interrupt 暂停把参数抛给用户确认，三决策：
+   *    approve → 跑引擎；delegate（授权调优）→ 本轮先跑本次、后续回测免确认；
+   *    feedback（改参/未确认）→ 不跑引擎，回执交模型自行消化 */
+  private async execRunBacktest(args: EqualWeightBacktestInput, ctx: ToolContext): Promise<ToolOutcome> {
+    let delegated = ctx.delegated === true;
+    // 参数授权模式下溯源降为只记日志（用户已把参数决定权交给 AI，换区间也是授权内的搜索维度）
+    this.guardBacktestDateProvenance(args, ctx.userUtterances, delegated);
+    const p = assertBacktestInput(args);
+    // 白名单快检在 interrupt 之前：字段不存在的提案先打回模型自纠，不让用户确认一个注定失败的提案
+    this.backtest.preflight(p.factors);
+
+    if (!delegated) {
+      const decision = interrupt({
+        type: 'confirm_backtest',
+        params: {
+          回测区间: `${p.startDate}~${p.endDate}`,
+          调仓频率: frequencyLabelOf(p),
+          每期持仓: `${p.topK} 只${isUserSet(args.topK) ? '' : '（默认）'}`,
+          业绩基准: `${BENCHMARKS[p.benchmark].name}${isUserSet(args.benchmark) ? '' : '（默认）'}`,
+        },
+      }) as
+        | { action: 'approve' }
+        | { action: 'delegate' }
+        | { action: 'feedback'; text: string };
+
+      if (decision.action === 'feedback') {
+        return {
+          result: {
+            已取消: `用户未确认本次回测，其回复：「${decision.text}」`,
+            行动: '请结合用户反馈决定：调整参数后重新发起回测（将再次请用户确认），或不再回测、直接回应用户',
+          },
+        };
+      }
+      if (decision.action === 'delegate') {
+        delegated = true; // 本次照常执行 + 置授权标记（随节点返回写回图状态，本轮后续免确认）
+        this.logger.log('用户授权调优：本次回测照常执行，本轮后续回测免确认');
+      }
+    }
+
+    const output = await this.backtest.runEqualWeightBacktest(p);
     return {
-      result: output.summary,
+      result: {
+        ...output.summary,
+        ...(delegated ? { 授权模式: '参数已授权，本轮内继续回测无需确认；连续多组回测整体耗时较长，完成后请汇总对比、择优推荐' } : {}),
+      },
       card: output.card,
       backtestFreq: typeof args.frequency === 'string' ? args.frequency : undefined,
+      delegated: delegated || undefined,
     };
+  }
+
+  /** 回测区间溯源（策略A：用户必填）：off 跳过；授权模式（delegated）降为只记日志；
+   *  shadow 只记日志放行（观测误杀率用）；enforce 无出处抛澄清信号引导模型向用户询问——
+   *  软约束失效时的服务端硬保证。日期格式非法不在此管（留给 assertBacktestInput 的格式校验给模型自纠） */
+  private guardBacktestDateProvenance(args: EqualWeightBacktestInput, utterances: string[], delegated = false): void {
+    if (this.provenanceMode === 'off') return;
+    const start = String(args.startDate ?? '').trim();
+    const end = String(args.endDate ?? '').trim();
+    if (delegated) {
+      if (/^\d{8}$/.test(start) && /^\d{8}$/.test(end) && !hasBacktestDateProvenance(start, end, utterances)) {
+        this.logger.warn(`[溯源-授权] 免确认回测区间无出处（放行）: ${start}~${end}`);
+      }
+      return;
+    }
+    const askGuide = (received?: string) => ({
+      需要澄清: '回测区间 startDate/endDate（必填，需用户在对话中明确指定）',
+      ...(received ? { 当前收到: received } : {}),
+      行动: '不要把本回执当错误转述给用户；请向用户询问期望的回测起止区间，等用户答复后再调用本工具，禁止自行假设区间',
+    });
+    if (!start || !end) {
+      if (this.provenanceMode === 'shadow') {
+        this.logger.warn('[溯源-shadow] 回测调用未传区间，放行交给 assertBacktestInput 格式校验');
+        return;
+      }
+      throw new ClarificationSignal(askGuide());
+    }
+    if (!/^\d{8}$/.test(start) || !/^\d{8}$/.test(end)) return;
+    if (hasBacktestDateProvenance(start, end, utterances)) return;
+    if (this.provenanceMode === 'shadow') {
+      this.logger.warn(`[溯源-shadow] 回测区间无出处放行: ${start}~${end}，用户语料: ${toLogPreview(utterances)}`);
+      return;
+    }
+    this.logger.warn(`[溯源-enforce] 拦截凭经验补全的回测区间: ${start}~${end}`);
+    throw new ClarificationSignal(askGuide(`${start}~${end}（该区间未在用户话语中出现过）`));
   }
 
   /** 工具回执的日志形态：read_factor_data 不落原始数据，只报结果形状；其余工具原样截断预览 */
@@ -449,6 +644,15 @@ export class LangGraphAgentService extends AgentService {
     if (name === 'list_factor_tables' && Array.isArray(r.tables)) return `${r.tables.length} 张表`;
     if (name === 'list_factor_fields' && Array.isArray(r.tables)) return `${r.tables.length} 张表的字段明细`;
     return '完成';
+  }
+
+  /** 会话用户话语 = 历史用户消息 + 当前消息：回测区间溯源校验的出处语料。
+   *  截最近 100 条防超长会话，空 bubble 剔除 */
+  private collectUserUtterances(conversation: Conversation, userText: string): string[] {
+    const history = conversation.messages
+      .filter((m: ChatMessage) => m.role !== 'agent')
+      .map((m: ChatMessage) => m.bubble);
+    return [...history.slice(-100), userText].filter((t) => t && t.trim());
   }
 
   /* ----- 消息构造 ----- */
@@ -477,11 +681,23 @@ export class LangGraphAgentService extends AgentService {
       : '工具流程：先 list_factor_tables 看有哪些表、list_factor_fields 看因子字段（表名/字段名只能来自这两个工具的返回，禁止凭记忆编造），' +
         '再按需调用 read_factor_data 查单点数据、或 run_equal_weight_backtest 做多因子等权回测——各工具的参数含义与约束以工具 schema 为准。';
     const system = [
+      // 模型不知道当前时间："最近两年/今年/去年"等相对时间表达靠这行换算成具体日期，
+      // 换算结果经确认门（interrupt 参数清单）展示给用户，错了用户可当场纠正
+      todayLine(),
       '你是"因子智投（AlphaSage）"多因子选股智能体，面向专业投资者，基于本地因子数据库回答数据问题。',
       flow,
       '回复规则：',
       '- 最终回复不超过 90 字，只能引用工具返回的数据，严禁编造数字或个股，不输出 JSON，结尾用短句提醒不构成投资建议；',
       '- 工具回执含"需要澄清"时，按其中"行动"指引向用户提问，不要当作错误转述；',
+      '- run_equal_weight_backtest 的回测区间（startDate/endDate）只能来自用户说过的' +
+        '时间（本轮或本会话早前轮次均可），用户没说过就先询问，禁止凭经验填日期；' +
+        'topK 与业绩基准用户没说时可用引擎默认值，但最终文案要注明"默认"；',
+      '- run_equal_weight_backtest 执行前系统会请用户确认参数：收到"已取消"回执时，' +
+        '结合用户反馈调整参数后重新发起（会再次请用户确认），或放弃回测直接回应用户，' +
+        '不要声称回测已开始或编造回测结果；',
+      '- 用户要求优化/调参/多方案对比时，可连续多次调用 run_equal_weight_backtest：' +
+        '首次仍会请用户确认，用户回复"授权调优"后本轮内免确认（回执含"授权模式"注明）；' +
+        '结束时对比各次指标择优推荐，用【展示卡片:card_N】指定展示最优的一次；',
       '- 本回合跑了多次回测时，每份回执带「卡片编号」：按用户意图选最符合的一次（如优化场景选指标最优的），在回复最末尾单独一行写【展示卡片:card_N】指定展示哪次（该行不会展示给用户）；只回测了一次则不写；',
       '- 查询无数据行时如实告知，不要编造；',
       '- 与因子数据无关的问候或闲聊：直接简短回复（不超过 90 字），不要调用工具。',
@@ -498,6 +714,52 @@ export class LangGraphAgentService extends AgentService {
       .filter(Boolean)[0] ?? '未知错误';
     return `调用返回「${firstLine.length > 120 ? firstLine.slice(0, 120) + '…' : firstLine}」`;
   }
+}
+
+/** 确认词窄匹配：只收纯确认短语；带任何附加内容（如"确认，改成周频"）按 feedback 处理，
+ *  交模型结合原文消化——误放行的代价是跑了用户没想要的参数，误拦只多一轮确认 */
+const CONFIRM_PATTERN = /^(确认|确认回测|好的?|可以|行|就这样|嗯+|ok|okay|yes)$/i;
+
+/** 授权词：确认门上用户把参数决定权交给 AI（本轮内连续回测免确认） */
+const DELEGATE_PATTERN = /^(授权(调优|优化|回测)?|调优模式|连续回测(模式)?|自动调优)$/i;
+
+/** 今天日期行（注入 system prompt）：模型没有当前时间感知，相对时间表达
+ *  （"最近两年""今年"）全靠这行换算成纯数字区间，免去反问用户的弯路 */
+function todayLine(): string {
+  const d = new Date();
+  const ymd =
+    `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
+  return `今天是 ${ymd.slice(0, 4)}-${ymd.slice(4, 6)}-${ymd.slice(6, 8)}（YYYYMMDD: ${ymd}）。` +
+    `用户用相对时间（如"最近两年""今年"）表达区间时，据此换算为具体 YYYYMMDD 起止，不要反问。`;
+}
+
+/** 确认挂起 → 用户文案：逐项列出将执行的参数（与卡片 params 同源），请求确认或改参 */
+function formatConfirmText(params: Record<string, string>): string {
+  const lines = Object.entries(params).map(([k, v]) => `- ${k}：${v}`);
+  return [
+    '将按以下参数执行等权回测：',
+    ...lines,
+    '',
+    '回复"确认"开始回测；如需调整，直接回复要改的参数（如"改成周频"、"区间用近一年"）；',
+    '如需 AI 连续多次回测自动调优，回复"授权调优"（本轮内免确认；连续计算多组参数，整体耗时会明显长于单次回测）。',
+  ].join('\n');
+}
+
+/** 从 config 取过程事件接收端：onProgress 已从图状态迁至 config.configurable——
+ *  回调函数不可序列化进 checkpointer 快照，config 本身不入检查点 */
+function progressSink(config: RunnableConfig | undefined): AgentProgressSink | undefined {
+  const c = config?.configurable as { onProgress?: AgentProgressSink } | undefined;
+  return c?.onProgress;
+}
+
+/** 入参字段是否由模型显式提供（确认清单里决定"（默认）"标注） */
+function isUserSet(v: unknown): boolean {
+  return v !== undefined && v !== null && v !== '';
+}
+
+/** 归一化频率 → 中文标签（custom 展开为"每N个交易日"，与卡片 tag 同口径） */
+function frequencyLabelOf(p: NormalizedBacktestInput): string {
+  return p.frequency === 'custom' ? `每${p.everyNTd}个交易日` : FREQUENCY_LABELS[p.frequency];
 }
 
 /** 表目录 → system prompt 目录块：原文照录（表名/中文名/描述/唯一键），不压缩改写——

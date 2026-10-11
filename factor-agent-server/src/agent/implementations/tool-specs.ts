@@ -80,7 +80,9 @@ export const RUN_EQUAL_WEIGHT_BACKTEST_SPEC = {
       '等权平均成综合分，按综合分取 Top-K 等权建仓，输出年化收益、最大回撤、夏普、胜率、' +
       '年化换手与净值/基准曲线。factors 中的表名必须来自系统提示中的表目录，字段名必须来自 ' +
       'list_factor_fields 的返回；回测无需先用 read_factor_data 抽样验证数据；' +
-      'frequency 为必填参数且无默认值，用户未指明调仓频率时必须先向用户询问，禁止自行假设。',
+      'frequency 为必填参数且无默认值，用户未指明调仓频率时必须先向用户询问，禁止自行假设；' +
+      'startDate/endDate 同样只能用用户在对话中明确说过的时间（服务端校验出处，凭经验填的区间会被拦截并要求向用户询问）；' +
+      '相对时间表达（如"最近两年""今年"）按系统提示中的今天日期换算为纯数字区间，不要反问用户要具体日期。',
     parameters: {
       type: 'object',
       properties: {
@@ -104,8 +106,14 @@ export const RUN_EQUAL_WEIGHT_BACKTEST_SPEC = {
             required: ['table', 'field'],
           },
         },
-        startDate: { type: 'string', description: '回测开始日，纯数字 YYYYMMDD，如 20230104' },
-        endDate: { type: 'string', description: '回测结束日，纯数字 YYYYMMDD，如 20251231' },
+        startDate: {
+          type: 'string',
+          description: '回测开始日，纯数字 YYYYMMDD。只能取用户在对话中明确说过的时间（本轮或本会话早前轮次均可）；用户从未说过时禁止填写，先向用户询问',
+        },
+        endDate: {
+          type: 'string',
+          description: '回测结束日，纯数字 YYYYMMDD。约束同 startDate：只能来自用户明确说过的时间，没说过先问，禁止自行假设',
+        },
         frequency: {
           type: 'string',
           enum: ['daily', 'weekly', 'biweekly', 'monthly', 'quarterly', 'semiannual', 'annual', 'custom'],
