@@ -265,17 +265,22 @@ export class LangGraphAgentService extends AgentService {
         // 回合内卡片登记表：编号 = 既有张数 + 1，跨多次 tools 节点执行经 reducer 累积
         const registry = { ...(state.cardRegistry ?? {}) };
         let outcomeDelegated = false;
+        // 授权标记批内即时传播：模型连续多组对比会在同一条消息里并发多个回测调用，
+        // 图状态要等本节点执行完才写回——若这里只读旧状态，同批第 2..N 组仍会被确认门
+        // 逐个拦下。故用批内变量：delegate 一发生，同批后续调用全部免确认。
+        let batchDelegated = state.backtestDelegated === true;
+        this.logger.log(`[授权调试] tools入口 state.backtestDelegated=${state.backtestDelegated} → batchDelegated=${batchDelegated}`);
         for (const call of last.tool_calls ?? []) {
           const runner = this.toolRunners[call.name];
           const outcome = runner
             ? await this.guard(() =>
                 runner(call.args, {
                   userUtterances: state.userUtterances,
-                  delegated: state.backtestDelegated === true,
+                  delegated: batchDelegated,
                 }),
               )
             : { result: { error: `未知工具: ${call.name}` } };
-          if (outcome.delegated) outcomeDelegated = true;
+          if (outcome.delegated) { outcomeDelegated = true; batchDelegated = true; this.logger.log(`[授权调试] 本调用带委托标记 → 批内传播 batchDelegated=${batchDelegated}`); }
           additions.push(new ToolMessage({ content: JSON.stringify(outcome.result), tool_call_id: call.id ?? '' }));
           if (outcome.card) {
             card = outcome.card; // 回测失败时无卡片，保持上一次的值也无妨（默认展示卡取最后一次成功）
@@ -381,11 +386,24 @@ export class LangGraphAgentService extends AgentService {
     onProgress?: AgentProgressSink,
   ): Promise<AgentReply> {
     const trimmed = userText.trim();
+    /* 优化建议上下文：确认门前模型刚给出多方案建议并邀请对比时，用户的肯定回复
+     * （确认/可以/好…）视为"按建议连续回测对比"——本组执行 + 授权后续组免确认，
+     * 模型即可连续跑完所有建议变体后汇总择优，不必逐组确认 */
+    const recentAgentBubbles = conversation.messages
+      .filter((m) => m.role === 'agent')
+      .slice(-3)
+      .map((m) => m.bubble);
+    const optimizationInvite = recentAgentBubbles.some((b) => /建议|对比/.test(b));
     const decision = DELEGATE_PATTERN.test(trimmed)
       ? { action: 'delegate' as const }
       : CONFIRM_PATTERN.test(trimmed)
-        ? { action: 'approve' as const }
+        ? optimizationInvite
+          ? { action: 'approve' as const, delegate: true }
+          : { action: 'approve' as const }
         : { action: 'feedback' as const, text: userText };
+    this.logger.log(
+      `[授权调试] 确认门上下文 优化建议邀请=${optimizationInvite} 答复: ${toLogPreview(userText)}`,
+    );
     this.logger.log(
       `确认门恢复 会话=${conversation.id} thread=${threadId} 决策=${decision.action} 答复: ${toLogPreview(userText)}`,
     );
@@ -556,7 +574,7 @@ export class LangGraphAgentService extends AgentService {
           业绩基准: `${BENCHMARKS[p.benchmark].name}${isUserSet(args.benchmark) ? '' : '（默认）'}`,
         },
       }) as
-        | { action: 'approve' }
+        | { action: 'approve'; delegate?: boolean }
         | { action: 'delegate' }
         | { action: 'feedback'; text: string };
 
@@ -568,13 +586,32 @@ export class LangGraphAgentService extends AgentService {
           },
         };
       }
-      if (decision.action === 'delegate') {
+      if (decision.action === 'delegate' || (decision.action === 'approve' && decision.delegate)) {
         delegated = true; // 本次照常执行 + 置授权标记（随节点返回写回图状态，本轮后续免确认）
-        this.logger.log('用户授权调优：本次回测照常执行，本轮后续回测免确认');
+        this.logger.log(
+          `[授权调试] interrupt 恢复值=${decision.action}${'delegate' in decision && decision.delegate ? '+授权' : ''} → delegated=${delegated}`,
+        );
+        this.logger.log(
+          decision.action === 'delegate'
+            ? '用户授权调优：本次回测照常执行，本轮后续回测免确认'
+            : '用户确认优化建议：本次回测照常执行，按建议的后续变体免确认连续对比',
+        );
       }
     }
 
-    const output = await this.backtest.runEqualWeightBacktest(p);
+    let output;
+    try {
+      output = await this.backtest.runEqualWeightBacktest(p);
+    } catch (error) {
+      // 委托模式下回测失败不收回授权：错误交模型自纠（如区间超出数据范围时改用表内
+      // 可用区间），同批/后续回测仍免确认——否则一组失败就把授权调优打回逐组确认
+      if (delegated && error instanceof ApiException) {
+        this.logger.warn(`[授权调试] 委托回测失败但保留授权: ${error.message}`);
+        return { result: { error: error.message }, delegated: true };
+      }
+      throw error;
+    }
+    this.logger.log(`[授权调试] execRunBacktest 返回 delegated=${delegated}`);
     return {
       result: {
         ...output.summary,
