@@ -120,10 +120,10 @@ export class BacktestRunConfigDto {
   @Matches(/^\d{8}$/, { message: 'endDate 须为 YYYYMMDD 8 位数字' })
   endDate: string;
 
-  @IsIn(['weekly', 'biweekly', 'monthly', 'quarterly', 'semiannual', 'annual', 'custom'], {
+  @IsIn(['daily', 'weekly', 'biweekly', 'monthly', 'quarterly', 'semiannual', 'annual', 'custom'], {
     message: 'frequency 取值非法',
   })
-  frequency: 'weekly' | 'biweekly' | 'monthly' | 'quarterly' | 'semiannual' | 'annual' | 'custom';
+  frequency: 'daily' | 'weekly' | 'biweekly' | 'monthly' | 'quarterly' | 'semiannual' | 'annual' | 'custom';
 
   @IsOptional()
   @IsInt()

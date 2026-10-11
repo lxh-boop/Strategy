@@ -45,7 +45,7 @@ export interface BacktestRunConfig {
   factors: { table: string; field: string; order: "desc" | "asc" }[];
   startDate: string;   // YYYYMMDD
   endDate: string;     // YYYYMMDD
-  frequency: "weekly" | "biweekly" | "monthly" | "quarterly" | "semiannual" | "annual" | "custom";
+  frequency: "daily" | "weekly" | "biweekly" | "monthly" | "quarterly" | "semiannual" | "annual" | "custom";
   everyNTd?: number;   // frequency=custom 时必填：每 N 个交易日
   topK: number;
   benchmark: "hs300" | "csi500" | "sse";

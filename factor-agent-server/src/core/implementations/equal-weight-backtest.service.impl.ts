@@ -6,6 +6,7 @@ import {
   BacktestFactor,
   BENCHMARKS,
   compositeTopK,
+  DAILY_MAX_REBALANCES,
   EqualWeightBacktestInput,
   EqualWeightBacktestOutput,
   EqualWeightBacktestService,
@@ -46,6 +47,11 @@ export class EqualWeightBacktestServiceImpl extends EqualWeightBacktestService {
     super();
   }
 
+  /** 执行前快检：字典白名单（确认门 interrupt 前调用，让坏因子在用户确认前被打回，见契约注释） */
+  preflight(factors: BacktestFactor[]): void {
+    this.assertWhitelist(factors);
+  }
+
   async runEqualWeightBacktest(input: EqualWeightBacktestInput): Promise<EqualWeightBacktestOutput> {
     const p = assertBacktestInput(input);
     this.assertWhitelist(p.factors);
@@ -63,13 +69,20 @@ export class EqualWeightBacktestServiceImpl extends EqualWeightBacktestService {
       throw new ApiException('INVALID_ARGUMENT', 400, `区间 ${p.startDate}~${p.endDate} 内因子交易日不足（${coverage.dates.length} 天），无法回测`);
     }
 
-    // ② 调仓日：按频率分组取组内最后一个交易日
+    // ② 调仓日：按频率分组取组内最后一个交易日；日频档有期数上限（兜住逐日取数的查询量）
     const rebalanceDates = groupRebalanceDates(coverage.dates, p.frequency, p.everyNTd);
     if (rebalanceDates.length < 2) {
       throw new ApiException(
         'INVALID_ARGUMENT',
         400,
         `区间内调仓期数不足（仅 ${rebalanceDates.length} 期，至少 2 期）：请扩大区间或提高调仓频率`,
+      );
+    }
+    if (p.frequency === 'daily' && rebalanceDates.length > DAILY_MAX_REBALANCES) {
+      throw new ApiException(
+        'INVALID_ARGUMENT',
+        400,
+        `日频调仓区间过长：${rebalanceDates.length} 个交易日（上限 ${DAILY_MAX_REBALANCES}，约两年）。请缩短区间或改用更低频率`,
       );
     }
 
@@ -81,13 +94,21 @@ export class EqualWeightBacktestServiceImpl extends EqualWeightBacktestService {
       );
       holdings.push(compositeTopK(p.factors, sections, p.topK));
     }
-    const emptyPeriod = holdings.findIndex((h) => h.length === 0);
-    if (emptyPeriod >= 0) {
-      throw new ApiException('INVALID_ARGUMENT', 400, `调仓日 ${rebalanceDates[emptyPeriod]} 因子值全为空，无可用持仓，请更换因子或区间`);
+    // 调仓日因子值全空的期跳过（沿用上期持仓）：日频下个别交易日因子缺失是常态，
+    // 不因单日空值整体报错；全部为空/有效期不足 2 期才报错
+    const periods: number[] = [];
+    const periodHoldings: string[][] = [];
+    for (let i = 0; i < rebalanceDates.length; i++) {
+      if (!holdings[i].length) continue;
+      periods.push(rebalanceDates[i]);
+      periodHoldings.push(holdings[i]);
+    }
+    if (periods.length < 2) {
+      throw new ApiException('INVALID_ARGUMENT', 400, `因子可用调仓期不足（仅 ${periods.length} 期，至少 2 期），请更换因子或区间`);
     }
 
     // ④ 逐年拉取"该年持仓并集"的前复权日收盘（跨年段由次年首个调仓日收口）
-    const closes = await this.fetchYearlyCloses(p, rebalanceDates, holdings);
+    const closes = await this.fetchYearlyCloses(p, periods, periodHoldings);
 
     // ⑤ 逐期计算组合日收益（持有期内日度等权再平衡）与各期单边换手
     const prevTradingDay = new Map<number, number>();
@@ -96,21 +117,21 @@ export class EqualWeightBacktestServiceImpl extends EqualWeightBacktestService {
     const returnDates: number[] = [];
     const turnovers: number[] = [];
     const periodFirstIdx: number[] = []; // 每期首个日收益在 portfolioReturns 中的下标（费用计提点）
-    for (let i = 0; i < rebalanceDates.length; i++) {
+    for (let i = 0; i < periods.length; i++) {
       periodFirstIdx.push(portfolioReturns.length);
-      const periodEnd = i + 1 < rebalanceDates.length ? rebalanceDates[i + 1] : Number(p.endDate);
+      const periodEnd = i + 1 < periods.length ? periods[i + 1] : Number(p.endDate);
       for (const day of coverage.dates) {
-        if (day <= rebalanceDates[i] || day > periodEnd) continue;
-        portfolioReturns.push(this.equalWeightDayReturn(holdings[i], closes, day, prevTradingDay.get(day)));
+        if (day <= periods[i] || day > periodEnd) continue;
+        portfolioReturns.push(this.equalWeightDayReturn(periodHoldings[i], closes, day, prevTradingDay.get(day)));
         returnDates.push(day);
       }
-      if (i > 0) turnovers.push(this.periodTurnover(holdings[i - 1], holdings[i]));
+      if (i > 0) turnovers.push(this.periodTurnover(periodHoldings[i - 1], periodHoldings[i]));
     }
 
     // ⑤b 交易费用：在第 i 期的首个收益日计提。首期建仓只买（单边 1×feeRate）；
     //    之后每期卖旧买新，双边合计 2×单边换手×feeRate。未换手（换手 0）不计。
     if (p.feeRate > 0) {
-      for (let i = 0; i < rebalanceDates.length; i++) {
+      for (let i = 0; i < periods.length; i++) {
         const cost = i === 0 ? p.feeRate : 2 * (turnovers[i - 1] ?? 0) * p.feeRate;
         const idx = periodFirstIdx[i];
         if (cost > 0 && idx < portfolioReturns.length) {
@@ -130,7 +151,7 @@ export class EqualWeightBacktestServiceImpl extends EqualWeightBacktestService {
 
     // ⑦ 聚合 → 卡片 + 摘要
     const years = portfolioReturns.length / 252;
-    const aggregate = aggregatePerformance(portfolioReturns, benchReturns, turnovers, rebalanceDates.length / years);
+    const aggregate = aggregatePerformance(portfolioReturns, benchReturns, turnovers, periods.length / years);
     const frequencyLabel = this.frequencyLabel(p);
     const factorExpr = p.factors.map((f) => f.field + (f.order === 'asc' ? '(小值优)' : '')).join(' + ');
     const card = {
@@ -139,7 +160,7 @@ export class EqualWeightBacktestServiceImpl extends EqualWeightBacktestService {
       tag: `等权回测·${frequencyLabel}`,
       note:
         `因子 ${factorExpr}（各因子截面分位数等权合成） ｜ 区间 ${p.startDate}~${p.endDate} ｜ ` +
-        `${frequencyLabel}调仓 ${rebalanceDates.length} 期 ｜ 每期持仓≤${p.topK} 只 ｜ ` +
+        `${frequencyLabel}调仓 ${periods.length} 期 ｜ 每期持仓≤${p.topK} 只 ｜ ` +
         `单边换手${p.feeRate > 0 ? `，费用单边 ${(p.feeRate * 100).toFixed(2)}%` : '，未计交易费用'} ｜ 个股缺行情日按 0 收益`,
       curve: aggregate.curve,
       benchCurve: aggregate.benchCurve,
@@ -154,7 +175,7 @@ export class EqualWeightBacktestServiceImpl extends EqualWeightBacktestService {
         },
         {
           label: '调仓频率',
-          value: `${frequencyLabel} · ${rebalanceDates.length} 期`,
+          value: `${frequencyLabel} · ${periods.length} 期`,
           hint: '区间内交易日按频率分组，每组最后一个交易日调仓',
         },
         {
@@ -193,7 +214,7 @@ export class EqualWeightBacktestServiceImpl extends EqualWeightBacktestService {
       因子: p.factors.map((f) => `${f.table}.${f.field}${f.order === 'asc' ? '（升序，值小优）' : ''}`).join(' + '),
       区间: `${p.startDate}~${p.endDate}`,
       调仓频率: frequencyLabel,
-      调仓期数: rebalanceDates.length,
+      调仓期数: periods.length,
       每期持仓上限: p.topK,
       年化收益: formatPct(aggregate.metrics.annual),
       最大回撤: aggregate.metrics.drawdown.toFixed(1) + '%',
@@ -204,11 +225,11 @@ export class EqualWeightBacktestServiceImpl extends EqualWeightBacktestService {
         ? `单边 ${(p.feeRate * 100).toFixed(2)}%/次，已在每期换手日计提（首期建仓单边、之后双边×换手）`
         : '未计（feeRate=0，收益未扣手续费）',
       基准: `${bench.name} 年化 ${formatPct(aggregate.benchAnnual)}，超额 ${formatPct(aggregate.metrics.annual - aggregate.benchAnnual)}`,
-      最后一期持仓示例: holdings[holdings.length - 1].slice(0, 5),
+      最后一期持仓示例: periodHoldings[periodHoldings.length - 1].slice(0, 5),
       提示: '回测卡片已生成并将随回复展示；请用不超过 90 字总结以上结果，只能引用返回数字，不要编造，结尾用短句提醒不构成投资建议。',
     };
     this.logger.log(
-      `${factorExpr} ${p.startDate}~${p.endDate} ${frequencyLabel}: 期数=${rebalanceDates.length} ` +
+      `${factorExpr} ${p.startDate}~${p.endDate} ${frequencyLabel}: 期数=${periods.length} ` +
         `年化=${summary.年化收益} 回撤=${summary.最大回撤} 换手=${summary.年化换手单边}`,
     );
     return { card, summary, metrics: aggregate.metrics };

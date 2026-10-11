@@ -5,6 +5,11 @@ export default () => ({
     timeoutMs: Number(process.env.CHAT_TIMEOUT_MS ?? 20_000),
     systemPrompt: process.env.SYSTEM_PROMPT ?? '',
   },
+  agent: {
+    // 回测区间溯源校验（策略A：startDate/endDate 必须来自用户话语）：
+    // enforce 无出处拦截转澄清 / shadow 只记日志放行（观测误杀率）/ off 关闭
+    backtestProvenance: (process.env.BACKTEST_PROVENANCE ?? 'enforce').toLowerCase(),
+  },
   zhipu: {
     apiKey: process.env.ZHIPU_API_KEY ?? '',
     baseUrl: (process.env.ZHIPU_BASE_URL ?? 'https://open.bigmodel.cn/api/paas/v4').replace(/\/+$/, ''),
