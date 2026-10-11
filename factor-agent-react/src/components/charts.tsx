@@ -59,8 +59,8 @@ export function BacktestChart({ p, bench, dates, width = 640, height = 190 }: {
     <svg viewBox={`0 0 ${width} ${height}`}>
       <defs>
         <linearGradient id={gid} x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0" stopColor="#828fff" stopOpacity=".22" />
-          <stop offset="1" stopColor="#828fff" stopOpacity="0" />
+          <stop offset="0" stopColor="#f7c948" stopOpacity=".16" />
+          <stop offset="1" stopColor="#f7c948" stopOpacity="0" />
         </linearGradient>
       </defs>
       {[0, 1, 2, 3].map(i => {
@@ -92,7 +92,7 @@ export function BacktestChart({ p, bench, dates, width = 640, height = 190 }: {
       <polygon points={`${padL},${height - padB} ${pts(p)} ${width - padR},${height - padB}`} fill={`url(#${gid})`} />
       <polyline points={pts(bench)} fill="none" stroke="var(--bench-line)" strokeWidth="1.8" strokeDasharray="5 4"
         pathLength={1} className="line-draw line-draw-bench" />
-      <polyline points={pts(p)} fill="none" stroke="var(--primary-hover)" strokeWidth="2.2" strokeLinejoin="round" strokeLinecap="round"
+      <polyline points={pts(p)} fill="none" stroke="var(--warn)" strokeWidth="2.2" strokeLinejoin="round" strokeLinecap="round"
         pathLength={1} className="line-draw" />
     </svg>
   );
@@ -164,9 +164,9 @@ export function RadarChart({ items }: { items: { name: string; value: number }[]
           </g>
         );
       })}
-      <polygon points={dataPts.map(fmt).join(" ")} fill="rgba(94,106,210,.22)" stroke="#828fff" strokeWidth="2" />
+      <polygon points={dataPts.map(fmt).join(" ")} fill="rgba(247,201,72,.16)" stroke="#f7c948" strokeWidth="2" />
       {dataPts.map((p, i) => (
-        <circle key={i} cx={p[0].toFixed(1)} cy={p[1].toFixed(1)} r="3" fill="#828fff" />
+        <circle key={i} cx={p[0].toFixed(1)} cy={p[1].toFixed(1)} r="3" fill="#f7c948" />
       ))}
     </svg>
   );

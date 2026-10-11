@@ -20,7 +20,7 @@ import { EqualWeightBacktestServiceImpl } from '../../../src/core/implementation
    等权回测单元测试（不触库）
    - assertBacktestInput：factors 数组 + frequency 必填无默认 + 各参数校验
    - compositeTopK：多因子截面分位数等权合成（含 asc 反向、部分覆盖）
-   - groupRebalanceDates：7 档调仓频率的分组口径
+   - groupRebalanceDates：8 档调仓频率的分组口径
    - aggregatePerformance：净值/指标/年化换手聚合
    - EqualWeightBacktestServiceImpl：stub FactorDataService 走全流程
      （双因子合成选股 → 逐年拉数 → 日收益/换手 → 卡片+摘要，含跨年拉取窗口）
@@ -82,9 +82,13 @@ describe('assertBacktestInput（入参归一化校验）', () => {
     expect(() => assertBacktestInput(baseInput({ frequency: '' }))).toThrow(ClarificationSignal);
   });
 
+  it('frequency=daily（日频）→ 合法归一化（引擎 8 档已含日频）', () => {
+    expect(assertBacktestInput(baseInput({ frequency: 'daily' })).frequency).toBe('daily');
+  });
+
   it('frequency 非法枚举 → 报错并提示可选值', () => {
-    expectApiError(() => assertBacktestInput(baseInput({ frequency: 'daily' })), 'frequency 非法');
     expectApiError(() => assertBacktestInput(baseInput({ frequency: '每两周' })), 'frequency 非法');
+    expectApiError(() => assertBacktestInput(baseInput({ frequency: 'hourly' })), 'frequency 非法');
   });
 
   it('factors 缺失 / 空数组 / 超上限 / 项缺字段 / 方向非法 → 各自报错', () => {

@@ -215,7 +215,7 @@ export function ChatPage(props: {
     onCreate, onSwitch, onDelete, onClear, onSubmit, onStop, onSaveStrategy, onSaveBacktest, onGotoStrategies,
   } = props;
   const current = conversations.find(c => c.id === currentId) ?? conversations[0];
-  const inputRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
   const typingHere = current ? typingId === current.id : false;
   const liveSteps = typingHere && live && live.convId === current?.id ? live.steps : undefined;
@@ -238,16 +238,26 @@ export function ChatPage(props: {
   }, [current?.messages.length, typingHere, liveSteps?.length]);
 
   const send = () => {
-    const text = inputRef.current?.value.trim();
+    const el = inputRef.current;
+    const text = el?.value.trim();
     if (!text) return;
     if (typingHere) {
       /* 生成中不丢草稿：文字留在输入框，提示可停止或稍候 */
       showHint("当前回复生成中，可点击「停止」结束本轮，或稍候再发送");
       return;
     }
-    if (inputRef.current) inputRef.current.value = "";
+    if (el) { el.value = ""; resetHeight(el); }
     onSubmit(text);
   };
+
+  /** 输入框随内容自增长：一行起，最多约 7 行后内部滚动 */
+  const autoResize = () => {
+    const el = inputRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = Math.min(el.scrollHeight, 196) + "px";
+  };
+  const resetHeight = (el: HTMLTextAreaElement) => { el.style.height = "auto"; };
 
   const confirmAction = () => {
     if (!confirm || !current) return;
@@ -334,15 +344,26 @@ export function ChatPage(props: {
           <div className="chat-suggestions">
             {CHAT_SUGGESTIONS.map(s => (
               <button className="suggestion-chip" key={s}
-                onClick={() => { if (inputRef.current) { inputRef.current.value = s; inputRef.current.focus(); } }}>
+                onClick={() => {
+                  if (!inputRef.current) return;
+                  inputRef.current.value = s;
+                  autoResize();
+                  inputRef.current.focus();
+                  inputRef.current.setSelectionRange(s.length, s.length);
+                }}>
                 {s}
               </button>
             ))}
           </div>
           <div className="chat-input-box">
-            <input ref={inputRef} aria-label="输入消息"
+            <textarea ref={inputRef} rows={1} aria-label="输入消息"
               placeholder="向智能体描述你的选股需求，如：帮我构建一个低波动+高股息的防御策略…"
-              onKeyDown={e => { if (e.key === "Enter") send(); }} />
+              onKeyDown={e => {
+                /* Enter 发送；Shift+Enter 换行（多行输入的标准交互） */
+                if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+              }}
+              onInput={autoResize}
+            />
             {typingHere ? (
               <button className="btn btn-ghost btn-send" onClick={() => onStop(current.id)}>
                 <IconStop />停止
