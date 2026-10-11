@@ -59,8 +59,8 @@ export function BacktestChart({ p, bench, dates, width = 640, height = 190 }: {
     <svg viewBox={`0 0 ${width} ${height}`}>
       <defs>
         <linearGradient id={gid} x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0" stopColor="#4f5df0" stopOpacity=".18" />
-          <stop offset="1" stopColor="#4f5df0" stopOpacity="0" />
+          <stop offset="0" stopColor="#828fff" stopOpacity=".22" />
+          <stop offset="1" stopColor="#828fff" stopOpacity="0" />
         </linearGradient>
       </defs>
       {[0, 1, 2, 3].map(i => {
@@ -68,7 +68,7 @@ export function BacktestChart({ p, bench, dates, width = 640, height = 190 }: {
         const yy = y(v).toFixed(1);
         return (
           <g key={i}>
-            <line x1={padL} y1={yy} x2={width - padR} y2={yy} stroke="#eef1f7" strokeWidth="1" />
+            <line x1={padL} y1={yy} x2={width - padR} y2={yy} stroke="var(--tile-border)" strokeWidth="1" />
             <text x={padL - 8} y={+yy + 4} textAnchor="end" fontSize="11" fill="var(--text-3)">{Math.round(v)}</text>
           </g>
         );
@@ -90,8 +90,10 @@ export function BacktestChart({ p, bench, dates, width = 640, height = 190 }: {
         </text>
       ))}
       <polygon points={`${padL},${height - padB} ${pts(p)} ${width - padR},${height - padB}`} fill={`url(#${gid})`} />
-      <polyline points={pts(bench)} fill="none" stroke="var(--bench-line)" strokeWidth="1.8" strokeDasharray="5 4" />
-      <polyline points={pts(p)} fill="none" stroke="#4f5df0" strokeWidth="2.2" strokeLinejoin="round" strokeLinecap="round" />
+      <polyline points={pts(bench)} fill="none" stroke="var(--bench-line)" strokeWidth="1.8" strokeDasharray="5 4"
+        pathLength={1} className="line-draw line-draw-bench" />
+      <polyline points={pts(p)} fill="none" stroke="var(--primary-hover)" strokeWidth="2.2" strokeLinejoin="round" strokeLinecap="round"
+        pathLength={1} className="line-draw" />
     </svg>
   );
 }
@@ -148,23 +150,23 @@ export function RadarChart({ items }: { items: { name: string; value: number }[]
   return (
     <svg viewBox="0 0 260 230" role="img" aria-label="因子偏好雷达图">
       {[0.25, 0.5, 0.75, 1].map(r => (
-        <polygon key={r} points={items.map((_, i) => fmt(pt(i, R * r))).join(" ")} fill="none" stroke="#e8ecf4" strokeWidth="1" />
+        <polygon key={r} points={items.map((_, i) => fmt(pt(i, R * r))).join(" ")} fill="none" stroke="#23252a" strokeWidth="1" />
       ))}
       {items.map((it, i) => {
         const [lx, ly] = pt(i, R + 18);
         const anchor = Math.abs(lx - cx) < 10 ? "middle" : lx > cx ? "start" : "end";
         return (
           <g key={it.name}>
-            <line x1={cx} y1={cy} x2={pt(i, R)[0].toFixed(1)} y2={pt(i, R)[1].toFixed(1)} stroke="#dfe4ee" strokeWidth="1" />
+            <line x1={cx} y1={cy} x2={pt(i, R)[0].toFixed(1)} y2={pt(i, R)[1].toFixed(1)} stroke="#23252a" strokeWidth="1" />
             <text x={lx.toFixed(1)} y={(ly + 4).toFixed(1)} textAnchor={anchor} fontSize="11" fill="var(--text-2)">
               {it.name} {it.value}
             </text>
           </g>
         );
       })}
-      <polygon points={dataPts.map(fmt).join(" ")} fill="rgba(79,93,240,.18)" stroke="#4f5df0" strokeWidth="2" />
+      <polygon points={dataPts.map(fmt).join(" ")} fill="rgba(94,106,210,.22)" stroke="#828fff" strokeWidth="2" />
       {dataPts.map((p, i) => (
-        <circle key={i} cx={p[0].toFixed(1)} cy={p[1].toFixed(1)} r="3" fill="#4f5df0" />
+        <circle key={i} cx={p[0].toFixed(1)} cy={p[1].toFixed(1)} r="3" fill="#828fff" />
       ))}
     </svg>
   );
