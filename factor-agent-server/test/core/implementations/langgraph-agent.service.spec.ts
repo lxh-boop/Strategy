@@ -1,4 +1,5 @@
-import { BaseMessage, HumanMessage, SystemMessage } from '@langchain/core/messages';
+import { BaseMessage, HumanMessage, SystemMessage, AIMessage, ToolMessage } from '@langchain/core/messages';
+import { Command } from '@langchain/langgraph';
 import { ConfigService } from '@nestjs/config';
 import { Conversation } from '../../../src/types';
 import {
@@ -116,5 +117,170 @@ describe('applyCardSelection（多次回测择优：展示卡片标记解析）'
     const r = applyCardSelection('你好呀。', registry);
     expect(r.text).toBe('你好呀。');
     expect(r.card).toBeUndefined();
+  });
+});
+
+/* ==========================================================
+   确认门真图测试（confirm 节点 interrupt/resume）：
+   确认与执行分离后的关键契约——
+   1. 未授权回测先走 confirm 节点 interrupt，不进引擎；
+   2. 同批多组逐组确认时，已确认的组不因节点重跑而重复执行引擎（拆节点前为 O(K²)）；
+   3. "授权调优"一次 resume 放行本批全部组；
+   4. feedback → 取消回执回模型，引擎不执行；
+   5. 参数缺调仓间隔 → 澄清信号回执，不弹确认窗。
+   通过 buildGraph 注入 stub agent（脚本化 AIMessage 序列），不依赖真实 GLM。
+   ========================================================== */
+
+const FAKE_OUTPUT = {
+  card: { type: 'backtest' as const, title: '测试卡', tag: '', curve: [100, 101], benchCurve: [100, 100.5], metrics: [] },
+  summary: { ok: true, 年化收益: '+1.0%' },
+  metrics: { annual: 1, drawdown: -1, sharpe: 1, winRate: 50 },
+};
+
+const LEGAL_ARGS = { startDate: '20240101', endDate: '20241231', rebalanceIntervalDays: 21 };
+
+/** 无 Key 构造 + stub agent 注入 buildGraph（绕过真实 GLM），返回图与全部 stub */
+function buildTestGraph() {
+  const backtest = {
+    preflight: jest.fn(),
+    runStrategyBacktest: jest.fn().mockResolvedValue(FAKE_OUTPUT),
+  };
+  const service = new LangGraphAgentService(
+    { get: () => undefined } as unknown as ConfigService,
+    {} as FactorDataService,
+    backtest as unknown as StrategyBacktestService,
+  );
+  const agent = { invoke: jest.fn() };
+  const app = (service as unknown as { buildGraph(a: unknown): { invoke(input: object, config?: object): Promise<Record<string, unknown>> } }).buildGraph(agent);
+  return { app, agent, backtest };
+}
+
+/** 图入口：最小状态（真流程由 prepareMessages 注入系统提示，与本测试无关） */
+function start(app: ReturnType<typeof buildTestGraph>['app'], threadId: string) {
+  return app.invoke(
+    { conversationId: 'spec-conv', userText: '回测', messages: [new HumanMessage('回测')] },
+    { configurable: { thread_id: threadId }, recursionLimit: 25 },
+  );
+}
+
+function withCalls(text: string, calls: { id: string; args: object }[]): AIMessage {
+  return new AIMessage({ content: text, tool_calls: calls.map((c) => ({ name: 'run_strategy_backtest', args: c.args, id: c.id, type: 'tool_call' as const })) });
+}
+
+function finalText(text: string): AIMessage {
+  return new AIMessage({ content: text });
+}
+
+function interruptParams(state: Record<string, unknown>): Record<string, string> {
+  const interrupted = (state as { __interrupt__?: Array<{ value: { params?: Record<string, string> } }> }).__interrupt__;
+  expect(interrupted?.length).toBeGreaterThan(0);
+  return interrupted![0].value.params ?? {};
+}
+
+describe('确认门真图（confirm 节点 interrupt/resume）', () => {
+  it('单组回测：confirm 挂起 → 确认 → 引擎恰好执行一次并出卡', async () => {
+    const { app, agent, backtest } = buildTestGraph();
+    agent.invoke
+      .mockResolvedValueOnce(withCalls('发起回测', [{ id: 'call_1', args: LEGAL_ARGS }]))
+      .mockResolvedValueOnce(finalText('回测完成'));
+
+    const pending = await start(app, 't-single');
+    expect(backtest.runStrategyBacktest).not.toHaveBeenCalled(); // 挂起时不进引擎
+    expect(interruptParams(pending)['回测区间']).toBe('20240101~20241231');
+
+    const done = await app.invoke(new Command({ resume: { action: 'approve' } }), {
+      configurable: { thread_id: 't-single' }, recursionLimit: 25,
+    });
+    expect(backtest.runStrategyBacktest).toHaveBeenCalledTimes(1); // 不因节点重跑而重复执行
+    expect(backtest.preflight).toHaveBeenCalled();
+    const doneMsgs = done.messages as BaseMessage[];
+    const toolMsgs = doneMsgs.filter((m) => m instanceof ToolMessage);
+    expect(toolMsgs).toHaveLength(1);
+    expect((done as { card?: { type: string } }).card?.type).toBe('backtest');
+    // checkpoint 序列化后消息是新实例，验证内容而非引用：最后一条是 agent 的最终回复
+    const lastMsg = (done.messages as BaseMessage[]).at(-1) as AIMessage;
+    expect(lastMsg.content).toBe('回测完成');
+  });
+
+  it('同批两组逐组确认：每组各 interrupt 一次，引擎共执行两次（不重跑已确认组）', async () => {
+    const { app, agent, backtest } = buildTestGraph();
+    agent.invoke
+      .mockResolvedValueOnce(withCalls('对比', [
+        { id: 'call_1', args: LEGAL_ARGS },
+        { id: 'call_2', args: { ...LEGAL_ARGS, rebalanceIntervalDays: 10 } },
+      ]))
+      .mockResolvedValueOnce(finalText('组2更优'));
+
+    const first = await start(app, 't-two');
+    expect(interruptParams(first)['调仓间隔']).toBe('每 21 个交易日');
+
+    // 确认第一组 → confirm 重跑（组1 回放 approve）→ 组2 interrupt
+    const second = await app.invoke(new Command({ resume: { action: 'approve' } }), {
+      configurable: { thread_id: 't-two' }, recursionLimit: 25,
+    });
+    expect(backtest.runStrategyBacktest).not.toHaveBeenCalled(); // 组1 确认后不会先跑一遍再被重跑
+    expect(interruptParams(second)['调仓间隔']).toBe('每 10 个交易日');
+
+    // 确认第二组 → 两组全部放行 → 引擎各执行一次
+    await app.invoke(new Command({ resume: { action: 'approve' } }), {
+      configurable: { thread_id: 't-two' }, recursionLimit: 25,
+    });
+    expect(backtest.runStrategyBacktest).toHaveBeenCalledTimes(2);
+    const runArgs = backtest.runStrategyBacktest.mock.calls.map((c) => (c[0] as { rebalanceIntervalDays: number }).rebalanceIntervalDays);
+    expect(runArgs.sort()).toEqual([10, 21]);
+  });
+
+  it('授权调优：一次 resume 放行本批全部组，回执带授权模式', async () => {
+    const { app, agent, backtest } = buildTestGraph();
+    agent.invoke
+      .mockResolvedValueOnce(withCalls('连续三组', [
+        { id: 'call_1', args: LEGAL_ARGS },
+        { id: 'call_2', args: { ...LEGAL_ARGS, rebalanceIntervalDays: 10 } },
+        { id: 'call_3', args: { ...LEGAL_ARGS, rebalanceIntervalDays: 5 } },
+      ]))
+      .mockResolvedValueOnce(finalText('择优完成'));
+
+    await start(app, 't-delegate');
+    const done = await app.invoke(new Command({ resume: { action: 'delegate' } }), {
+      configurable: { thread_id: 't-delegate' }, recursionLimit: 25,
+    });
+    // 一次 resume 后图直通 END：三组全执行、无第二次 interrupt
+    expect((done as { __interrupt__?: unknown[] }).__interrupt__).toBeUndefined();
+    expect(backtest.runStrategyBacktest).toHaveBeenCalledTimes(3);
+    const toolMsgs = (done.messages as BaseMessage[]).filter((m) => m instanceof ToolMessage);
+    expect(toolMsgs.some((m) => String((m as ToolMessage).content).includes('授权模式'))).toBe(true);
+  });
+
+  it('feedback：取消回执回模型，引擎不执行', async () => {
+    const { app, agent, backtest } = buildTestGraph();
+    agent.invoke
+      .mockResolvedValueOnce(withCalls('发起回测', [{ id: 'call_1', args: LEGAL_ARGS }]))
+      .mockResolvedValueOnce(finalText('好的，不再回测'));
+
+    await start(app, 't-feedback');
+    await app.invoke(new Command({ resume: { action: 'feedback', text: '改成周频' } }), {
+      configurable: { thread_id: 't-feedback' }, recursionLimit: 25,
+    });
+    expect(backtest.runStrategyBacktest).not.toHaveBeenCalled();
+    // 第二轮 agent 收到的上下文里含取消回执（模型据此改参重发或放弃）
+    const secondTurnMessages = agent.invoke.mock.calls[1][0] as BaseMessage[];
+    const cancelled = secondTurnMessages.find(
+      (m) => m instanceof ToolMessage && String((m as ToolMessage).content).includes('用户未确认本次回测'),
+    );
+    expect(cancelled).toBeDefined();
+    expect((cancelled as ToolMessage).content).toContain('改成周频');
+  });
+
+  it('缺调仓间隔：澄清信号回执直通模型，不弹确认窗', async () => {
+    const { app, agent, backtest } = buildTestGraph();
+    agent.invoke
+      .mockResolvedValueOnce(withCalls('发起回测', [{ id: 'call_1', args: { startDate: '20240101', endDate: '20241231' } }]))
+      .mockResolvedValueOnce(finalText('请问您希望多久调仓一次？'));
+
+    const done = await start(app, 't-clarify');
+    expect((done as { __interrupt__?: unknown[] }).__interrupt__).toBeUndefined(); // 不挂起、不弹窗
+    expect(backtest.runStrategyBacktest).not.toHaveBeenCalled();
+    const toolMsgs = (done.messages as BaseMessage[]).filter((m) => m instanceof ToolMessage);
+    expect((toolMsgs[0] as ToolMessage).content).toContain('需要澄清');
   });
 });
