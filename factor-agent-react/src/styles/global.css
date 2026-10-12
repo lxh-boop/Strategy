@@ -682,3 +682,14 @@ input[type="range"]::-webkit-slider-thumb {
   color: var(--text); outline: none; font-family: inherit;
 }
 .gate-alt-input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(224,72,72,.10); }
+
+/* ===== 策略回测卡片：月度归因 chips + 交易明细表 ===== */
+.monthly-strip { display: flex; flex-wrap: wrap; gap: 6px; }
+.monthly-chip {
+  display: inline-block; padding: 3px 8px; border-radius: 6px;
+  font-size: 12px; font-variant-numeric: tabular-nums;
+  background: var(--tile); border: 1px solid var(--tile-border);
+}
+.trade-scroll { max-height: 320px; overflow: auto; border: 1px solid var(--divider); border-radius: 8px; }
+.trade-scroll .mini-table th { position: sticky; top: 0; background: var(--card); z-index: 1; }
+.trade-scroll .mini-table td { white-space: normal; }

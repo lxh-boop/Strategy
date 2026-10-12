@@ -7,7 +7,7 @@ import {
   LangGraphAgentService,
 } from '../../../src/agent/implementations/langgraph-agent.service';
 import { FactorDataService } from '../../../src/core/factor-data.service';
-import { EqualWeightBacktestService } from '../../../src/core/equal-weight-backtest.service';
+import { StrategyBacktestService } from '../../../src/core/strategy-backtest.service';
 
 /* ==========================================================
    智能体 system prompt 拼装单元测试：表目录注入 + 数据会话门
@@ -20,7 +20,7 @@ import { EqualWeightBacktestService } from '../../../src/core/equal-weight-backt
 /** 无 Key 配置：get 恒 undefined → 开发模式分支，不创建 LLM 与图 */
 function newService(): LangGraphAgentService {
   const config = { get: () => undefined } as unknown as ConfigService;
-  return new LangGraphAgentService(config, {} as FactorDataService, {} as EqualWeightBacktestService);
+  return new LangGraphAgentService(config, {} as FactorDataService, {} as StrategyBacktestService);
 }
 
 function conv(id: string): Conversation {

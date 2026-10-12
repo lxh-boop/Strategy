@@ -8,3 +8,13 @@ tmp_dict/
 
 # 会话临时产物（UI 体检截图/对比图）
 tmp/
+
+# 本地工具配置 + 实验性临时目录（不入库）
+.codex/
+anim/
+candidates/
+final10/
+full2/
+q5/
+sports/
+v6/

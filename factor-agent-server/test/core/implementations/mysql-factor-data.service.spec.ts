@@ -37,7 +37,7 @@ const expectApiError = async (run: () => Promise<unknown>, code: string, message
 describe('MysqlFactorDataService 白名单检验', () => {
   it('表不在 SQL/tables.md 清单中 → 拒绝并提示可用表', async () => {
     await expectApiError(
-      () => makeService().readTable({ ...baseQuery, table: 'md_security' }),
+      () => makeService().readTable({ ...baseQuery, table: 'no_such_table' }),
       'INVALID_ARGUMENT',
       '表不在字段字典中',
     );

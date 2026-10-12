@@ -7,12 +7,20 @@ import { ConfirmModal, Modal, ParamsBlock } from "../components/ui";
 import { IconClose, IconLogo, IconPlus, IconSend, IconStop } from "../components/icons";
 
 /* ----- 确认门文案解析：格式由后端 formatConfirmText 生成（稳定契约）。
-   命中 = 当前智能体在等用户确认回测参数，前端以弹窗呈现结构化参数与操作按钮 ----- */
-function parseConfirmGate(bubble: string): { 区间: string; 频率: string; 持仓: string; 基准: string } | null {
-  const m = bubble.match(
-    /^将按以下参数执行等权回测：\n- 回测区间：(.+)\n- 调仓频率：(.+)\n- 每期持仓：(.+)\n- 业绩基准：(.+)\n/,
-  );
-  return m ? { 区间: m[1], 频率: m[2], 持仓: m[3], 基准: m[4] } : null;
+   首行为"将按以下参数执行(策略|等权)回测："，其后每行"- 标签：值"；
+   命中 = 当前智能体在等用户确认回测参数，前端以弹窗呈现结构化参数与操作按钮。
+   标签清单由后端决定（新引擎含排序因子方向/权重、过滤/卖出规则），前端通用渲染 ----- */
+function parseConfirmGate(bubble: string): { label: string; value: string }[] | null {
+  if (!/^将按以下参数执行(策略|等权)回测：/.test(bubble)) return null;
+  const rows = bubble
+    .split("\n")
+    .filter(l => l.startsWith("- "))
+    .map(l => {
+      const idx = l.indexOf("：");
+      return idx > 2 ? { label: l.slice(2, idx), value: l.slice(idx + 1) } : null;
+    })
+    .filter((r): r is { label: string; value: string } => r !== null);
+  return rows.length ? rows : null;
 }
 
 /* ----- 优化建议邀请识别：模型给出多方案建议并邀请"授权调优"
@@ -85,6 +93,50 @@ function AgentCardView({ card, saved, onSave, onSaveBacktest, onAskBacktest, onA
         <div className="agent-card-text">{card.note}</div>
         {/* 本次回测真实参数；旧卡片无 params 时回退策略配置项 */}
         <ParamsBlock items={card.params} />
+        {/* 月度归因 + 交易明细：策略回测（日频事件内核）新产出；旧等权卡片无这两个字段 */}
+        {card.monthly && card.monthly.length > 0 && (
+          <div style={{ marginTop: 12 }}>
+            <div className="btp-title">月度归因</div>
+            <div className="monthly-strip">
+              {card.monthly.map(m => (
+                <span key={m.month} className={`monthly-chip ${m.pct >= 0 ? "up" : "down"}`}
+                  title={`${m.month}：${m.pct > 0 ? "+" : ""}${m.pct}%`}>
+                  {m.month.slice(2)} {m.pct > 0 ? "+" : ""}{m.pct}%
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
+        {card.trades && card.trades.length > 0 && (
+          <div style={{ marginTop: 12 }}>
+            <div className="btp-title">交易明细（最近 {card.trades.length} 笔）</div>
+            <div className="trade-scroll">
+              <table className="mini-table">
+                <thead>
+                  <tr>
+                    <th>日期</th><th>证券</th><th>方向</th>
+                    <th className="num">价格</th><th className="num">股数</th>
+                    <th className="num">金额</th><th className="num">费用</th><th>原因</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {card.trades.map((t, i) => (
+                    <tr key={i}>
+                      <td>{String(t.date).replace(/^(\d{4})(\d{2})(\d{2})$/, "$1-$2-$3")}</td>
+                      <td>{t.code}</td>
+                      <td className={t.direction === "buy" ? "up" : "down"}>{t.direction === "buy" ? "买入" : "卖出"}</td>
+                      <td className="num">{t.price}</td>
+                      <td className="num">{t.shares.toLocaleString("zh-CN")}</td>
+                      <td className="num">{Math.round(t.amount).toLocaleString("zh-CN")}</td>
+                      <td className="num">{Math.round(t.fee).toLocaleString("zh-CN")}</td>
+                      <td>{t.reason}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
       </>
     );
   } else if (card.type === "report") {
@@ -433,12 +485,14 @@ export function ChatPage(props: {
             <button className="icon-btn" aria-label="关闭" onClick={closeGate}><IconClose /></button>
           </div>
           <div className="modal-body">
-            <div className="agent-card-text" style={{ margin: "0 0 12px" }}>智能体已就绪，将按以下参数执行等权回测：</div>
+            <div className="agent-card-text" style={{ margin: "0 0 12px" }}>智能体已就绪，将按以下参数执行策略回测：</div>
             <div className="gate-params">
-              <div className="gate-param"><span className="gate-param-label">回测区间</span><span className="gate-param-val">{gateParams.区间}</span></div>
-              <div className="gate-param"><span className="gate-param-label">调仓频率</span><span className="gate-param-val">{gateParams.频率}</span></div>
-              <div className="gate-param"><span className="gate-param-label">每期持仓</span><span className="gate-param-val">{gateParams.持仓}</span></div>
-              <div className="gate-param"><span className="gate-param-label">业绩基准</span><span className="gate-param-val">{gateParams.基准}</span></div>
+              {gateParams.map(p => (
+                <div className="gate-param" key={p.label}>
+                  <span className="gate-param-label">{p.label}</span>
+                  <span className="gate-param-val">{p.value}</span>
+                </div>
+              ))}
             </div>
             <div className="gate-hint">
               「确认执行」立即开始回测；「授权调优」由智能体按建议连续多组自动对比择优。

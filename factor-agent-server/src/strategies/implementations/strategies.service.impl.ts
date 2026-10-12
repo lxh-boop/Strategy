@@ -1,16 +1,25 @@
 import { Injectable } from '@nestjs/common';
 import { ApiException } from '../../common/api.exception';
 import { normalizeWeights, BacktestService } from '../../core/backtest.service';
-import { BENCHMARKS, EqualWeightBacktestService, FREQUENCY_LABELS } from '../../core/equal-weight-backtest.service';
+import {
+  BENCHMARKS,
+  BenchmarkKey,
+  legacyConfigToInput,
+  StrategyBacktestInput,
+  StrategyBacktestService,
+} from '../../core/strategy-backtest.service';
 import { todayStr, CURVE_FLAT } from '../../core/store.service';
 import { UserStoreService } from '../../core/user-store.service';
-import { BacktestRunConfig, FactorWeight, Strategy } from '../../types';
+import { BacktestRunConfig, FactorWeight, Strategy, StrategyRunConfig } from '../../types';
 import { BacktestParamsDto, CreateFromBacktestDto, CreateStrategyDto, UpdateStrategyDto } from '../dto';
 import { StrategiesService } from '../strategies.service';
 
 /* ==========================================================
    策略业务实现：草稿创建、保存=归一化+自动重新回测（API-10 语义）、报告详情组装
    M13：数据经 UserStoreService 按 userId 隔离（userId 来自 JWT，不信任入参）
+   回测统一走策略回测引擎（日频事件内核）：
+   - 新卡片 config（StrategyRunConfig）直接重跑；
+   - 历史等权卡片 config（BacktestRunConfig）经 legacyConfigToInput 适配后重跑。
    ========================================================== */
 
 /** 股票池 → 默认业绩基准 */
@@ -20,9 +29,56 @@ const UNIVERSE_BENCH: [string, string][] = [
   ['沪深300', '沪深300指数'],
 ];
 
+/** 旧等权配置的频率标签（展示用；新配置直接按 rebalanceIntervalDays 展示） */
+const LEGACY_FREQUENCY_LABELS: Record<string, string> = {
+  daily: '每日',
+  weekly: '每周',
+  biweekly: '每半月',
+  monthly: '每月',
+  quarterly: '每季',
+  semiannual: '每半年',
+  annual: '每年',
+  custom: '自定义',
+};
+
 function defaultBenchmark(universe: string): string {
   const hit = UNIVERSE_BENCH.find(([key]) => universe.includes(key));
   return hit ? hit[1] : '沪深300指数';
+}
+
+/** 卡片 config → 引擎入参：新 StrategyRunConfig 直接用；旧 BacktestRunConfig 走适配 */
+function toStrategyInput(config: BacktestRunConfig | StrategyRunConfig): StrategyBacktestInput {
+  if ('rebalanceIntervalDays' in config) return config as StrategyRunConfig;
+  return legacyConfigToInput(config as BacktestRunConfig);
+}
+
+/** 调仓方式展示标签（两种 config 统一口径） */
+function rebalanceLabel(config: BacktestRunConfig | StrategyRunConfig): string {
+  if ('rebalanceIntervalDays' in config) return `每${config.rebalanceIntervalDays}个交易日调仓`;
+  const legacy = config as BacktestRunConfig;
+  return (
+    LEGACY_FREQUENCY_LABELS[legacy.frequency] +
+    (legacy.frequency === 'custom' && legacy.everyNTd ? `·每${legacy.everyNTd}交易日` : '') +
+    '调仓'
+  );
+}
+
+/** 因子展示权重（等权折算仅作展示） */
+function factorWeights(config: BacktestRunConfig | StrategyRunConfig): FactorWeight[] {
+  if ('sortFactors' in config) {
+    return normalizeWeights(
+      (config as StrategyRunConfig).sortFactors?.map((f) => ({
+        name: `${f.field}${f.direction === -1 ? '(小值优)' : '(大值优)'}`,
+        weight: 1,
+      })) ?? [],
+    );
+  }
+  return normalizeWeights(
+    (config as BacktestRunConfig).factors.map((f) => ({
+      name: `${f.field}${f.order === 'asc' ? '(小值优)' : '(大值优)'}`,
+      weight: 1,
+    })),
+  );
 }
 
 @Injectable()
@@ -30,7 +86,7 @@ export class StrategiesServiceImpl extends StrategiesService {
   constructor(
     private readonly users: UserStoreService,
     private readonly backtestEngine: BacktestService,
-    private readonly equalWeight: EqualWeightBacktestService,
+    private readonly strategyBacktest: StrategyBacktestService,
   ) {
     super();
   }
@@ -59,32 +115,26 @@ export class StrategiesServiceImpl extends StrategiesService {
     return strategy;
   }
 
-  /** API-27：由 TOOL-C07 回测卡片配置创建策略——服务端按同一配置重跑等权真引擎，
+  /** API-27：由回测卡片配置创建策略——服务端按同一配置重跑策略回测真引擎，
    *  曲线/指标与卡片一致（同数据同配置确定性复现）。因子权重按等权折算仅作展示。 */
   async createFromBacktest(userId: number, dto: CreateFromBacktestDto): Promise<Strategy> {
-    const config = dto.config as BacktestRunConfig;
-    const out = await this.equalWeight.runEqualWeightBacktest(config);
+    const config = dto.config as BacktestRunConfig | StrategyRunConfig;
+    const input = toStrategyInput(config);
+    const out = await this.strategyBacktest.runStrategyBacktest(input);
     const strategy: Strategy = {
       id: 's' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
       name: dto.name,
       status: 'done',
       universe: '全市场（因子表覆盖）',
-      rebalance:
-        FREQUENCY_LABELS[config.frequency] +
-        (config.frequency === 'custom' && config.everyNTd ? `·每${config.everyNTd}交易日` : ''),
-      benchmark: BENCHMARKS[config.benchmark].name,
+      rebalance: rebalanceLabel(config),
+      benchmark: BENCHMARKS[(input.benchmark ?? 'hs300') as BenchmarkKey].name,
       updatedAt: todayStr(),
-      factors: normalizeWeights(
-        config.factors.map((f) => ({
-          name: `${f.field}${f.order === 'asc' ? '(小值优)' : '(大值优)'}`,
-          weight: 1,
-        })),
-      ),
+      factors: factorWeights(config),
       metrics: out.metrics,
       curve: out.card.curve,
       benchCurve: out.card.benchCurve,
       dates: out.card.dates,
-      holdings: [], // 等权引擎暂不产出持仓明细（引出计划见 docs/status），详情页展示口径见前端
+      holdings: [], // 策略回测引擎暂不产出持仓明细，详情页展示口径见前端
       backtestConfig: config,
     };
     await this.users.saveStrategy(userId, strategy);
@@ -130,9 +180,9 @@ export class StrategiesServiceImpl extends StrategiesService {
 
   /** 执行回测并写回策略（草稿回测完成后状态变为 done，其余保持原状态） */
   private async runBacktest(userId: number, strategy: Strategy, params: BacktestParamsDto): Promise<Strategy> {
-    /* 由回测卡片生成的策略：重跑等权真引擎（按存储的可复现配置），不走 mock */
+    /* 由回测卡片生成的策略：重跑策略回测真引擎（按存储的可复现配置），不走 mock */
     if (strategy.backtestConfig) {
-      const out = await this.equalWeight.runEqualWeightBacktest(strategy.backtestConfig);
+      const out = await this.strategyBacktest.runStrategyBacktest(toStrategyInput(strategy.backtestConfig));
       strategy.curve = out.card.curve;
       strategy.benchCurve = out.card.benchCurve;
       strategy.dates = out.card.dates;

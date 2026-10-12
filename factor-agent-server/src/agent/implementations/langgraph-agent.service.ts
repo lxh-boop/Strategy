@@ -8,14 +8,17 @@ import { AgentCard, AgentProgressSink, AgentReply, ChatMessage, Conversation } f
 import { ApiException } from '../../common/api.exception';
 import { appendConversationLog } from '../../common/conversation-log';
 import {
-  assertBacktestInput,
+  assertStrategyInput,
   BENCHMARKS,
   ClarificationSignal,
-  EqualWeightBacktestInput,
-  EqualWeightBacktestService,
-  FREQUENCY_LABELS,
-  NormalizedBacktestInput,
-} from '../../core/equal-weight-backtest.service';
+  collectFactorRefs,
+  describeFilters,
+  describeSellRules,
+  describeSortFactors,
+  effectiveSortFactors,
+  StrategyBacktestInput,
+  StrategyBacktestService,
+} from '../../core/strategy-backtest.service';
 import { FactorDataService } from '../../core/factor-data.service';
 import {
   FactorFieldInfo,
@@ -32,18 +35,18 @@ const TOOL_STAGE: Record<string, string> = {
   list_factor_tables: '查看数据表',
   list_factor_fields: '查看因子字段',
   read_factor_data: '读取因子数据',
-  run_equal_weight_backtest: '等权回测计算',
+  run_strategy_backtest: '策略回测计算',
 };
 
 /* ==========================================================
    智能体实现：LangGraph tool-calling，四个工具构成
-   "看表 → 看因子 → 读数 / 等权回测出卡片"流程
+   "看表 → 看因子 → 读数 / 策略回测出卡片"流程
 
      agent(GLM, 绑定 4 个工具) ⇄ tools(执行工具)
         │  list_factor_tables        看表清单：tables.md 目录，选出要用的表
         │  list_factor_fields        看因子清单：按表名列表查字段明细，选出要用的因子
         │  read_factor_data          读数据：按 表/因子集合/交易日/证券代码 查库
-        │  run_equal_weight_backtest 等权回测：选完因子后一步回测，产出净值卡片
+        │  run_strategy_backtest     策略回测：日频事件内核，产出净值卡片
         ▼
      最终文案（只能引用工具返回的数据）
 
@@ -52,7 +55,7 @@ const TOOL_STAGE: Record<string, string> = {
      探索，从下一轮起免探索直达字段/读数/回测；字段知识仍按需经 list_factor_fields 加载；
    - 白名单由服务端两道闸保证：list 工具校验表名，readTable 内部全量校验；
    - 回测参数确认门（human-in-the-loop，LangGraph interrupt + checkpointer）：
-     回测执行前 interrupt 暂停并把归一化参数（含默认值标注）抛给用户确认，
+     回测执行前 interrupt 暂停并把归一化参数（含默认值标注、排序因子方向/权重）抛给用户确认，
      区间等参数模型可按用户表达换算或合理填写，错了用户在确认面板当场改；
      确认词 approve 直接执行，"授权调优" delegate 本轮内免确认（backtestDelegated 通道），
      其余回复按 feedback 回灌模型（改参重发/放弃回测）；
@@ -180,7 +183,7 @@ export class LangGraphAgentService extends AgentService {
   constructor(
     config: ConfigService,
     private readonly factorData: FactorDataService,
-    private readonly backtest: EqualWeightBacktestService,
+    private readonly backtest: StrategyBacktestService,
   ) {
     super();
     // 漂移检查（启动一次）：tables.md 已登记但 <表名>.md 字典缺失/无字段行的表，提醒补齐
@@ -442,7 +445,7 @@ export class LangGraphAgentService extends AgentService {
     list_factor_tables: async () => ({ result: this.execListTables() }),
     list_factor_fields: async (args) => ({ result: this.execListFields(args as ListFactorFieldsArgs) }),
     read_factor_data: async (args) => ({ result: await this.execReadData(args as ReadFactorDataArgs) }),
-    run_equal_weight_backtest: async (args, ctx) => this.execRunBacktest(args as EqualWeightBacktestInput, ctx),
+    run_strategy_backtest: async (args, ctx) => this.execRunBacktest(args as StrategyBacktestInput, ctx),
   };
 
   /** 统一兜底：澄清信号 → 指引模型向用户提问；ApiException → 原因给模型自纠；其他 → 通用失败并记日志。
@@ -527,23 +530,30 @@ export class LangGraphAgentService extends AgentService {
     };
   }
 
-  /** 等权回测执行：确认门（human-in-the-loop）——归一化、白名单快检、
-   *  缺 frequency 澄清都通过后，interrupt 暂停把参数抛给用户确认，三决策：
+  /** 策略回测执行：确认门（human-in-the-loop）——归一化、白名单快检、
+   *  缺调仓间隔澄清都通过后，interrupt 暂停把参数抛给用户确认（排序因子方向/权重
+   *  如实展示，v3 要求），三决策：
    *    approve → 跑引擎；delegate（授权调优）→ 本轮先跑本次、后续回测免确认；
    *    feedback（改参/未确认）→ 不跑引擎，回执交模型自行消化 */
-  private async execRunBacktest(args: EqualWeightBacktestInput, ctx: ToolContext): Promise<ToolOutcome> {
+  private async execRunBacktest(args: StrategyBacktestInput, ctx: ToolContext): Promise<ToolOutcome> {
     let delegated = ctx.delegated === true;
-    const p = assertBacktestInput(args);
+    const p = assertStrategyInput(args);
     // 白名单快检在 interrupt 之前：字段不存在的提案先打回模型自纠，不让用户确认一个注定失败的提案
-    this.backtest.preflight(p.factors);
+    this.backtest.preflight(collectFactorRefs(p));
 
     if (!delegated) {
+      const sort = effectiveSortFactors(p.sortFactors);
       const decision = interrupt({
         type: 'confirm_backtest',
         params: {
           回测区间: `${p.startDate}~${p.endDate}`,
-          调仓频率: frequencyLabelOf(p),
-          每期持仓: `${p.topK} 只${isUserSet(args.topK) ? '' : '（默认）'}`,
+          股票池: p.securityIds ? `${p.securityIds.length} 只` : '全市场',
+          调仓间隔: `每 ${p.rebalanceIntervalDays} 个交易日`,
+          每期持仓: `${p.maxPositions} 只 × ${p.idealPositionPct}%${isUserSet(args.maxPositions) ? '' : '（默认）'}`,
+          排序因子: describeSortFactors(sort.factors) + (sort.usedDefault ? '【默认追加】' : ''),
+          过滤因子: describeFilters(p.entryFilters),
+          卖出规则: describeSellRules(p.sellRules),
+          '初始资金/费用': `${p.initialCapital} 元 · 单边 ${(p.feeRate * 100).toFixed(2)}%${isUserSet(args.feeRate) ? '' : '（默认）'}`,
           业绩基准: `${BENCHMARKS[p.benchmark].name}${isUserSet(args.benchmark) ? '' : '（默认）'}`,
         },
       }) as
@@ -567,7 +577,7 @@ export class LangGraphAgentService extends AgentService {
 
     let output;
     try {
-      output = await this.backtest.runEqualWeightBacktest(p);
+      output = await this.backtest.runStrategyBacktest(p);
     } catch (error) {
       // 委托模式下回测失败不收回授权：错误交模型自纠（如区间超出数据范围时改用表内
       // 可用区间），同批/后续回测仍免确认——否则一组失败就把授权调优打回逐组确认
@@ -584,7 +594,7 @@ export class LangGraphAgentService extends AgentService {
         ...(delegated ? { 授权模式: '参数已授权，本轮内继续回测无需确认；连续多组回测整体耗时较长，完成后请汇总对比、择优推荐' } : {}),
       },
       card: output.card,
-      backtestFreq: typeof args.frequency === 'string' ? args.frequency : undefined,
+      backtestFreq: `每${p.rebalanceIntervalDays}个交易日`,
       delegated: delegated || undefined,
     };
   }
@@ -636,9 +646,9 @@ export class LangGraphAgentService extends AgentService {
     const flow = catalog.length
       ? '工具流程：数据表目录已附在本提示末尾，直接从中选定数据表，再调 list_factor_fields 查看该表的因子字段' +
         '（表名只能来自目录，字段名只能来自 list_factor_fields 的返回，禁止凭记忆编造），' +
-        '然后按需调用 read_factor_data 查单点数据、或 run_equal_weight_backtest 做多因子等权回测——各工具的参数含义与约束以工具 schema 为准。'
+        '然后按需调用 read_factor_data 查单点数据、或 run_strategy_backtest 跑策略回测——各工具的参数含义与约束以工具 schema 为准。'
       : '工具流程：先 list_factor_tables 看有哪些表、list_factor_fields 看因子字段（表名/字段名只能来自这两个工具的返回，禁止凭记忆编造），' +
-        '再按需调用 read_factor_data 查单点数据、或 run_equal_weight_backtest 做多因子等权回测——各工具的参数含义与约束以工具 schema 为准。';
+        '再按需调用 read_factor_data 查单点数据、或 run_strategy_backtest 跑策略回测——各工具的参数含义与约束以工具 schema 为准。';
     const system = [
       // 模型不知道当前时间："最近两年/今年/去年"等相对时间表达靠这行换算成具体日期，
       // 换算结果经确认门（interrupt 参数清单）展示给用户，错了用户可当场纠正
@@ -648,14 +658,16 @@ export class LangGraphAgentService extends AgentService {
       '回复规则：',
       '- 最终回复不超过 90 字，只能引用工具返回的数据，严禁编造数字或个股，不输出 JSON，结尾用短句提醒不构成投资建议；',
       '- 工具回执含"需要澄清"时，按其中"行动"指引向用户提问，不要当作错误转述；',
-      '- run_equal_weight_backtest 的回测区间（startDate/endDate）为必填：用户说过的区间照传，' +
-        '相对时间（如"最近两年"）按系统提示的今天日期换算，用户完全没提时填合理区间（如近三年）即可，不要反问——' +
-        '参数执行前系统会请用户确认，用户可当场修改；' +
-        'topK 与业绩基准用户没说时可用引擎默认值，但最终文案要注明"默认"；',
-      '- run_equal_weight_backtest 执行前系统会请用户确认参数：收到"已取消"回执时，' +
+      '- run_strategy_backtest 的回测区间（startDate/endDate）与调仓间隔（rebalanceIntervalDays）为必填：区间按用户说过的照传' +
+        '（相对时间如"最近两年"按系统提示的今天日期换算，完全没提时填合理区间如近三年，不要反问）；' +
+        '调仓间隔用户没说时必须先向用户询问，禁止自行假设；' +
+        'maxPositions 与业绩基准用户没说时可用引擎默认值，但最终文案要注明"默认"；' +
+        'sortFactors 缺省时引擎自动用默认 20 日动量排序（值大优），提案前请向用户说明这一点；' +
+        '同一因子既做过滤又做排序时，entryFilters 与 sortFactors 两处都要传；',
+      '- run_strategy_backtest 执行前系统会请用户确认参数：收到"已取消"回执时，' +
         '结合用户反馈调整参数后重新发起（会再次请用户确认），或放弃回测直接回应用户，' +
         '不要声称回测已开始或编造回测结果；',
-      '- 用户要求优化/调参/多方案对比时，可连续多次调用 run_equal_weight_backtest：' +
+      '- 用户要求优化/调参/多方案对比时，可连续多次调用 run_strategy_backtest：' +
         '首次仍会请用户确认，用户回复"授权调优"后本轮内免确认（回执含"授权模式"注明）；' +
         '结束时对比各次指标择优推荐，用【展示卡片:card_N】指定展示最优的一次；' +
         '给出优化建议后，结尾固定加一句：回复"授权调优"可按建议连续多组回测对比择优（前端会渲染授权按钮）；',
@@ -691,10 +703,10 @@ function todayLine(): string {
 function formatConfirmText(params: Record<string, string>): string {
   const lines = Object.entries(params).map(([k, v]) => `- ${k}：${v}`);
   return [
-    '将按以下参数执行等权回测：',
+    '将按以下参数执行策略回测：',
     ...lines,
     '',
-    '回复"确认"开始回测；如需调整，直接回复要改的参数（如"改成周频"、"区间用近一年"）；',
+    '回复"确认"开始回测；如需调整，直接回复要改的参数（如"改成每10个交易日调仓"、"区间用近一年"、"改成按 REVS20 值小优排序"）；',
     '如需 AI 连续多次回测自动调优，回复"授权调优"（本轮内免确认；连续计算多组参数，整体耗时会明显长于单次回测）。',
   ].join('\n');
 }
@@ -709,11 +721,6 @@ function progressSink(config: RunnableConfig | undefined): AgentProgressSink | u
 /** 入参字段是否由模型显式提供（确认清单里决定"（默认）"标注） */
 function isUserSet(v: unknown): boolean {
   return v !== undefined && v !== null && v !== '';
-}
-
-/** 归一化频率 → 中文标签（custom 展开为"每N个交易日"，与卡片 tag 同口径） */
-function frequencyLabelOf(p: NormalizedBacktestInput): string {
-  return p.frequency === 'custom' ? `每${p.everyNTd}个交易日` : FREQUENCY_LABELS[p.frequency];
 }
 
 /** 表目录 → system prompt 目录块：原文照录（表名/中文名/描述/唯一键），不压缩改写——

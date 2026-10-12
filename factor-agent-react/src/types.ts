@@ -38,9 +38,9 @@ interface CardBase {
   note?: string;
 }
 
-/** 等权回测可复现配置：TOOL-C07 卡片随身携带（API-27 保存策略用），
+/** 等权回测可复现配置：TOOL-C07 旧卡片（等权特例）随身携带（API-27 保存策略用），
  *  同时持久化在 Strategy.backtestConfig 上——重新回测按它重跑真引擎。
- *  与后端 src/types.ts 字段级一致（A/B 共同维护） */
+ *  与后端 src/types.ts 字段级一致（A/B 共同维护）；历史存量卡片/策略仍是此结构 */
 export interface BacktestRunConfig {
   factors: { table: string; field: string; order: "desc" | "asc" }[];
   startDate: string;   // YYYYMMDD
@@ -52,22 +52,86 @@ export interface BacktestRunConfig {
   feeRate?: number;    // 单边费率（0~0.05）；缺省/0 = 不计费用（旧配置兼容）
 }
 
+/* ----- 策略回测（日频事件内核，StrategySpec v1）卡片类型，与后端字段级一致 ----- */
+
+export interface StrategyFilterRule {
+  table: string;
+  field: string;
+  op: ">" | "<";
+  value: number;
+}
+
+export interface StrategySortFactor {
+  table: string;
+  field: string;
+  /** 1=值大优 / -1=值小优 */
+  direction: 1 | -1;
+  /** 缺省 = 等权 1/N；加权模式必须全部因子都传 */
+  weight?: number;
+}
+
+export type StrategySellRule =
+  | { kind: "field"; table: string; field: string; op: ">" | "<"; value: number }
+  | { kind: "stop_profit"; pct: number }
+  | { kind: "stop_loss"; pct: number }
+  | { kind: "max_drawdown_from_entry"; pct: number }
+  | { kind: "max_hold_days"; days: number }
+  | { kind: "rank_out"; bottomN: number };
+
+/** 策略回测可复现配置（run_strategy_backtest 卡片随身携带，API-27 保存策略用） */
+export interface StrategyRunConfig {
+  strategyType?: string;
+  securityIds?: string[] | null;   // null/缺省 = 全市场
+  startDate: string;               // YYYYMMDD
+  endDate: string;                 // YYYYMMDD
+  initialCapital?: number;
+  feeRate?: number;
+  rebalanceIntervalDays: number;   // 每 N 个交易日调仓
+  executionTiming?: 0 | 1;         // 0=开盘价 1=收盘价
+  maxPositions?: number;
+  idealPositionPct?: number;
+  minPositionPct?: number;
+  entryFilters?: StrategyFilterRule[];
+  sortFactors?: StrategySortFactor[];
+  sellRules?: StrategySellRule[];
+  benchmark?: "hs300" | "csi500" | "sse";
+}
+
+/** 回测交易明细（日频事件内核产出；卡片截最近若干笔） */
+export interface BacktestTrade {
+  /** 交易日 YYYYMMDD */
+  date: number;
+  /** 证券代码 000002.XSHE */
+  code: string;
+  direction: "buy" | "sell";
+  price: number;
+  shares: number;
+  amount: number;
+  fee: number;
+  /** 触发原因：调仓建仓/调仓补仓/调仓减持/调仓卖出/排名跌出/止盈/止损/回撤止盈/持有满N个交易日/字段触发 */
+  reason: string;
+}
+
 export interface BacktestCard extends CardBase {
   type: "backtest";
   curve: number[];
   benchCurve: number[];
   benchName?: string;
   metrics: MetricItem[];
-  /** 本次回测实际使用的参数（真实口径，后端 TOOL-C07 产出）：
-   *  回测区间 / 调仓频率·期数 / 每期持仓 / 业绩基准 / 交易费用；
-   *  缺省（历史消息旧卡片）时前端回退显示策略配置项 */
+  /** 本次回测实际使用的参数（真实口径，后端回测工具产出）：
+   *  新引擎含排序因子方向/权重、过滤/卖出规则等；缺省（历史消息旧卡片）时前端回退显示策略配置项 */
   params?: BtParamItem[];
-  /** 可复现配置（服务端按它重跑等权引擎）：前端"保存为我的策略"（API-27）的数据来源；
+  /** 可复现配置（服务端按它重跑真引擎）：前端"保存为我的策略"（API-27）的数据来源；
+   *  新引擎卡片为 StrategyRunConfig；历史等权卡片为 BacktestRunConfig；
    *  缺省（历史旧卡片）时无保存入口 */
-  config?: BacktestRunConfig;
+  config?: StrategyRunConfig | BacktestRunConfig;
   /** 曲线逐点对应的交易日（YYYYMMDD，与 curve 等长）：x 轴按真实日期打刻度；
    *  缺省（历史旧卡片/mock 曲线）时回退月频推算 */
   dates?: number[];
+  /** 交易明细（最近 50 笔，时间正序）；旧等权卡片无此字段 */
+  trades?: BacktestTrade[];
+  /** 月度归因（自然月收益 %）；旧等权卡片无此字段 */
+  monthly?: { month: string; pct: number }[];
 }
 
 export interface ReportCard extends CardBase {
@@ -135,7 +199,10 @@ export interface Strategy {
   holdings: Holding[];
   /** 由回测卡片生成（API-27）时记录的等权回测配置：
    *  存在 = 重新回测（API-11）走等权真引擎，且权重/股票池/调仓/基准不可改（等权合成，权重不可调） */
-  backtestConfig?: BacktestRunConfig;
+  /** 由回测卡片生成（API-27）时记录的回测配置：
+   *  存在 = 重新回测（API-11）走真引擎，且权重/股票池/调仓/基准不可改。
+   *  旧等权卡片为 BacktestRunConfig；新引擎卡片为 StrategyRunConfig */
+  backtestConfig?: BacktestRunConfig | StrategyRunConfig;
   /** 曲线逐点交易日（YYYYMMDD，与 curve 等长）：仅等权真引擎产出，详情图按真实日期打刻度 */
   dates?: number[];
 }
