@@ -385,25 +385,16 @@ export class LangGraphAgentService extends AgentService {
     threadId: string,
     onProgress?: AgentProgressSink,
   ): Promise<AgentReply> {
+    /* 决策定死为精确匹配：前端确认门/优化建议弹窗的按钮回发固定指令
+     * （"确认"=执行本组；"授权调优"=连续多组对比免确认），
+     * 其余一切回复一律按自然语言反馈交模型消化——不做任何模糊匹配 */
     const trimmed = userText.trim();
-    /* 优化建议上下文：确认门前模型刚给出多方案建议并邀请对比时，用户的肯定回复
-     * （确认/可以/好…）视为"按建议连续回测对比"——本组执行 + 授权后续组免确认，
-     * 模型即可连续跑完所有建议变体后汇总择优，不必逐组确认 */
-    const recentAgentBubbles = conversation.messages
-      .filter((m) => m.role === 'agent')
-      .slice(-3)
-      .map((m) => m.bubble);
-    const optimizationInvite = recentAgentBubbles.some((b) => /建议|对比/.test(b));
-    const decision = DELEGATE_PATTERN.test(trimmed)
-      ? { action: 'delegate' as const }
-      : CONFIRM_PATTERN.test(trimmed)
-        ? optimizationInvite
-          ? { action: 'approve' as const, delegate: true }
-          : { action: 'approve' as const }
-        : { action: 'feedback' as const, text: userText };
-    this.logger.log(
-      `[授权调试] 确认门上下文 优化建议邀请=${optimizationInvite} 答复: ${toLogPreview(userText)}`,
-    );
+    const decision =
+      trimmed === '授权调优'
+        ? { action: 'delegate' as const }
+        : trimmed === '确认' || trimmed === '确认执行'
+          ? { action: 'approve' as const }
+          : { action: 'feedback' as const, text: userText };
     this.logger.log(
       `确认门恢复 会话=${conversation.id} thread=${threadId} 决策=${decision.action} 答复: ${toLogPreview(userText)}`,
     );
@@ -574,7 +565,7 @@ export class LangGraphAgentService extends AgentService {
           业绩基准: `${BENCHMARKS[p.benchmark].name}${isUserSet(args.benchmark) ? '' : '（默认）'}`,
         },
       }) as
-        | { action: 'approve'; delegate?: boolean }
+        | { action: 'approve' }
         | { action: 'delegate' }
         | { action: 'feedback'; text: string };
 
@@ -586,16 +577,9 @@ export class LangGraphAgentService extends AgentService {
           },
         };
       }
-      if (decision.action === 'delegate' || (decision.action === 'approve' && decision.delegate)) {
+      if (decision.action === 'delegate') {
         delegated = true; // 本次照常执行 + 置授权标记（随节点返回写回图状态，本轮后续免确认）
-        this.logger.log(
-          `[授权调试] interrupt 恢复值=${decision.action}${'delegate' in decision && decision.delegate ? '+授权' : ''} → delegated=${delegated}`,
-        );
-        this.logger.log(
-          decision.action === 'delegate'
-            ? '用户授权调优：本次回测照常执行，本轮后续回测免确认'
-            : '用户确认优化建议：本次回测照常执行，按建议的后续变体免确认连续对比',
-        );
+        this.logger.log('用户授权调优：本次回测照常执行，本轮后续回测免确认');
       }
     }
 
@@ -734,7 +718,8 @@ export class LangGraphAgentService extends AgentService {
         '不要声称回测已开始或编造回测结果；',
       '- 用户要求优化/调参/多方案对比时，可连续多次调用 run_equal_weight_backtest：' +
         '首次仍会请用户确认，用户回复"授权调优"后本轮内免确认（回执含"授权模式"注明）；' +
-        '结束时对比各次指标择优推荐，用【展示卡片:card_N】指定展示最优的一次；',
+        '结束时对比各次指标择优推荐，用【展示卡片:card_N】指定展示最优的一次；' +
+        '给出优化建议后，结尾固定加一句：回复"授权调优"可按建议连续多组回测对比择优（前端会渲染授权按钮）；',
       '- 本回合跑了多次回测时，每份回执带「卡片编号」：按用户意图选最符合的一次（如优化场景选指标最优的），在回复最末尾单独一行写【展示卡片:card_N】指定展示哪次（该行不会展示给用户）；只回测了一次则不写；',
       '- 查询无数据行时如实告知，不要编造；',
       '- 与因子数据无关的问候或闲聊：直接简短回复（不超过 90 字），不要调用工具。',
@@ -752,13 +737,6 @@ export class LangGraphAgentService extends AgentService {
     return `调用返回「${firstLine.length > 120 ? firstLine.slice(0, 120) + '…' : firstLine}」`;
   }
 }
-
-/** 确认词窄匹配：只收纯确认短语；带任何附加内容（如"确认，改成周频"）按 feedback 处理，
- *  交模型结合原文消化——误放行的代价是跑了用户没想要的参数，误拦只多一轮确认 */
-const CONFIRM_PATTERN = /^(确认|确认回测|好的?|可以|行|就这样|嗯+|ok|okay|yes)$/i;
-
-/** 授权词：确认门上用户把参数决定权交给 AI（本轮内连续回测免确认） */
-const DELEGATE_PATTERN = /^(授权(调优|优化|回测)?|调优模式|连续回测(模式)?|自动调优)$/i;
 
 /** 今天日期行（注入 system prompt）：模型没有当前时间感知，相对时间表达
  *  （"最近两年""今年"）全靠这行换算成纯数字区间，免去反问用户的弯路 */

@@ -3,8 +3,23 @@ import type { AgentCard, BacktestCard, ChatMessage, Conversation, MetricItem, Re
 import { CHAT_SUGGESTIONS } from "../data/mock";
 import { fmtConvDate } from "../utils/format";
 import { PerfChart } from "../components/charts";
-import { ConfirmModal, ParamsBlock } from "../components/ui";
+import { ConfirmModal, Modal, ParamsBlock } from "../components/ui";
 import { IconClose, IconLogo, IconPlus, IconSend, IconStop } from "../components/icons";
+
+/* ----- 确认门文案解析：格式由后端 formatConfirmText 生成（稳定契约）。
+   命中 = 当前智能体在等用户确认回测参数，前端以弹窗呈现结构化参数与操作按钮 ----- */
+function parseConfirmGate(bubble: string): { 区间: string; 频率: string; 持仓: string; 基准: string } | null {
+  const m = bubble.match(
+    /^将按以下参数执行等权回测：\n- 回测区间：(.+)\n- 调仓频率：(.+)\n- 每期持仓：(.+)\n- 业绩基准：(.+)\n/,
+  );
+  return m ? { 区间: m[1], 频率: m[2], 持仓: m[3], 基准: m[4] } : null;
+}
+
+/* ----- 优化建议邀请识别：模型给出多方案建议并邀请"授权调优"
+   （结尾话术由系统提示词回复规则锚定，规则匹配替代自然语言猜测） ----- */
+function parseOptimizeInvite(bubble: string): boolean {
+  return bubble.includes("授权调优") && /建议|方向|对比/.test(bubble);
+}
 
 /* ----- 智能体卡片 ----- */
 
@@ -220,9 +235,41 @@ export function ChatPage(props: {
   const typingHere = current ? typingId === current.id : false;
   const liveSteps = typingHere && live && live.convId === current?.id ? live.steps : undefined;
   const userInitial = userNickname.slice(0, 1) || "友";
+  /* 确认门/优化建议弹窗关闭标记（新消息到达/切换会话时自动重置） */
+  const [gateClosed, setGateClosed] = useState(false);
+  const [optimizeClosed, setOptimizeClosed] = useState(false);
+  const [gateText, setGateText] = useState("");
+  const [optimizeText, setOptimizeText] = useState("");
+  /* 确认门：最后一条是智能体的参数提案且未关闭 → 弹窗（确认执行/授权调优/取消） */
+  const lastMessage = current && current.messages.length ? current.messages[current.messages.length - 1] : null;
+  const gateParams =
+    !typingHere && lastMessage && lastMessage.role === "agent" ? parseConfirmGate(lastMessage.bubble) : null;
+  const gateVisible = !!gateParams && !gateClosed && !loading;
+  const closeGate = () => setGateClosed(true);
+  const gateAct = (text: string) => {
+    setGateClosed(true);
+    onSubmit(text);
+  };
+  /* 优化建议弹窗：模型刚给出多方案建议并邀请授权调优（文案由回复规则锚定，规则匹配无歧义） */
+  const optimizeInvite =
+    !gateParams && !typingHere && lastMessage && lastMessage.role === "agent" && parseOptimizeInvite(lastMessage.bubble);
+  const optimizeVisible = optimizeInvite && !optimizeClosed && !loading;
+  const closeOptimize = () => setOptimizeClosed(true);
+  const optimizeAct = (text: string) => {
+    setOptimizeClosed(true);
+    onSubmit(text);
+  };
+  useEffect(() => {
+    setGateClosed(false);
+    setOptimizeClosed(false);
+    setGateText("");
+    setOptimizeText("");
+  }, [current?.id, current?.messages.length]);
 
   /* 破坏性操作确认（删除/清空对话），全站统一 ConfirmModal */
   const [confirm, setConfirm] = useState<null | { kind: "delete" | "clear"; title: string }>(null);
+
+
   /* 生成中再点发送的阻塞提示（输入草稿保留不丢） */
   const [hint, setHint] = useState("");
   const hintTimer = useRef<number | undefined>(undefined);
@@ -379,6 +426,62 @@ export function ChatPage(props: {
         </footer>
       </div>
 
+      {gateVisible && gateParams && (
+        <Modal onClose={closeGate} ariaLabel="回测参数确认">
+          <div className="modal-head">
+            <div className="modal-title">回测参数确认</div>
+            <button className="icon-btn" aria-label="关闭" onClick={closeGate}><IconClose /></button>
+          </div>
+          <div className="modal-body">
+            <div className="agent-card-text" style={{ margin: "0 0 12px" }}>智能体已就绪，将按以下参数执行等权回测：</div>
+            <div className="gate-params">
+              <div className="gate-param"><span className="gate-param-label">回测区间</span><span className="gate-param-val">{gateParams.区间}</span></div>
+              <div className="gate-param"><span className="gate-param-label">调仓频率</span><span className="gate-param-val">{gateParams.频率}</span></div>
+              <div className="gate-param"><span className="gate-param-label">每期持仓</span><span className="gate-param-val">{gateParams.持仓}</span></div>
+              <div className="gate-param"><span className="gate-param-label">业绩基准</span><span className="gate-param-val">{gateParams.基准}</span></div>
+            </div>
+            <div className="gate-hint">
+              「确认执行」立即开始回测；「授权调优」由智能体按建议连续多组自动对比择优。
+              如需调整参数或暂不回测，在下方直接输入。
+            </div>
+            <div className="gate-alt">
+              <input className="gate-alt-input" value={gateText} aria-label="输入其他要求"
+                placeholder="如：改成月频、区间用近一年、先不回测…"
+                onChange={e => setGateText(e.target.value)}
+                onKeyDown={e => { if (e.key === "Enter" && gateText.trim()) gateAct(gateText.trim()); }} />
+              <button className="btn btn-sm btn-ghost" onClick={() => gateText.trim() && gateAct(gateText.trim())}>发送</button>
+            </div>
+          </div>
+          <div className="modal-foot">
+            <button className="btn btn-ghost" onClick={() => gateAct("授权调优")}>授权调优</button>
+            <button className="btn btn-primary" onClick={() => gateAct("确认")}>确认执行</button>
+          </div>
+        </Modal>
+      )}
+      {optimizeVisible && (
+        <Modal onClose={closeOptimize} ariaLabel="优化建议">
+          <div className="modal-head">
+            <div className="modal-title">优化建议</div>
+            <button className="icon-btn" aria-label="关闭" onClick={closeOptimize}><IconClose /></button>
+          </div>
+          <div className="modal-body">
+            <div className="agent-card-text" style={{ margin: "0 0 12px" }}>
+              智能体给出了优化建议（见上方消息）。选择执行方式，或在下方直接输入其他要求：
+            </div>
+            <div className="optimize-actions">
+              <button className="btn btn-ghost" onClick={() => optimizeAct("确认")}>按建议执行下一轮</button>
+              <button className="btn btn-primary" onClick={() => optimizeAct("授权调优")}>授权调优·连续多组对比</button>
+            </div>
+            <div className="gate-alt">
+              <input className="gate-alt-input" value={optimizeText} aria-label="输入其他要求"
+                placeholder="或直接输入其他要求…"
+                onChange={e => setOptimizeText(e.target.value)}
+                onKeyDown={e => { if (e.key === "Enter" && optimizeText.trim()) optimizeAct(optimizeText.trim()); }} />
+              <button className="btn btn-sm btn-ghost" onClick={() => optimizeText.trim() && optimizeAct(optimizeText.trim())}>发送</button>
+            </div>
+          </div>
+        </Modal>
+      )}
       {confirm && (
         <ConfirmModal
           title={confirm.kind === "delete" ? "删除对话" : "清空对话"}

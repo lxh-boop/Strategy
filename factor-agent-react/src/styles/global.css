@@ -665,3 +665,20 @@ input[type="range"]::-webkit-slider-thumb {
 .bt-chart .line-draw { stroke-dasharray: 1; stroke-dashoffset: 1; animation: line-draw 1.3s var(--ease) .1s forwards; }
 .bt-chart .line-draw-bench { animation-delay: .4s; animation-duration: 1.6s; }
 @keyframes line-draw { to { stroke-dashoffset: 0; } }
+
+/* ===== 确认门弹窗（回测参数确认） ===== */
+.gate-params { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 12px; }
+.gate-param { background: var(--tile); border: 1px solid var(--tile-border); border-radius: 8px; padding: 10px 12px; }
+.gate-param-label { display: block; font-size: 12px; color: var(--text-3); }
+.gate-param-val { display: block; font-size: 14px; font-weight: 600; color: var(--text); margin-top: 2px; font-variant-numeric: tabular-nums; }
+.gate-hint { font-size: 12px; color: var(--text-3); margin-top: 12px; line-height: 1.6; }
+
+/* ===== 优化建议弹窗 / 确认门输入行 ===== */
+.optimize-actions { display: flex; gap: 8px; margin-bottom: 12px; }
+.gate-alt { display: flex; gap: 8px; margin-top: 12px; align-items: center; }
+.gate-alt-input {
+  flex: 1; border: 1px solid var(--border); border-radius: 8px;
+  padding: 8px 12px; font-size: 13px; background: var(--card);
+  color: var(--text); outline: none; font-family: inherit;
+}
+.gate-alt-input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(224,72,72,.10); }
