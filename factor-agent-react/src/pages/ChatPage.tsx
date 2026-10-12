@@ -4,6 +4,7 @@ import { CHAT_SUGGESTIONS } from "../data/mock";
 import { fmtConvDate } from "../utils/format";
 import { PerfChart } from "../components/charts";
 import { ConfirmModal, Modal, ParamsBlock } from "../components/ui";
+import { MiniMarkdown } from "../components/mini-md";
 import { IconClose, IconLogo, IconPlus, IconSend, IconStop } from "../components/icons";
 
 /* ----- 确认门文案解析：格式由后端 formatConfirmText 生成（稳定契约）。
@@ -213,7 +214,10 @@ function MessageRow({ m, userInitial, saved, onSave, onSaveBacktest, onAskBackte
     <div className={`msg ${m.role}`}>
       <div className="msg-avatar" aria-hidden="true">{isUser ? userInitial : <IconLogo size={18} />}</div>
       <div className="msg-content">
-        <div className="msg-bubble">{m.bubble}</div>
+        {/* 智能体回复走轻量 Markdown 渲染（粗体/列表/表格），用户输入保持纯文本 */}
+        <div className="msg-bubble">
+          {isUser ? m.bubble : <MiniMarkdown text={m.bubble} />}
+        </div>
         {m.card && (
           <AgentCardView
             card={m.card}

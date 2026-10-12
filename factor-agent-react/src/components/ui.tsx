@@ -6,18 +6,18 @@ import { IconClose } from "./icons";
 /* 通用弹窗：遮罩点击 / Esc 关闭；打开时移入焦点并做 Tab 循环，关闭归还焦点 */
 export function Modal({ children, onClose, ariaLabel }: { children: ReactNode; onClose: () => void; ariaLabel?: string }) {
   const boxRef = useRef<HTMLDivElement>(null);
-
-  /* 焦点移入只在挂载时做一次：随渲染重跑会反复抢焦点——弹窗内输入框每敲一个字
-     触发父组件重渲染，焦点被抢回容器，表现为"输入框没法输入" */
-  useEffect(() => {
-    boxRef.current?.focus();
-  }, []);
+  /* onClose 经 ref 取用，让生命周期 effect 保持空依赖：
+     焦点移入/归还只随挂载发生一次——若随渲染重跑，输入框每敲一个字（父组件重渲染）
+     焦点就会被"归还"走，表现为"输入框没法输入" */
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
 
   useEffect(() => {
     const box = boxRef.current;
     const prev = document.activeElement as HTMLElement | null;
+    box?.focus();
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") { onClose(); return; }
+      if (e.key === "Escape") { onCloseRef.current(); return; }
       if (e.key !== "Tab" || !box) return;
       /* 焦点陷阱：Tab/Shift+Tab 在弹窗内循环，不漏到背后的页面 */
       const items = box.querySelectorAll<HTMLElement>(
@@ -34,7 +34,7 @@ export function Modal({ children, onClose, ariaLabel }: { children: ReactNode; o
       document.removeEventListener("keydown", onKey);
       prev?.focus?.();
     };
-  }, [onClose]);
+  }, []);
 
   return (
     <div className="modal-mask" onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
