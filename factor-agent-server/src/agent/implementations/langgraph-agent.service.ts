@@ -644,11 +644,17 @@ export class LangGraphAgentService extends AgentService {
     try {
       output = await this.backtest.runStrategyBacktest(p);
     } catch (error) {
-      // 已授权回测的引擎失败把错误交模型自纠（如区间超出数据范围时改用表内可用区间），
-      // 不把异常抛成通用失败——授权仍然有效，模型可改参重发
+      // 已授权回测的引擎失败：错误交模型自纠（如区间超出数据范围时改用表内可用区间），
+      // 授权仍有效，模型可改参重发；回执带"行动"指引——失败必须告知用户，不许默默重试装作没发生
       if (ctx.delegated && error instanceof ApiException) {
         this.logger.warn(`[授权调试] 已授权回测失败，错误交模型自纠: ${error.message}`);
-        return { result: { error: error.message } };
+        return {
+          result: {
+            error: error.message,
+            行动: '先向用户如实说明本组回测失败及原因（不要默默重试装作没发生），再按失败原因调整参数重新发起；' +
+              '调整说明与后续建议在最终回复中一并给出，结尾按优化建议规则提示可回复"授权调优"',
+          },
+        };
       }
       throw error;
     }
@@ -730,6 +736,9 @@ export class LangGraphAgentService extends AgentService {
       '- run_strategy_backtest 执行前系统会请用户确认参数：收到"已取消"回执时，' +
         '结合用户反馈调整参数后重新发起（会再次请用户确认），或放弃回测直接回应用户，' +
         '不要声称回测已开始或编造回测结果；',
+      '- 回测执行失败的组必须在最终回复里如实告知用户：哪一组（参数摘要）、失败原因、建议的调整方向，' +
+        '禁止默默重试后装作没有失败——失败后的重试也要先说明原因和调整思路；' +
+        '失败原因与调整方向本身就是优化建议，按优化建议规则结尾提示可回复"授权调优"；',
       '- 用户要求优化/调参/多方案对比时，可连续多次调用 run_strategy_backtest：' +
         '首次仍会请用户确认，用户回复"授权调优"后本轮内免确认（回执含"授权模式"注明）；' +
         '连续多组时保持用户已确认的关键参数不变（securityIds 股票池、区间、资金、基准），只按建议调整要对比的维度；' +
