@@ -4,7 +4,7 @@ import { CHAT_SUGGESTIONS } from "../data/mock";
 import { fmtConvDate } from "../utils/format";
 import { PerfChart } from "../components/charts";
 import { ConfirmModal, Modal, ParamsBlock } from "../components/ui";
-import { MiniMarkdown } from "../components/mini-md";
+import { MiniMarkdown } from "../components/markdown";
 import { IconClose, IconLogo, IconPlus, IconSend, IconStop } from "../components/icons";
 
 /* ----- 确认门文案解析：格式由后端 formatConfirmText 生成（稳定契约）。
