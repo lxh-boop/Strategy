@@ -89,70 +89,15 @@ export class BacktestParamsDto {
   feeRate?: number;
 }
 
-/* ----- API-27：由回测卡片创建策略（等权回测配置，服务端按它重跑真引擎） ----- */
-
-export class BacktestFactorDto {
-  @IsString()
-  @IsNotEmpty({ message: '因子 table 不能为空' })
-  table: string;
-
-  @IsString()
-  @IsNotEmpty({ message: '因子 field 不能为空' })
-  field: string;
-
-  @IsIn(['desc', 'asc'], { message: 'order 只能是 desc（值大优）/ asc（值小优）' })
-  order: 'desc' | 'asc';
-}
-
-export class BacktestRunConfigDto {
-  @IsArray()
-  @ArrayMinSize(1, { message: 'factors 至少包含一个因子' })
-  @ArrayMaxSize(10, { message: 'factors 最多 10 个' })
-  @ValidateNested({ each: true })
-  @Type(() => BacktestFactorDto)
-  factors: BacktestFactorDto[];
-
-  @IsString()
-  @Matches(/^\d{8}$/, { message: 'startDate 须为 YYYYMMDD 8 位数字' })
-  startDate: string;
-
-  @IsString()
-  @Matches(/^\d{8}$/, { message: 'endDate 须为 YYYYMMDD 8 位数字' })
-  endDate: string;
-
-  @IsIn(['daily', 'weekly', 'biweekly', 'monthly', 'quarterly', 'semiannual', 'annual', 'custom'], {
-    message: 'frequency 取值非法',
-  })
-  frequency: 'daily' | 'weekly' | 'biweekly' | 'monthly' | 'quarterly' | 'semiannual' | 'annual' | 'custom';
-
-  @IsOptional()
-  @IsInt()
-  @Min(5, { message: 'everyNTd 最小 5' })
-  @Max(120, { message: 'everyNTd 最大 120' })
-  everyNTd?: number;
-
-  @IsInt()
-  @Min(1, { message: 'topK 最小 1' })
-  @Max(200, { message: 'topK 最大 200' })
-  topK: number;
-
-  @IsIn(['hs300', 'csi500', 'sse'], { message: 'benchmark 只能是 hs300 / csi500 / sse' })
-  benchmark: 'hs300' | 'csi500' | 'sse';
-
-  @IsOptional()
-  @IsNumber()
-  @Min(0, { message: 'feeRate 不能为负' })
-  @Max(0.05, { message: 'feeRate 最大 0.05（每边 5%）' })
-  feeRate?: number;
-}
-
 export class CreateFromBacktestDto {
   @IsString()
   @IsNotEmpty({ message: 'name 不能为空' })
   @MaxLength(80, { message: 'name 不能超过 80 字' })
   name: string;
 
-  @ValidateNested()
-  @Type(() => BacktestRunConfigDto)
-  config: BacktestRunConfigDto;
+  /* 卡片可复现配置：只校验是对象——新旧两种结构（StrategyRunConfig / 旧等权
+   * BacktestRunConfig）并存，结构合法性统一由引擎入参校验（assertStrategyInput /
+   * legacyConfigToInput）给出可操作的错误消息，DTO 层不做形态绑定 */
+  @IsObject({ message: 'config 须为对象（回测卡片随身携带的可复现配置）' })
+  config: Record<string, unknown>;
 }

@@ -4,6 +4,7 @@ import { CHAT_SUGGESTIONS } from "../data/mock";
 import { fmtConvDate } from "../utils/format";
 import { PerfChart } from "../components/charts";
 import { ConfirmModal, Modal, ParamsBlock } from "../components/ui";
+import { MiniMarkdown } from "../components/markdown";
 import { IconClose, IconLogo, IconPlus, IconSend, IconStop } from "../components/icons";
 
 /* ----- 确认门文案解析：格式由后端 formatConfirmText 生成（稳定契约）。
@@ -213,7 +214,10 @@ function MessageRow({ m, userInitial, saved, onSave, onSaveBacktest, onAskBackte
     <div className={`msg ${m.role}`}>
       <div className="msg-avatar" aria-hidden="true">{isUser ? userInitial : <IconLogo size={18} />}</div>
       <div className="msg-content">
-        <div className="msg-bubble">{m.bubble}</div>
+        {/* 智能体回复走轻量 Markdown 渲染（粗体/列表/表格），用户输入保持纯文本 */}
+        <div className="msg-bubble">
+          {isUser ? m.bubble : <MiniMarkdown text={m.bubble} />}
+        </div>
         {m.card && (
           <AgentCardView
             card={m.card}
@@ -520,9 +524,12 @@ export function ChatPage(props: {
           </div>
           <div className="modal-body">
             <div className="agent-card-text" style={{ margin: "0 0 12px" }}>
-              智能体给出了优化建议（见上方消息）。选择执行方式，或在下方直接输入其他要求：
+              智能体给出了优化建议，原文如下（也可在下方直接输入其他要求）：
             </div>
-            <div className="optimize-actions">
+            {lastMessage && (
+              <div className="optimize-quote">{lastMessage.bubble}</div>
+            )}
+            <div className="optimize-actions" style={{ marginTop: 12 }}>
               <button className="btn btn-ghost" onClick={() => optimizeAct("确认")}>按建议执行下一轮</button>
               <button className="btn btn-primary" onClick={() => optimizeAct("授权调优")}>授权调优·连续多组对比</button>
             </div>

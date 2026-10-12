@@ -693,3 +693,48 @@ input[type="range"]::-webkit-slider-thumb {
 .trade-scroll { max-height: 320px; overflow: auto; border: 1px solid var(--divider); border-radius: 8px; }
 .trade-scroll .mini-table th { position: sticky; top: 0; background: var(--card); z-index: 1; }
 .trade-scroll .mini-table td { white-space: normal; }
+
+/* 优化建议弹窗内的建议原文（避免"见上方消息"被遮罩模糊看不到） */
+.optimize-quote {
+  max-height: 220px; overflow: auto; white-space: pre-wrap;
+  background: var(--tile); border: 1px solid var(--tile-border); border-radius: 8px;
+  padding: 10px 12px; font-size: 13px; line-height: 1.7; color: var(--text-2);
+}
+
+/* ===== 智能体回复 Markdown（react-markdown 输出原生标签） ===== */
+.mini-md { display: flex; flex-direction: column; gap: 6px; font-size: 13.5px; }
+.mini-md > * { margin: 0; }
+.mini-md p { white-space: pre-wrap; word-break: break-word; }
+.mini-md ul, .mini-md ol { padding-left: 20px; display: flex; flex-direction: column; gap: 3px; }
+.mini-md li { word-break: break-word; }
+.mini-md li > ul, .mini-md li > ol { margin-top: 3px; }
+.mini-md strong { font-weight: 700; }
+.mini-md del { color: var(--text-3); }
+.mini-md blockquote {
+  margin: 0; padding: 6px 12px; border-left: 3px solid var(--border);
+  background: var(--tile); border-radius: 0 8px 8px 0; color: var(--text-2);
+}
+.mini-md code {
+  font-family: var(--mono, ui-monospace, monospace); font-size: 0.92em;
+  background: var(--tile); border: 1px solid var(--tile-border);
+  border-radius: 4px; padding: 1px 5px;
+}
+.mini-md pre {
+  background: var(--tile); border: 1px solid var(--tile-border);
+  border-radius: 8px; padding: 10px 12px; overflow-x: auto;
+}
+.mini-md pre code { background: none; border: none; padding: 0; }
+.mini-md h1, .mini-md h2, .mini-md h3, .mini-md h4 {
+  font-weight: 700; font-size: 14px; margin: 4px 0 0;
+}
+.mini-md table {
+  width: 100%; border-collapse: collapse; font-size: 13px;
+  display: block; overflow-x: auto;
+  border: 1px solid var(--divider); border-radius: 8px;
+}
+.mini-md th {
+  background: var(--tile); color: var(--text-2); font-weight: 600;
+  padding: 7px 10px; text-align: left; white-space: nowrap;
+}
+.mini-md td { padding: 7px 10px; border-top: 1px solid var(--divider); white-space: nowrap; }
+.mini-md tbody tr:hover td { background: var(--tile); }

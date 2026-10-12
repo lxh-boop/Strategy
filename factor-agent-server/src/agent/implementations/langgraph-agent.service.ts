@@ -80,13 +80,11 @@ const TOOL_STAGE: Record<string, string> = {
 /** GLM 调用失败的信号（message 即可读上游原因），由 reply() 捕获后降级为纯报错回复 */
 class LlmTextError extends Error {}
 
-/** 工具回执统一形态：result 给模型（进 ToolMessage）；card/backtestFreq 为副作用产物，绕过模型走图状态；
- *  delegated 授权回执（tools 节点据此置图状态标记，本轮后续回测免确认） */
+/** 工具回执统一形态：result 给模型（进 ToolMessage）；card/backtestFreq 为副作用产物，绕过模型走图状态 */
 interface ToolOutcome {
   result: Record<string, unknown>;
   card?: AgentCard;
   backtestFreq?: string;
-  delegated?: boolean;
 }
 
 /** 工具执行上下文：随调用传入的图状态只读片段（参数授权标记等） */
@@ -130,6 +128,21 @@ const StrategyGraphState = Annotation.Root({
    *  用户已把参数决定权交给 AI。授权只活一轮，图执行结束即收回，
    *  下一轮回测重新走确认门 */
   backtestDelegated: Annotation<boolean>,
+  /** 确认门逐组放行记录（tool_call id）：confirm 节点对同批多个回测调用逐组 interrupt，
+   *  用户点"确认"只放行当前组——组 id 记入此通道，tools 节点据此判定该组可执行。
+   *  confirm 节点因后续组 interrupt 重跑时，已回答组的决策由 interrupt 恢复机制按序回放，
+   *  本通道只在 confirm 正常收尾（goto tools）时随 update 落盘 */
+  confirmedCalls: Annotation<string[]>({
+    reducer: (a, b) => [...new Set([...a, ...b])],
+    default: () => [],
+  }),
+  /** 确认门拒绝回执（tool_call id → 工具回执 JSON）：用户对某组回复了调整意见（feedback）、
+   *  或该组参数未通过归一化/白名单快检（澄清信号/参数错误）——不进引擎，回执经 tools 节点
+   *  原样转给模型自行消化（改参重发/放弃） */
+  rejectedCalls: Annotation<Record<string, string>>({
+    reducer: (a, b) => ({ ...a, ...b }),
+    default: () => ({}),
+  }),
   /** 对话消息流：本图的核心通道。
    *  reducer 必须用 concat 而不是覆盖——agent 节点每轮只返回 1 条 AIMessage（含工具调用
    *  或最终文本），tools 节点返回 N 条 ToolMessage（每个工具调用一条回执），靠 concat
@@ -253,22 +266,23 @@ export class LangGraphAgentService extends AgentService {
         let backtestFreq: string | undefined;
         // 回合内卡片登记表：编号 = 既有张数 + 1，跨多次 tools 节点执行经 reducer 累积
         const registry = { ...(state.cardRegistry ?? {}) };
-        let outcomeDelegated = false;
-        // 授权标记批内即时传播：模型连续多组对比会在同一条消息里并发多个回测调用，
-        // 图状态要等本节点执行完才写回——若这里只读旧状态，同批第 2..N 组仍会被确认门
-        // 逐个拦下。故用批内变量：delegate 一发生，同批后续调用全部免确认。
-        let batchDelegated = state.backtestDelegated === true;
-        this.logger.log(`[授权调试] tools入口 state.backtestDelegated=${state.backtestDelegated} → batchDelegated=${batchDelegated}`);
         for (const call of last.tool_calls ?? []) {
+          // 确认门拒绝的调用（feedback / 参数快检不过）不进引擎：回执已由 confirm 节点生成，原样转给模型
+          const rejected = state.rejectedCalls?.[call.id ?? ''];
+          if (rejected !== undefined) {
+            additions.push(new ToolMessage({ content: rejected, tool_call_id: call.id ?? '' }));
+            this.logger.log(`tools节点 ${call.name}(${toLogPreview(call.args)}) => 确认门拒绝回执透传`);
+            continue;
+          }
           const runner = this.toolRunners[call.name];
           const outcome = runner
             ? await this.guard(() =>
                 runner(call.args, {
-                  delegated: batchDelegated,
+                  // 回测调用走到 tools 必已获授权（confirm 节点放行/委托）——标记仅供执行器记录口径
+                  delegated: state.backtestDelegated === true || state.confirmedCalls.includes(call.id ?? ''),
                 }),
               )
             : { result: { error: `未知工具: ${call.name}` } };
-          if (outcome.delegated) { outcomeDelegated = true; batchDelegated = true; this.logger.log(`[授权调试] 本调用带委托标记 → 批内传播 batchDelegated=${batchDelegated}`); }
           additions.push(new ToolMessage({ content: JSON.stringify(outcome.result), tool_call_id: call.id ?? '' }));
           if (outcome.card) {
             card = outcome.card; // 回测失败时无卡片，保持上一次的值也无妨（默认展示卡取最后一次成功）
@@ -293,14 +307,22 @@ export class LangGraphAgentService extends AgentService {
           messages: additions,
           ...(card ? { card } : {}),
           ...(backtestFreq ? { backtestFreq } : {}),
-          ...(outcomeDelegated ? { backtestDelegated: true } : {}),
           cardRegistry: registry,
         };
       })
+      .addNode('confirm', async (state: StrategyGraphStateType) => this.execConfirmBacktest(state))
       .addEdge(START, 'agent')
       .addConditionalEdges('agent', (state: StrategyGraphStateType) => {
         const last = state.messages[state.messages.length - 1] as AIMessage;
-        return last.tool_calls?.length ? 'tools' : END;
+        if (!last.tool_calls?.length) return END;
+        // 有未获授权（未委托且未逐组确认）的回测调用 → 先走确认门；其余直接执行
+        const needsConfirm = last.tool_calls.some(
+          (c) =>
+            c.name === 'run_strategy_backtest' &&
+            state.backtestDelegated !== true &&
+            !state.confirmedCalls.includes(c.id ?? ''),
+        );
+        return needsConfirm ? 'confirm' : 'tools';
       })
       .addEdge('tools', 'agent')
       .compile({ checkpointer: this.checkpointer });
@@ -347,10 +369,14 @@ export class LangGraphAgentService extends AgentService {
       this.logger.log(`图执行开始 会话=${conversation.id} thread=${threadId} 提问: ${toLogPreview(userText)}`);
       appendConversationLog(conversation.id, `提问: ${toLogPreview(userText)}`);
       onProgress?.({ type: 'start' });
+      // 入口即授权：用户消息精确为"授权调优"（前端授权按钮回发）→ 本次图执行以已授权状态启动，
+      // 模型响应授权而发起的多组回测全部免确认。与确认门 resume 的 delegate 同语义：授权只活本次图执行。
+      const entryDelegated = userText.trim() === '授权调优';
       const state = await this.app.invoke(
         {
           conversationId: conversation.id,
           userText,
+          ...(entryDelegated ? { backtestDelegated: true } : {}),
           messages: this.prepareMessages(conversation, userText),
         },
         { configurable: { thread_id: threadId, onProgress }, recursionLimit: 15 },
@@ -530,72 +556,119 @@ export class LangGraphAgentService extends AgentService {
     };
   }
 
-  /** 策略回测执行：确认门（human-in-the-loop）——归一化、白名单快检、
-   *  缺调仓间隔澄清都通过后，interrupt 暂停把参数抛给用户确认（排序因子方向/权重
-   *  如实展示，v3 要求），三决策：
-   *    approve → 跑引擎；delegate（授权调优）→ 本轮先跑本次、后续回测免确认；
-   *    feedback（改参/未确认）→ 不跑引擎，回执交模型自行消化 */
-  private async execRunBacktest(args: StrategyBacktestInput, ctx: ToolContext): Promise<ToolOutcome> {
-    let delegated = ctx.delegated === true;
-    const p = assertStrategyInput(args);
-    // 白名单快检在 interrupt 之前：字段不存在的提案先打回模型自纠，不让用户确认一个注定失败的提案
-    this.backtest.preflight(collectFactorRefs(p));
+  /** 回测确认门节点（confirm）：确认与执行分离后的把关侧——只做参数归一化、白名单快检与
+   *  interrupt 逐组确认，零副作用（节点被 LangGraph 重跑任意次都不会重复跑引擎）。
+   *
+   *  同批多个回测调用逐组处理：
+   *    - 已委托（backtestDelegated）或已逐组确认（confirmedCalls）→ 跳过；
+   *    - interrupt 挂起等用户决策，resume 按调用顺序逐组回放历史决策——因此本节点重跑时
+   *      "已回答的组"直接拿到历史值继续，只有未回答的组真正挂起等待；
+   *    - approve → 该组 id 记入 confirmedCalls（只放行这一组）；
+   *    - delegate → 置 backtestDelegated（本批后续 + 本轮后续全放行）；
+   *    - feedback / 归一化失败 / 白名单不过 → 该组不进引擎，回执记入 rejectedCalls 交模型消化。
+   *  全部组处理完 → Command(goto="tools")：工具执行自此不再被打断，天然幂等。 */
+  private async execConfirmBacktest(state: StrategyGraphStateType) {
+    const last = state.messages[state.messages.length - 1] as AIMessage;
+    const confirmed: string[] = [];
+    const rejections: Record<string, string> = {};
+    let delegated = state.backtestDelegated === true;
 
-    if (!delegated) {
-      const sort = effectiveSortFactors(p.sortFactors);
-      const decision = interrupt({
-        type: 'confirm_backtest',
-        params: {
-          回测区间: `${p.startDate}~${p.endDate}`,
-          股票池: p.securityIds ? `${p.securityIds.length} 只` : '全市场',
-          调仓间隔: `每 ${p.rebalanceIntervalDays} 个交易日`,
-          每期持仓: `${p.maxPositions} 只 × ${p.idealPositionPct}%${isUserSet(args.maxPositions) ? '' : '（默认）'}`,
-          排序因子: describeSortFactors(sort.factors) + (sort.usedDefault ? '【默认追加】' : ''),
-          过滤因子: describeFilters(p.entryFilters),
-          卖出规则: describeSellRules(p.sellRules),
-          '初始资金/费用': `${p.initialCapital} 元 · 单边 ${(p.feeRate * 100).toFixed(2)}%${isUserSet(args.feeRate) ? '' : '（默认）'}`,
-          业绩基准: `${BENCHMARKS[p.benchmark].name}${isUserSet(args.benchmark) ? '' : '（默认）'}`,
-        },
-      }) as
-        | { action: 'approve' }
-        | { action: 'delegate' }
-        | { action: 'feedback'; text: string };
+    for (const call of last.tool_calls ?? []) {
+      if (call.name !== 'run_strategy_backtest') continue;
+      if (delegated || state.confirmedCalls.includes(call.id ?? '')) continue;
+      this.logger.log(`confirm节点 回测确认 ${call.id}: ${toLogPreview(call.args)}`);
+      try {
+        const p = assertStrategyInput(call.args as StrategyBacktestInput);
+        // 白名单快检在 interrupt 之前：字段不存在的提案先打回模型自纠，不让用户确认一个注定失败的提案
+        this.backtest.preflight(collectFactorRefs(p));
+        const sort = effectiveSortFactors(p.sortFactors);
+        const decision = interrupt({
+          type: 'confirm_backtest',
+          params: {
+            回测区间: `${p.startDate}~${p.endDate}`,
+            股票池: p.securityIds ? `${p.securityIds.length} 只` : '全市场',
+            调仓间隔: `每 ${p.rebalanceIntervalDays} 个交易日`,
+            每期持仓: `${p.maxPositions} 只 × ${p.idealPositionPct}%${isUserSet(call.args?.maxPositions) ? '' : '（默认）'}`,
+            排序因子: describeSortFactors(sort.factors) + (sort.usedDefault ? '【默认追加】' : ''),
+            过滤因子: describeFilters(p.entryFilters),
+            卖出规则: describeSellRules(p.sellRules),
+            '初始资金/费用': `${p.initialCapital} 元 · 单边 ${(p.feeRate * 100).toFixed(2)}%${isUserSet(call.args?.feeRate) ? '' : '（默认）'}`,
+            业绩基准: `${BENCHMARKS[p.benchmark].name}${isUserSet(call.args?.benchmark) ? '' : '（默认）'}`,
+          },
+        }) as
+          | { action: 'approve' }
+          | { action: 'delegate' }
+          | { action: 'feedback'; text: string };
 
-      if (decision.action === 'feedback') {
-        return {
-          result: {
+        if (decision.action === 'feedback') {
+          rejections[call.id ?? ''] = JSON.stringify({
             已取消: `用户未确认本次回测，其回复：「${decision.text}」`,
             行动: '请结合用户反馈决定：调整参数后重新发起回测（将再次请用户确认），或不再回测、直接回应用户',
-          },
-        };
-      }
-      if (decision.action === 'delegate') {
-        delegated = true; // 本次照常执行 + 置授权标记（随节点返回写回图状态，本轮后续免确认）
-        this.logger.log('用户授权调优：本次回测照常执行，本轮后续回测免确认');
+          });
+          this.logger.log(`confirm节点 ${call.id} → feedback，该组取消`);
+          continue;
+        }
+        if (decision.action === 'delegate') {
+          delegated = true; // 本批后续 + 本轮（本次图执行）后续全放行
+          this.logger.log('用户授权调优：本批后续与本轮后续回测免确认');
+          continue;
+        }
+        confirmed.push(call.id ?? '');
+        this.logger.log(`confirm节点 ${call.id} → approve，放行本组`);
+      } catch (error) {
+        // interrupt 的暂停信号必须原样穿透，吞掉 = 确认门失效
+        if (error instanceof GraphInterrupt) throw error;
+        if (error instanceof ClarificationSignal) {
+          rejections[call.id ?? ''] = JSON.stringify(error.guide);
+          continue;
+        }
+        const msg = error instanceof ApiException ? error.message : '工具执行失败，请稍后重试';
+        if (!(error instanceof ApiException)) this.logger.warn(`confirm节点 参数快检异常: ${String(error)}`);
+        rejections[call.id ?? ''] = JSON.stringify({ error: msg });
       }
     }
+
+    return new Command({
+      goto: 'tools',
+      update: {
+        ...(confirmed.length ? { confirmedCalls: confirmed } : {}),
+        ...(Object.keys(rejections).length ? { rejectedCalls: rejections } : {}),
+        ...(delegated && state.backtestDelegated !== true ? { backtestDelegated: true } : {}),
+      },
+    });
+  }
+
+  /** 策略回测执行（tools 侧）：到达时参数必已过确认门（confirm 节点放行/委托）——
+   *  这里只做归一化复核与引擎调用，不再含任何 interrupt，节点重跑也不会重复建仓扣费 */
+  private async execRunBacktest(args: StrategyBacktestInput, ctx: ToolContext): Promise<ToolOutcome> {
+    const p = assertStrategyInput(args);
+    this.backtest.preflight(collectFactorRefs(p));
 
     let output;
     try {
       output = await this.backtest.runStrategyBacktest(p);
     } catch (error) {
-      // 委托模式下回测失败不收回授权：错误交模型自纠（如区间超出数据范围时改用表内
-      // 可用区间），同批/后续回测仍免确认——否则一组失败就把授权调优打回逐组确认
-      if (delegated && error instanceof ApiException) {
-        this.logger.warn(`[授权调试] 委托回测失败但保留授权: ${error.message}`);
-        return { result: { error: error.message }, delegated: true };
+      // 已授权回测的引擎失败：错误交模型自纠（如区间超出数据范围时改用表内可用区间），
+      // 授权仍有效，模型可改参重发；回执带"行动"指引——失败必须告知用户，不许默默重试装作没发生
+      if (ctx.delegated && error instanceof ApiException) {
+        this.logger.warn(`[授权调试] 已授权回测失败，错误交模型自纠: ${error.message}`);
+        return {
+          result: {
+            error: error.message,
+            行动: '先向用户如实说明本组回测失败及原因（不要默默重试装作没发生），再按失败原因调整参数重新发起；' +
+              '调整说明与后续建议在最终回复中一并给出，结尾按优化建议规则提示可回复"授权调优"',
+          },
+        };
       }
       throw error;
     }
-    this.logger.log(`[授权调试] execRunBacktest 返回 delegated=${delegated}`);
     return {
       result: {
         ...output.summary,
-        ...(delegated ? { 授权模式: '参数已授权，本轮内继续回测无需确认；连续多组回测整体耗时较长，完成后请汇总对比、择优推荐' } : {}),
+        ...(ctx.delegated ? { 授权模式: '参数已授权，本轮内继续回测无需确认；连续多组回测整体耗时较长，完成后请汇总对比、择优推荐' } : {}),
       },
       card: output.card,
       backtestFreq: `每${p.rebalanceIntervalDays}个交易日`,
-      delegated: delegated || undefined,
     };
   }
 
@@ -667,8 +740,13 @@ export class LangGraphAgentService extends AgentService {
       '- run_strategy_backtest 执行前系统会请用户确认参数：收到"已取消"回执时，' +
         '结合用户反馈调整参数后重新发起（会再次请用户确认），或放弃回测直接回应用户，' +
         '不要声称回测已开始或编造回测结果；',
+      '- 回测执行失败的组必须在最终回复里如实告知用户：哪一组（参数摘要）、失败原因、建议的调整方向，' +
+        '禁止默默重试后装作没有失败——失败后的重试也要先说明原因和调整思路；' +
+        '失败原因与调整方向本身就是优化建议，按优化建议规则结尾提示可回复"授权调优"；',
       '- 用户要求优化/调参/多方案对比时，可连续多次调用 run_strategy_backtest：' +
         '首次仍会请用户确认，用户回复"授权调优"后本轮内免确认（回执含"授权模式"注明）；' +
+        '连续多组时保持用户已确认的关键参数不变（securityIds 股票池、区间、资金、基准），只按建议调整要对比的维度；' +
+        '因子阈值必须落在字段真实值域内（拿不准时先用 read_factor_data 抽样看值域再定阈值），禁止拍脑袋填大数；' +
         '结束时对比各次指标择优推荐，用【展示卡片:card_N】指定展示最优的一次；' +
         '给出优化建议后，结尾固定加一句：回复"授权调优"可按建议连续多组回测对比择优（前端会渲染授权按钮）；',
       '- 本回合跑了多次回测时，每份回执带「卡片编号」：按用户意图选最符合的一次（如优化场景选指标最优的），在回复最末尾单独一行写【展示卡片:card_N】指定展示哪次（该行不会展示给用户）；只回测了一次则不写；',
