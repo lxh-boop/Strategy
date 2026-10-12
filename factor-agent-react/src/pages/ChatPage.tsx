@@ -520,9 +520,12 @@ export function ChatPage(props: {
           </div>
           <div className="modal-body">
             <div className="agent-card-text" style={{ margin: "0 0 12px" }}>
-              智能体给出了优化建议（见上方消息）。选择执行方式，或在下方直接输入其他要求：
+              智能体给出了优化建议，原文如下（也可在下方直接输入其他要求）：
             </div>
-            <div className="optimize-actions">
+            {lastMessage && (
+              <div className="optimize-quote">{lastMessage.bubble}</div>
+            )}
+            <div className="optimize-actions" style={{ marginTop: 12 }}>
               <button className="btn btn-ghost" onClick={() => optimizeAct("确认")}>按建议执行下一轮</button>
               <button className="btn btn-primary" onClick={() => optimizeAct("授权调优")}>授权调优·连续多组对比</button>
             </div>

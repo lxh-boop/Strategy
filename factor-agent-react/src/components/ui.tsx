@@ -7,10 +7,15 @@ import { IconClose } from "./icons";
 export function Modal({ children, onClose, ariaLabel }: { children: ReactNode; onClose: () => void; ariaLabel?: string }) {
   const boxRef = useRef<HTMLDivElement>(null);
 
+  /* 焦点移入只在挂载时做一次：随渲染重跑会反复抢焦点——弹窗内输入框每敲一个字
+     触发父组件重渲染，焦点被抢回容器，表现为"输入框没法输入" */
+  useEffect(() => {
+    boxRef.current?.focus();
+  }, []);
+
   useEffect(() => {
     const box = boxRef.current;
     const prev = document.activeElement as HTMLElement | null;
-    box?.focus();
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") { onClose(); return; }
       if (e.key !== "Tab" || !box) return;

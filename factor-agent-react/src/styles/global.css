@@ -693,3 +693,10 @@ input[type="range"]::-webkit-slider-thumb {
 .trade-scroll { max-height: 320px; overflow: auto; border: 1px solid var(--divider); border-radius: 8px; }
 .trade-scroll .mini-table th { position: sticky; top: 0; background: var(--card); z-index: 1; }
 .trade-scroll .mini-table td { white-space: normal; }
+
+/* 优化建议弹窗内的建议原文（避免"见上方消息"被遮罩模糊看不到） */
+.optimize-quote {
+  max-height: 220px; overflow: auto; white-space: pre-wrap;
+  background: var(--tile); border: 1px solid var(--tile-border); border-radius: 8px;
+  padding: 10px 12px; font-size: 13px; line-height: 1.7; color: var(--text-2);
+}
