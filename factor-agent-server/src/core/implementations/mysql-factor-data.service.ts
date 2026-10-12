@@ -6,12 +6,13 @@ import { loadTableFields, listKnownTables } from '../factor-schema';
 import {
   DATE_RE,
   CrossSectionRow,
-  DailyCloseRow,
   FactorDataService,
   FactorDataRow,
+  FactorRangeRow,
   FactorTableQuery,
   IDENT_RE,
   IndexDailyRow,
+  QuoteRow,
   SECURITY_RE,
   TradeDateCoverage,
 } from '../factor-data.service';
@@ -20,14 +21,21 @@ import {
    因子数据读取实现：MySQL（mysql2 连接池）
    - 表名/字段名只允许 [A-Za-z0-9_] 且反引号包裹，日期/证券代码走参数占位符，杜绝注入
    - 连接池按配置懒创建：.env 未配齐时不阻塞启动，首次取数时给出明确报错
-   - readTable 服务 LLM 单点查询；readTradeDates/readCrossSection/readDailyCloses/
-     readIndexDaily 服务等权回测的批量取数，同池同白名单
+   - readTable 服务 LLM 单点查询；readTradeDates/readFactorSection/readFactorRange/
+     readQuoteSeries/readIndexDaily 服务策略回测引擎的批量取数，同池同白名单
+   - 无 TRADE_DATE 列的静态表（md_security 等主表）截面/序列查询忽略日期条件
    ========================================================== */
+
+/** 个股前复权日行情表（SQL/mkt_equd_adj.md）：引擎成交与结算的唯一行情源 */
+const QUOTE_TABLE = 'mkt_equd_adj';
+
+/** 指数日行情表（SQL/mkt_idxd.md），基准曲线数据源 */
+const INDEX_TABLE = 'mkt_idxd';
 
 /** 单次查询允许的最大因子字段数（防止拼接超长 SQL） */
 const MAX_FIELDS = 200;
 
-/** 批量日收盘按代码分片查询的大小（控制 IN 元组长度） */
+/** 批量查询按代码分片的大小（控制 IN 元组长度） */
 const CODE_CHUNK = 400;
 
 /** 交易日 YYYYMMDD → 行情表 DATE 参数 'YYYY-MM-DD' */
@@ -76,24 +84,66 @@ export class MysqlFactorDataService extends FactorDataService {
     return { dates, min: Number(range.mn), max: Number(range.mx) };
   }
 
-  async readCrossSection(table: string, field: string, date: string): Promise<CrossSectionRow[]> {
+  async readFactorSection(table: string, field: string, date: string, codes: string[] | null): Promise<CrossSectionRow[]> {
     this.assertTable(table);
     this.assertField(table, field);
     if (!DATE_RE.test(date)) {
       throw new ApiException('INVALID_ARGUMENT', 400, `日期必须是纯数字 YYYYMMDD: ${date}`);
     }
-    const sql =
-      `SELECT SECURITY_ID, \`${field}\` AS v FROM \`${table}\` ` +
-      `WHERE TRADE_DATE = ? AND \`${field}\` IS NOT NULL`;
-    const rows = await this.query(sql, [Number(date)]);
-    return rows.map((r) => {
-      const row = r as Record<string, unknown>;
-      return { securityId: String(row.SECURITY_ID), value: toNum(row.v) };
-    });
+    const staticTable = this.isStaticTable(table);
+    const all: CrossSectionRow[] = [];
+    for (const chunk of this.chunkCodes(codes)) {
+      const params: (string | number)[] = [];
+      const conds: string[] = [`\`${field}\` IS NOT NULL`];
+      if (!staticTable) {
+        conds.push('TRADE_DATE = ?');
+        params.push(Number(date));
+      }
+      if (chunk) {
+        conds.push(`SECURITY_ID IN (${chunk.map(() => '?').join(', ')})`);
+        params.push(...chunk);
+      }
+      const sql = `SELECT SECURITY_ID, \`${field}\` AS v FROM \`${table}\` WHERE ${conds.join(' AND ')}`;
+      const rows = await this.query(sql, params);
+      for (const row of rows as Record<string, unknown>[]) {
+        all.push({ securityId: String(row.SECURITY_ID), value: toNum(row.v) });
+      }
+    }
+    return all;
   }
 
-  async readDailyCloses(table: string, codes: string[], start: string, end: string): Promise<DailyCloseRow[]> {
+  async readFactorRange(table: string, field: string, codes: string[], start: string, end: string): Promise<FactorRangeRow[]> {
     this.assertTable(table);
+    this.assertField(table, field);
+    this.assertRange(start, end);
+    const staticTable = this.isStaticTable(table);
+    const all: FactorRangeRow[] = [];
+    for (const chunk of this.chunkCodes([...new Set(codes)])) {
+      const conds: string[] = [`\`${field}\` IS NOT NULL`];
+      const params: (string | number)[] = [];
+      if (!staticTable) {
+        conds.push('TRADE_DATE BETWEEN ? AND ?');
+        params.push(toDashDate(start), toDashDate(end));
+      }
+      if (chunk) {
+        conds.push(`SECURITY_ID IN (${chunk.map(() => '?').join(', ')})`);
+        params.push(...chunk);
+      }
+      const sql = `SELECT SECURITY_ID${staticTable ? '' : ', TRADE_DATE'}, \`${field}\` AS v FROM \`${table}\` WHERE ${conds.join(' AND ')}`;
+      const rows = await this.query(sql, params);
+      for (const row of rows as Record<string, unknown>[]) {
+        all.push({
+          securityId: String(row.SECURITY_ID),
+          tradeDate: row.TRADE_DATE === undefined ? '' : String(row.TRADE_DATE),
+          value: toNum(row.v),
+        });
+      }
+    }
+    return all;
+  }
+
+  async readQuoteSeries(codes: string[], start: string, end: string): Promise<QuoteRow[]> {
+    this.assertTable(QUOTE_TABLE);
     this.assertRange(start, end);
     const unique = [...new Set(codes)];
     for (const code of unique) {
@@ -103,7 +153,7 @@ export class MysqlFactorDataService extends FactorDataService {
     }
     const startDash = toDashDate(start);
     const endDash = toDashDate(end);
-    const all: DailyCloseRow[] = [];
+    const all: QuoteRow[] = [];
     for (let i = 0; i < unique.length; i += CODE_CHUNK) {
       const chunk = unique.slice(i, i + CODE_CHUNK).map((code) => {
         const [ticker, exchange] = code.split('.');
@@ -113,8 +163,8 @@ export class MysqlFactorDataService extends FactorDataService {
       const params: (string | number)[] = [startDash, endDash];
       for (const c of chunk) params.push(c.ticker, c.exchange);
       const sql =
-        `SELECT TICKER_SYMBOL, EXCHANGE_CD, TRADE_DATE, CLOSE_PRICE_1 FROM \`${table}\` ` +
-        `WHERE TRADE_DATE BETWEEN ? AND ? AND CLOSE_PRICE_1 IS NOT NULL ` +
+        `SELECT TICKER_SYMBOL, EXCHANGE_CD, TRADE_DATE, OPEN_PRICE_1, CLOSE_PRICE_1, PRE_CLOSE_PRICE_1 FROM \`${QUOTE_TABLE}\` ` +
+        `WHERE TRADE_DATE BETWEEN ? AND ? AND CLOSE_PRICE_1 IS NOT NULL AND PRE_CLOSE_PRICE_1 IS NOT NULL ` +
         `AND (TICKER_SYMBOL, EXCHANGE_CD) IN (${placeholders}) ORDER BY TRADE_DATE`;
       const rows = await this.query(sql, params);
       for (const row of rows as Record<string, unknown>[]) {
@@ -122,11 +172,13 @@ export class MysqlFactorDataService extends FactorDataService {
           ticker: String(row.TICKER_SYMBOL),
           exchange: String(row.EXCHANGE_CD),
           tradeDate: String(row.TRADE_DATE),
-          closeAdj: toNum(row.CLOSE_PRICE_1),
+          open: row.OPEN_PRICE_1 === null ? null : toNum(row.OPEN_PRICE_1),
+          close: toNum(row.CLOSE_PRICE_1),
+          preClose: toNum(row.PRE_CLOSE_PRICE_1),
         });
       }
     }
-    this.logger.log(`${table} 日收盘 ${start}~${end}: ${unique.length} 只，${all.length} 行`);
+    this.logger.log(`${QUOTE_TABLE} 日线 ${start}~${end}: ${unique.length} 只，${all.length} 行`);
     return all;
   }
 
@@ -171,6 +223,11 @@ export class MysqlFactorDataService extends FactorDataService {
     }
   }
 
+  /** 静态表：字段字典里没有 TRADE_DATE 列（md_security 等主表）——截面/序列查询忽略日期条件 */
+  private isStaticTable(table: string): boolean {
+    return !(loadTableFields(table)?.has('TRADE_DATE') ?? false);
+  }
+
   /** 回测区间：两端纯数字且 start < end */
   private assertRange(start: string, end: string): void {
     if (!DATE_RE.test(start) || !DATE_RE.test(end)) {
@@ -179,6 +236,15 @@ export class MysqlFactorDataService extends FactorDataService {
     if (Number(start) >= Number(end)) {
       throw new ApiException('INVALID_ARGUMENT', 400, `区间非法：start 必须早于 end: ${start} ~ ${end}`);
     }
+  }
+
+  /** codes 按 CODE_CHUNK 分片；null（全市场）原样返回单元素数组（不加 IN 条件） */
+  private chunkCodes(codes: string[] | null): (string[] | null)[] {
+    if (codes === null) return [null];
+    if (!codes.length) return [];
+    const out: string[][] = [];
+    for (let i = 0; i < codes.length; i += CODE_CHUNK) out.push(codes.slice(i, i + CODE_CHUNK));
+    return out;
   }
 
   /** SELECT 列清单：固定带出 SECURITY_ID / TRADE_DATE，其余按传入顺序去重拼接。

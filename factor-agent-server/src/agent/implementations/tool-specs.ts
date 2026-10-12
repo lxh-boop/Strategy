@@ -70,41 +70,33 @@ export const READ_FACTOR_DATA_SPEC = {
   },
 };
 
-/** 工具 4：多因子等权合成回测出净值卡片；frequency 必填无默认值，缺了服务端会返回澄清指引 */
-export const RUN_EQUAL_WEIGHT_BACKTEST_SPEC = {
+/** 工具 4：策略回测（日频事件内核，StrategySpec v1）。
+ *  rebalanceIntervalDays 必填无默认值，缺了服务端会返回澄清指引；
+ *  sortFactors 缺省时引擎兜底默认 20 日动量（值大优），确认弹窗会如实展示。 */
+export const RUN_STRATEGY_BACKTEST_SPEC = {
   type: 'function' as const,
   function: {
-    name: 'run_equal_weight_backtest',
+    name: 'run_strategy_backtest',
     description:
-      '对已选定的因子组做多因子等权回测并生成净值卡片：每个调仓日各因子先算截面分位数、' +
-      '等权平均成综合分，按综合分取 Top-K 等权建仓，输出年化收益、最大回撤、夏普、胜率、' +
-      '年化换手与净值/基准曲线。factors 中的表名必须来自系统提示中的表目录，字段名必须来自 ' +
-      'list_factor_fields 的返回；回测无需先用 read_factor_data 抽样验证数据；' +
-      'frequency 为必填参数且无默认值，用户未指明调仓频率时必须先向用户询问，禁止自行假设；' +
+      '运行策略回测并生成净值卡片（日频事件内核）：T 日收盘按过滤+排序选出目标持仓，T+1 开盘或收盘价执行，' +
+      '支持资金账户（初始资金/整手/单边费率双边计提）、T+1、停牌顺延、卖出规则（止盈止损/持有天数/排名跌出等），' +
+      '输出年化收益、最大回撤、夏普、胜率、年化换手、净值/基准曲线、交易明细与月度归因。' +
+      '因子一律按 table.field 从数据表读取（表名必须来自系统提示中的表目录，字段名必须来自 list_factor_fields 的返回），' +
+      '回测无需先用 read_factor_data 抽样验证数据。' +
+      '过滤与排序是两个独立参数：同一因子既过滤又排序时须在 entryFilters 与 sortFactors 各传一次。' +
+      'sortFactors 为空时引擎自动用默认排序因子（20 日动量 REVS20，值大优），弹窗会向用户展示。' +
+      'rebalanceIntervalDays 为必填参数且无默认值，用户未指明调仓间隔时必须先向用户询问，禁止自行假设；' +
       'startDate/endDate 用户说过的区间照传，相对时间表达（如"最近两年""今年"）按系统提示中的今天日期换算为纯数字区间，' +
       '用户完全没提时填合理区间（如近三年）即可，不要反问——所有参数会在执行前经用户确认，用户可当场调整。',
     parameters: {
       type: 'object',
       properties: {
-        factors: {
+        securityIds: {
           type: 'array',
-          minItems: 1,
-          maxItems: 10,
+          items: { type: 'string' },
           description:
-            '参与合成的因子列表（1~10 个，等权）：每个因子各算截面分位数后等权平均成综合分',
-          items: {
-            type: 'object',
-            properties: {
-              table: { type: 'string', description: '因子表名，来自系统提示中的表目录' },
-              field: { type: 'string', description: '因子字段名，来自工具 2 的返回' },
-              order: {
-                type: 'string',
-                enum: ['desc', 'asc'],
-                description: '该因子的选股方向：desc 因子值越大越好（默认）/ asc 值越小越好（如低估值因子）',
-              },
-            },
-            required: ['table', 'field'],
-          },
+            '股票池：证券代码数组（如 ["000002.XSHE"]，来自前置筛选或用户指定）。缺省/空 = 全市场。' +
+            '禁止在对话中手拼超长清单；需要行业/主题股票池时先用筛选手段得到代码清单',
         },
         startDate: {
           type: 'string',
@@ -114,22 +106,87 @@ export const RUN_EQUAL_WEIGHT_BACKTEST_SPEC = {
           type: 'string',
           description: '回测结束日，纯数字 YYYYMMDD。约束同 startDate：用户说过照传、相对时间按今天日期换算，执行前会经用户确认',
         },
-        frequency: {
-          type: 'string',
-          enum: ['daily', 'weekly', 'biweekly', 'monthly', 'quarterly', 'semiannual', 'annual', 'custom'],
-          description:
-            '调仓频率（必填，无默认值）：daily 每日 / weekly 每周 / biweekly 每半月 / monthly 每月 / ' +
-            'quarterly 每季 / semiannual 每半年 / annual 每年 / custom 自定义每 N 个交易日',
-        },
-        everyNTd: { type: 'integer', description: '仅 frequency=custom 时必填：每 N 个交易日调仓一次，5~120' },
-        topK: {
+        rebalanceIntervalDays: {
           type: 'integer',
-          description: '每期持仓只数，默认 50，上限 200。用户提到 topN/持仓 N 只/选 N 只时必须按用户说的数值传入（top5 → 5），禁止擅自换成默认值',
+          description: '调仓间隔（必填，无默认值）：每隔多少个交易日调仓一次，如 5≈每周、10≈每两周、21≈每月、63≈每季',
         },
+        initialCapital: { type: 'number', description: '初始资金，默认 1000000（100 万）。用户提到资金规模时按用户说的传' },
         feeRate: {
           type: 'number',
-          description: '单边交易费率（小数，0.001 = 每边 0.1%，双边合计 2×feeRate，已在每期换手日计提）。' +
-            '用户提到手续费/费用时必须传入；用户未提及时省略（默认不计费用）',
+          description: '单边交易费率（小数，0.0003 = 万三，买卖双边各计提一次）。默认 0.0003；用户明确说不计费用时传 0',
+        },
+        executionTiming: {
+          type: 'integer',
+          enum: [0, 1],
+          description: '成交时点：0=开盘价成交（默认）/ 1=收盘价成交',
+        },
+        maxPositions: {
+          type: 'integer',
+          description: '最大持仓数，默认 10，上限 100。用户提到 topN/持仓 N 只/选 N 只时必须按用户说的数值传入（top5 → 5），禁止擅自换成默认值',
+        },
+        idealPositionPct: {
+          type: 'number',
+          description: '每只目标仓位 %，缺省 = 100/maxPositions（满仓等权）。用户说"每只 5% 仓位"之类时传入',
+        },
+        entryFilters: {
+          type: 'array',
+          maxItems: 10,
+          description: '过滤因子：全部满足才入选（不满足即剔除，因子值缺失视为不满足）',
+          items: {
+            type: 'object',
+            properties: {
+              table: { type: 'string', description: '数据表名，来自系统提示中的表目录' },
+              field: { type: 'string', description: '字段名，来自 list_factor_fields 的返回' },
+              op: { type: 'string', enum: ['>', '<'], description: '比较符：大于 / 小于' },
+              value: { type: 'number', description: '阈值' },
+            },
+            required: ['table', 'field', 'op', 'value'],
+          },
+        },
+        sortFactors: {
+          type: 'array',
+          maxItems: 10,
+          description:
+            '排序因子：各因子截面分位数标准化（0~100）后加权合成综合分，按综合分降序取前 maxPositions。' +
+            '缺省 = 引擎自动用默认排序因子（20 日动量 REVS20，值大优）。weight 全省略 = 等权 1/N；' +
+            '需要加权时必须给全部因子传 weight（按总和归一化），不支持只传部分',
+          items: {
+            type: 'object',
+            properties: {
+              table: { type: 'string', description: '数据表名，来自系统提示中的表目录' },
+              field: { type: 'string', description: '字段名，来自 list_factor_fields 的返回' },
+              direction: { type: 'integer', enum: [1, -1], description: '排序方向：1=值大优（默认，如动量）/ -1=值小优（如低估值）' },
+              weight: { type: 'number', description: '权重；全部因子都传才生效（缺省等权 1/N）' },
+            },
+            required: ['table', 'field', 'direction'],
+          },
+        },
+        sellRules: {
+          type: 'array',
+          maxItems: 10,
+          description:
+            '卖出规则：持仓期每日收盘后检查，命中次日执行（全仓卖出）。' +
+            'rank_out 在调仓日按综合分排名生效（跌出前 bottomN 名即卖）',
+          items: {
+            type: 'object',
+            properties: {
+              kind: {
+                type: 'string',
+                enum: ['field', 'stop_profit', 'stop_loss', 'max_drawdown_from_entry', 'max_hold_days', 'rank_out'],
+                description:
+                  'field=字段条件触发（如跌破均线标记）；stop_profit=止盈%；stop_loss=止损%；' +
+                  'max_drawdown_from_entry=买入后自峰值回撤%；max_hold_days=持有满 N 个交易日；rank_out=调仓日排名跌出前 N',
+              },
+              table: { type: 'string', description: 'kind=field 时必填：数据表名' },
+              field: { type: 'string', description: 'kind=field 时必填：字段名' },
+              op: { type: 'string', enum: ['>', '<'], description: 'kind=field 时必填：比较符' },
+              value: { type: 'number', description: 'kind=field 时必填：阈值' },
+              pct: { type: 'number', description: 'stop_profit/stop_loss/max_drawdown_from_entry 时必填：百分比数值（10 = 10%）' },
+              days: { type: 'integer', description: 'max_hold_days 时必填：持有交易日数' },
+              bottomN: { type: 'integer', description: 'rank_out 时必填：排名阈值' },
+            },
+            required: ['kind'],
+          },
         },
         benchmark: {
           type: 'string',
@@ -137,7 +194,7 @@ export const RUN_EQUAL_WEIGHT_BACKTEST_SPEC = {
           description: '业绩基准：hs300 沪深300（默认）/ csi500 中证500 / sse 上证指数',
         },
       },
-      required: ['factors', 'startDate', 'endDate', 'frequency'],
+      required: ['startDate', 'endDate', 'rebalanceIntervalDays'],
     },
   },
 };
@@ -147,7 +204,7 @@ export const AGENT_TOOL_SPECS = [
   LIST_FACTOR_TABLES_SPEC,
   LIST_FACTOR_FIELDS_SPEC,
   READ_FACTOR_DATA_SPEC,
-  RUN_EQUAL_WEIGHT_BACKTEST_SPEC,
+  RUN_STRATEGY_BACKTEST_SPEC,
 ] as const;
 
 /* ----- 工具入参形态（LLM 传入，字段均为未知形态，服务端归一化校验） ----- */

@@ -7,6 +7,7 @@
 import type {
   AgentCard,
   BacktestRunConfig,
+  StrategyRunConfig,
   ChatMessage,
   ChatProgressEvent,
   Conversation,
@@ -298,8 +299,9 @@ export const updateStrategy = (id: string, patch: Partial<NewStrategyInput>) =>
 export const backtestStrategy = (id: string) => http<Strategy>("POST", `/strategies/${id}/backtest`, {});
 export const deleteStrategy = (id: string) => http<void>("DELETE", `/strategies/${id}`);
 
-/** API-27：把 TOOL-C07 回测卡片保存为策略——服务端按 config 重跑等权真引擎（数字与卡片一致） */
-export const createStrategyFromBacktest = (name: string, config: BacktestRunConfig) =>
+/** API-27：把回测卡片保存为策略——服务端按 config 重跑真引擎（数字与卡片一致）；
+ *  新引擎卡片为 StrategyRunConfig，历史等权卡片为 BacktestRunConfig */
+export const createStrategyFromBacktest = (name: string, config: StrategyRunConfig | BacktestRunConfig) =>
   http<Strategy>("POST", "/strategies/from-backtest", { name, config });
 
 /* ----- 行情配置（契约 §3.4 / §3.5，配置型数据由后端下发） ----- */

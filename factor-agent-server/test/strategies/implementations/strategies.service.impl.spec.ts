@@ -7,6 +7,7 @@
 import { Test } from '@nestjs/testing';
 import { ApiException } from '../../../src/common/api.exception';
 import { BacktestService, BacktestOutput } from '../../../src/core/backtest.service';
+import { StrategyBacktestService } from '../../../src/core/strategy-backtest.service';
 import { UserStoreService } from '../../../src/core/user-store.service';
 import { StrategiesService } from '../../../src/strategies/strategies.service';
 import { StrategiesServiceImpl } from '../../../src/strategies/implementations/strategies.service.impl';
@@ -55,6 +56,7 @@ describe('B-INT-02 StrategiesServiceImpl（策略业务）', () => {
     deleteStrategy: jest.fn(),
   };
   const btEngine = { runBacktest: jest.fn() };
+  const strategyBt = { runStrategyBacktest: jest.fn(), preflight: jest.fn() };
   let svc: StrategiesService;
 
   beforeEach(async () => {
@@ -65,6 +67,7 @@ describe('B-INT-02 StrategiesServiceImpl（策略业务）', () => {
         StrategiesServiceImpl,
         { provide: UserStoreService, useValue: store },
         { provide: BacktestService, useValue: btEngine },
+        { provide: StrategyBacktestService, useValue: strategyBt },
       ],
     }).compile();
     svc = moduleRef.get(StrategiesServiceImpl);

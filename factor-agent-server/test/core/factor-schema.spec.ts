@@ -8,7 +8,7 @@ import { IDENT_RE } from '../../src/core/factor-data.service';
 
 describe('factor-schema（SQL 字段字典解析）', () => {
   describe('listKnownTables（表名白名单）', () => {
-    it('返回 tables.md 中登记的六张表', () => {
+    it('返回 tables.md 中登记的十一张表（6 因子/行情表 + 5 行业主表）', () => {
       expect(listKnownTables()).toEqual([
         'equ_factor_cf',
         'equ_factor_derive',
@@ -16,6 +16,11 @@ describe('factor-schema（SQL 字段字典解析）', () => {
         'mkt_adjf',
         'mkt_equd_adj',
         'mkt_idxd',
+        'md_security',
+        'md_industry',
+        'md_type',
+        'md_type_description',
+        'md_company_status',
       ]);
     });
   });
@@ -92,7 +97,7 @@ describe('factor-schema（SQL 字段字典解析）', () => {
     });
 
     it('不在 tables.md 清单中的表返回 undefined', () => {
-      expect(loadTableFields('md_security')).toBeUndefined();
+      expect(loadTableFields('no_such_table')).toBeUndefined();
       expect(loadTableFields('equ_factor_not_exist')).toBeUndefined();
     });
   });
