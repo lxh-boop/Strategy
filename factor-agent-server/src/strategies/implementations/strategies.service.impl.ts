@@ -4,6 +4,7 @@ import { normalizeWeights, BacktestService } from '../../core/backtest.service';
 import {
   BENCHMARKS,
   BenchmarkKey,
+  ClarificationSignal,
   legacyConfigToInput,
   StrategyBacktestInput,
   StrategyBacktestService,
@@ -118,8 +119,17 @@ export class StrategiesServiceImpl extends StrategiesService {
   /** API-27：由回测卡片配置创建策略——服务端按同一配置重跑策略回测真引擎，
    *  曲线/指标与卡片一致（同数据同配置确定性复现）。因子权重按等权折算仅作展示。 */
   async createFromBacktest(userId: number, dto: CreateFromBacktestDto): Promise<Strategy> {
-    const config = dto.config as BacktestRunConfig | StrategyRunConfig;
-    const input = toStrategyInput(config);
+    const config = dto.config as unknown as BacktestRunConfig | StrategyRunConfig;
+    let input: StrategyBacktestInput;
+    try {
+      input = toStrategyInput(config);
+    } catch (error) {
+      // 引擎的澄清信号（面向模型追问）在 API 面转 400，给出可操作的缺参消息
+      if (error instanceof ClarificationSignal) {
+        throw new ApiException('INVALID_ARGUMENT', 400, `回测配置不完整：${(error.guide as { 需要澄清?: string }).需要澄清 ?? '缺少必要参数'}`);
+      }
+      throw error;
+    }
     const out = await this.strategyBacktest.runStrategyBacktest(input);
     const strategy: Strategy = {
       id: 's' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
