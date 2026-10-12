@@ -172,7 +172,12 @@ export function assertBacktestInput(raw: EqualWeightBacktestInput): NormalizedBa
   }
 
   if (!startDate || !endDate) {
-    throw new ApiException('INVALID_ARGUMENT', 400, '参数不完整：需要 startDate/endDate（纯数字 YYYYMMDD）');
+    throw new ApiException(
+      'INVALID_ARGUMENT',
+      400,
+      '参数不完整：需要 startDate/endDate（纯数字 YYYYMMDD）。用户说过的区间照传，只给了相对时间' +
+        '（如"最近两年"）按系统提示的今天日期换算，完全没提时填合理区间即可——参数执行前会经用户确认，可被当场修改',
+    );
   }
   if (!/^\d{8}$/.test(startDate) || !/^\d{8}$/.test(endDate) || Number(startDate) >= Number(endDate)) {
     throw new ApiException('INVALID_ARGUMENT', 400, `回测区间非法：startDate/endDate 须为纯数字 YYYYMMDD 且 start 早于 end，当前 ${startDate} ~ ${endDate}`);
@@ -225,95 +230,6 @@ export function assertBacktestInput(raw: EqualWeightBacktestInput): NormalizedBa
   }
 
   return { factors, startDate, endDate, frequency, everyNTd, topK, benchmark, feeRate };
-}
-
-/* ----- 回测区间溯源校验（纯函数） -----
- * 策略 A：startDate/endDate 属"用户必填"参数——只能来自用户在对话中明确说过的时间
- * （本轮或本会话早先轮次均可，即会话继承），模型凭经验补全的区间在服务端拦截。
- * prompt/schema 描述是软约束，这里是硬保证；匹配取向"宁可漏放不可错杀"：
- * 多日期格式/年份/相对时长/日历词宽松归一化，漏放的由最终文案的参数来源声明兜底可见。 */
-
-/** 中文数字 → 数值（相对时长解析用；"十二"类组合单独处理） */
-const CN_NUMERAL: Record<string, number> = {
-  一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9, 十: 10,
-};
-
-/** 解析相对时长里的数量（阿拉伯数字/中文数字/"十二"组合），无法解析返回 0 */
-function parseCount(raw: string): number {
-  if (/^\d+$/.test(raw)) return Number(raw);
-  if (CN_NUMERAL[raw] !== undefined) return CN_NUMERAL[raw];
-  const combo = /^([一二两三四五六七八九])十([一二三四五六七八九])?$/.exec(raw);
-  return combo ? CN_NUMERAL[combo[1]] * 10 + (combo[2] ? CN_NUMERAL[combo[2]] : 0) : 0;
-}
-
-/** 8 位日期 → UTC 天序号（跨度计算用，不依赖宿主对 YYYYMMDD 的解析行为） */
-function dayNumber(d: string): number {
-  return Date.UTC(Number(d.slice(0, 4)), Number(d.slice(4, 6)) - 1, Number(d.slice(6, 8))) / 86_400_000;
-}
-
-/** 端点日期的字面命中：YYYYMMDD、2024-01-01、2024/1/1、2024.1.1、2024年1月(1日)、202401 */
-function dateLiteralHit(d: string, text: string): boolean {
-  const y = d.slice(0, 4);
-  const mm = d.slice(4, 6);
-  const dd = d.slice(6, 8);
-  const mN = String(Number(mm));
-  const dN = String(Number(dd));
-  const forms = [
-    d,
-    `${y}-${mm}-${dd}`, `${y}-${mN}-${dN}`,
-    `${y}/${mm}/${dd}`, `${y}/${mN}/${dN}`,
-    `${y}.${mm}.${dd}`, `${y}.${mN}.${dN}`,
-    `${y}年${mm}月${dd}日`, `${y}年${mN}月${dN}日`, `${y}年${mN}月`,
-    d.slice(0, 6),
-  ];
-  return forms.some((f) => text.includes(f));
-}
-
-/**
- * 回测区间出处判定：用户话语中存在能覆盖 [startDate, endDate] 的时间表达时返回 true。
- * userUtterances 传本会话全部用户消息（含当前轮）——"会话继承"由此天然成立。
- * 四条命中规则，任一命中即放行：
- *   ① 起止两端的日期字面命中（多格式）；
- *   ② 用户提过的年份覆盖起止两年（"2024 全年"/"2023 到 2025"）；
- *   ③ 相对时长（近 N 年/近半年/近 N 个月）且实际跨度不超过表达上限（宽放 ~3%）；
- *   ④ 日历词：今年/去年/前年按当前时间折算；裸"上/下半年"按两端同处一个半年。
- */
-export function hasBacktestDateProvenance(
-  startDate: string,
-  endDate: string,
-  userUtterances: string[],
-  now: Date = new Date(),
-): boolean {
-  const text = userUtterances.join('\n');
-  if (!text.trim()) return false;
-
-  if (dateLiteralHit(startDate, text) && dateLiteralHit(endDate, text)) return true;
-
-  const mentionedYears = new Set(text.match(/(?:19|20)\d{2}(?!\d)/g) ?? []);
-  if (mentionedYears.has(startDate.slice(0, 4)) && mentionedYears.has(endDate.slice(0, 4))) return true;
-
-  let spanCap = 0;
-  for (const m of text.matchAll(/(?:近|最近|过去|这)\s*([0-9]+|[一二两三四五六七八九十]+)\s*年/g)) {
-    spanCap = Math.max(spanCap, parseCount(m[1]) * 370 + 15);
-  }
-  for (const m of text.matchAll(/(?:近|最近|过去|这)\s*([0-9]+|[一二两三四五六七八九十]+)\s*个?\s*月/g)) {
-    spanCap = Math.max(spanCap, parseCount(m[1]) * 32 + 10);
-  }
-  if (/(?:近|最近|过去|这)\s*半年/.test(text)) spanCap = Math.max(spanCap, 200);
-  if (spanCap > 0 && dayNumber(endDate) - dayNumber(startDate) <= spanCap) return true;
-
-  const nowY = now.getFullYear();
-  const startY = Number(startDate.slice(0, 4));
-  const endY = Number(endDate.slice(0, 4));
-  const bothInYear = (yy: number) => startY === yy && endY === yy;
-  if (bothInYear(nowY) && /今年/.test(text)) return true;
-  if (bothInYear(nowY - 1) && /去年/.test(text)) return true;
-  if (bothInYear(nowY - 2) && /前年/.test(text)) return true;
-  if (/(?:上|下)半年/.test(text) && startY === endY) {
-    const inUpper = (mm: number) => mm >= 1 && mm <= 6;
-    if (inUpper(Number(startDate.slice(4, 6))) === inUpper(Number(endDate.slice(4, 6)))) return true;
-  }
-  return false;
 }
 
 /* ----- 多因子等权合成选股（纯函数） ----- */

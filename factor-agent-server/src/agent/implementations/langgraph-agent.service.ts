@@ -14,7 +14,6 @@ import {
   EqualWeightBacktestInput,
   EqualWeightBacktestService,
   FREQUENCY_LABELS,
-  hasBacktestDateProvenance,
   NormalizedBacktestInput,
 } from '../../core/equal-weight-backtest.service';
 import { FactorDataService } from '../../core/factor-data.service';
@@ -52,14 +51,11 @@ const TOOL_STAGE: Record<string, string> = {
      见 dataConversations：只进不出，进程重启重置）——数据会话首轮仍走 list_factor_tables
      探索，从下一轮起免探索直达字段/读数/回测；字段知识仍按需经 list_factor_fields 加载；
    - 白名单由服务端两道闸保证：list 工具校验表名，readTable 内部全量校验；
-   - 回测区间溯源（策略A）：startDate/endDate 只能来自用户话语（本轮或会话早先轮次），
-     tools 节点调回测前经 hasBacktestDateProvenance 出处校验，无出处按 BACKTEST_PROVENANCE
-     分流：enforce 拦截转澄清（默认）/ shadow 只记日志放行 / off 关闭——
-     模型凭经验补区间在此硬拦，软约束在 tool-specs 与 system prompt；
    - 回测参数确认门（human-in-the-loop，LangGraph interrupt + checkpointer）：
-     回测执行前 interrupt 暂停并把归一化参数（含默认值标注）抛给用户确认；
-     确认词 approve 直接执行，"授权调优" delegate 本轮内免确认（backtestDelegated 通道，
-     参数权限含区间溯源降级为日志），其余回复按 feedback 回灌模型（改参重发/放弃回测）；
+     回测执行前 interrupt 暂停并把归一化参数（含默认值标注）抛给用户确认，
+     区间等参数模型可按用户表达换算或合理填写，错了用户在确认面板当场改；
+     确认词 approve 直接执行，"授权调优" delegate 本轮内免确认（backtestDelegated 通道），
+     其余回复按 feedback 回灌模型（改参重发/放弃回测）；
      checkpointer=MemorySaver（进程内存，重启丢暂停态即自愈），thread 按轮分配、
      快照不跨轮累积——消息真相仍以 conversations 表为准，无双真相问题；
      interrupt 的暂停信号靠抛 GraphInterrupt 实现，guard() 必须放行不可吞；
@@ -90,9 +86,8 @@ interface ToolOutcome {
   delegated?: boolean;
 }
 
-/** 工具执行上下文：随调用传入的图状态只读片段（溯源校验语料、参数授权标记等） */
+/** 工具执行上下文：随调用传入的图状态只读片段（参数授权标记等） */
 interface ToolContext {
-  userUtterances: string[];
   delegated: boolean;
 }
 
@@ -113,10 +108,6 @@ const StrategyGraphState = Annotation.Root({
   /* 当前用户消息原文：与 conversationId 同样入口写入一次、节点只读；
      独立成通道是为了把"用户说了什么"与消息流区分开，避免工具节点去 messages 里反查 */
   userText: Annotation<string>,
-  /** 会话用户话语：历史用户消息 + 当前消息，回测区间溯源校验的出处语料。
-   *  reply()/replyStream() 发起时一次性写入，图中节点只读；
-   *  语料含本会话全部历史，"早前轮次说过也算用户说过"（会话继承）由此天然成立 */
-  userUtterances: Annotation<string[]>,
   /** 回测交易频率：记录用户期望的调仓频率（如 "日频"、"每2周"），图中节点读写；无节点写入时为 undefined。
    *  注意：LangGraph state 只在一次图执行内存活，跨轮沿用需另接会话存储（暂未接线） */
   backtestFreq: Annotation<string>,
@@ -132,8 +123,8 @@ const StrategyGraphState = Annotation.Root({
     reducer: (a, b) => ({ ...a, ...b }),
     default: () => ({}),
   }),
-  /** 参数授权标记：用户在确认门回复"授权调优"后置 true，本轮（本次图执行）内后续回测免确认、
-   *  区间溯源降为只记日志——用户已把参数决定权交给 AI。授权只活一轮，图执行结束即收回，
+  /** 参数授权标记：用户在确认门回复"授权调优"后置 true，本轮（本次图执行）内后续回测免确认——
+   *  用户已把参数决定权交给 AI。授权只活一轮，图执行结束即收回，
    *  下一轮回测重新走确认门 */
   backtestDelegated: Annotation<boolean>,
   /** 对话消息流：本图的核心通道。
@@ -174,10 +165,6 @@ export class LangGraphAgentService extends AgentService {
    *  进程重启清空，各数据会话首轮重新探索即自愈 */
   private readonly dataConversations = new Set<string>();
 
-  /** 回测区间溯源模式：enforce 无出处拦截转澄清（默认）/ shadow 只记日志放行（观测误杀率）/
-   *  off 关闭。配置项 agent.backtestProvenance（环境变量 BACKTEST_PROVENANCE） */
-  private readonly provenanceMode: 'enforce' | 'shadow' | 'off';
-
   /** 回测参数确认门：会话 id → 暂停中的 thread_id。interrupt 挂起时记录，
    *  用户答复（确认/反馈）经 Command(resume) 在同一 thread 恢复；图正常收尾时删除。
    *  进程内存：重启丢失 = 暂停中的确认作废，用户重发回测请求即自愈 */
@@ -211,7 +198,6 @@ export class LangGraphAgentService extends AgentService {
     const baseURL = config.get<string>('zhipu.baseUrl') ?? 'https://open.bigmodel.cn/api/paas/v4';
     const timeoutMs = Number(config.get<number>('chat.timeoutMs') ?? 20_000);
     const thinking = config.get<string>('zhipu.thinking') ?? 'disabled';
-    this.provenanceMode = (config.get<string>('agent.backtestProvenance') ?? 'enforce') as 'enforce' | 'shadow' | 'off';
 
     if (apiKey.trim()) {
       this.llm = new ChatOpenAI({
@@ -275,7 +261,6 @@ export class LangGraphAgentService extends AgentService {
           const outcome = runner
             ? await this.guard(() =>
                 runner(call.args, {
-                  userUtterances: state.userUtterances,
                   delegated: batchDelegated,
                 }),
               )
@@ -363,7 +348,6 @@ export class LangGraphAgentService extends AgentService {
         {
           conversationId: conversation.id,
           userText,
-          userUtterances: this.collectUserUtterances(conversation, userText),
           messages: this.prepareMessages(conversation, userText),
         },
         { configurable: { thread_id: threadId, onProgress }, recursionLimit: 15 },
@@ -543,14 +527,12 @@ export class LangGraphAgentService extends AgentService {
     };
   }
 
-  /** 等权回测执行：确认门（human-in-the-loop）——区间溯源快筛、归一化、白名单快检、
+  /** 等权回测执行：确认门（human-in-the-loop）——归一化、白名单快检、
    *  缺 frequency 澄清都通过后，interrupt 暂停把参数抛给用户确认，三决策：
    *    approve → 跑引擎；delegate（授权调优）→ 本轮先跑本次、后续回测免确认；
    *    feedback（改参/未确认）→ 不跑引擎，回执交模型自行消化 */
   private async execRunBacktest(args: EqualWeightBacktestInput, ctx: ToolContext): Promise<ToolOutcome> {
     let delegated = ctx.delegated === true;
-    // 参数授权模式下溯源降为只记日志（用户已把参数决定权交给 AI，换区间也是授权内的搜索维度）
-    this.guardBacktestDateProvenance(args, ctx.userUtterances, delegated);
     const p = assertBacktestInput(args);
     // 白名单快检在 interrupt 之前：字段不存在的提案先打回模型自纠，不让用户确认一个注定失败的提案
     this.backtest.preflight(p.factors);
@@ -607,41 +589,6 @@ export class LangGraphAgentService extends AgentService {
     };
   }
 
-  /** 回测区间溯源（策略A：用户必填）：off 跳过；授权模式（delegated）降为只记日志；
-   *  shadow 只记日志放行（观测误杀率用）；enforce 无出处抛澄清信号引导模型向用户询问——
-   *  软约束失效时的服务端硬保证。日期格式非法不在此管（留给 assertBacktestInput 的格式校验给模型自纠） */
-  private guardBacktestDateProvenance(args: EqualWeightBacktestInput, utterances: string[], delegated = false): void {
-    if (this.provenanceMode === 'off') return;
-    const start = String(args.startDate ?? '').trim();
-    const end = String(args.endDate ?? '').trim();
-    if (delegated) {
-      if (/^\d{8}$/.test(start) && /^\d{8}$/.test(end) && !hasBacktestDateProvenance(start, end, utterances)) {
-        this.logger.warn(`[溯源-授权] 免确认回测区间无出处（放行）: ${start}~${end}`);
-      }
-      return;
-    }
-    const askGuide = (received?: string) => ({
-      需要澄清: '回测区间 startDate/endDate（必填，需用户在对话中明确指定）',
-      ...(received ? { 当前收到: received } : {}),
-      行动: '不要把本回执当错误转述给用户；请向用户询问期望的回测起止区间，等用户答复后再调用本工具，禁止自行假设区间',
-    });
-    if (!start || !end) {
-      if (this.provenanceMode === 'shadow') {
-        this.logger.warn('[溯源-shadow] 回测调用未传区间，放行交给 assertBacktestInput 格式校验');
-        return;
-      }
-      throw new ClarificationSignal(askGuide());
-    }
-    if (!/^\d{8}$/.test(start) || !/^\d{8}$/.test(end)) return;
-    if (hasBacktestDateProvenance(start, end, utterances)) return;
-    if (this.provenanceMode === 'shadow') {
-      this.logger.warn(`[溯源-shadow] 回测区间无出处放行: ${start}~${end}，用户语料: ${toLogPreview(utterances)}`);
-      return;
-    }
-    this.logger.warn(`[溯源-enforce] 拦截凭经验补全的回测区间: ${start}~${end}`);
-    throw new ClarificationSignal(askGuide(`${start}~${end}（该区间未在用户话语中出现过）`));
-  }
-
   /** 工具回执的日志形态：read_factor_data 不落原始数据，只报结果形状；其余工具原样截断预览 */
   private toolResultPreview(toolName: string, result: unknown): string {
     if (toolName !== 'read_factor_data') return toLogPreview(result);
@@ -665,15 +612,6 @@ export class LangGraphAgentService extends AgentService {
     if (name === 'list_factor_tables' && Array.isArray(r.tables)) return `${r.tables.length} 张表`;
     if (name === 'list_factor_fields' && Array.isArray(r.tables)) return `${r.tables.length} 张表的字段明细`;
     return '完成';
-  }
-
-  /** 会话用户话语 = 历史用户消息 + 当前消息：回测区间溯源校验的出处语料。
-   *  截最近 100 条防超长会话，空 bubble 剔除 */
-  private collectUserUtterances(conversation: Conversation, userText: string): string[] {
-    const history = conversation.messages
-      .filter((m: ChatMessage) => m.role !== 'agent')
-      .map((m: ChatMessage) => m.bubble);
-    return [...history.slice(-100), userText].filter((t) => t && t.trim());
   }
 
   /* ----- 消息构造 ----- */
@@ -710,8 +648,9 @@ export class LangGraphAgentService extends AgentService {
       '回复规则：',
       '- 最终回复不超过 90 字，只能引用工具返回的数据，严禁编造数字或个股，不输出 JSON，结尾用短句提醒不构成投资建议；',
       '- 工具回执含"需要澄清"时，按其中"行动"指引向用户提问，不要当作错误转述；',
-      '- run_equal_weight_backtest 的回测区间（startDate/endDate）只能来自用户说过的' +
-        '时间（本轮或本会话早前轮次均可），用户没说过就先询问，禁止凭经验填日期；' +
+      '- run_equal_weight_backtest 的回测区间（startDate/endDate）为必填：用户说过的区间照传，' +
+        '相对时间（如"最近两年"）按系统提示的今天日期换算，用户完全没提时填合理区间（如近三年）即可，不要反问——' +
+        '参数执行前系统会请用户确认，用户可当场修改；' +
         'topK 与业绩基准用户没说时可用引擎默认值，但最终文案要注明"默认"；',
       '- run_equal_weight_backtest 执行前系统会请用户确认参数：收到"已取消"回执时，' +
         '结合用户反馈调整参数后重新发起（会再次请用户确认），或放弃回测直接回应用户，' +
