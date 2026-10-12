@@ -155,10 +155,16 @@ function buildTestGraph() {
   return { app, agent, backtest };
 }
 
-/** 图入口：最小状态（真流程由 prepareMessages 注入系统提示，与本测试无关） */
-function start(app: ReturnType<typeof buildTestGraph>['app'], threadId: string) {
+/** 图入口：模拟 runGraph 的入口协议——userText 精确为"授权调优"时以已授权状态启动
+ *  （真实逻辑在 service.runGraph，helper 按同一协议注入初始状态） */
+function start(app: ReturnType<typeof buildTestGraph>['app'], threadId: string, userText = '回测') {
   return app.invoke(
-    { conversationId: 'spec-conv', userText: '回测', messages: [new HumanMessage('回测')] },
+    {
+      conversationId: 'spec-conv',
+      userText,
+      ...(userText.trim() === '授权调优' ? { backtestDelegated: true } : {}),
+      messages: [new HumanMessage(userText)],
+    },
     { configurable: { thread_id: threadId }, recursionLimit: 25 },
   );
 }
@@ -269,6 +275,24 @@ describe('确认门真图（confirm 节点 interrupt/resume）', () => {
     );
     expect(cancelled).toBeDefined();
     expect((cancelled as ToolMessage).content).toContain('改成周频');
+  });
+
+  it('入口消息"授权调优"：以已授权状态启动图执行，多组回测直接执行不弹窗', async () => {
+    const { app, agent, backtest } = buildTestGraph();
+    agent.invoke
+      .mockResolvedValueOnce(withCalls('响应授权', [
+        { id: 'call_1', args: LEGAL_ARGS },
+        { id: 'call_2', args: { ...LEGAL_ARGS, rebalanceIntervalDays: 10 } },
+      ]))
+      .mockResolvedValueOnce(finalText('择优完成'));
+
+    const done = await start(app, 't-entry-delegate', '授权调优');
+    // 不经 confirm 挂起，直达 tools 执行全部组
+    expect((done as { __interrupt__?: unknown[] }).__interrupt__).toBeUndefined();
+    expect(backtest.runStrategyBacktest).toHaveBeenCalledTimes(2);
+    // 授权只活本次图执行：回执带授权模式标注
+    const toolMsgs = (done.messages as BaseMessage[]).filter((m) => m instanceof ToolMessage);
+    expect(toolMsgs.some((m) => String((m as ToolMessage).content).includes('授权模式'))).toBe(true);
   });
 
   it('缺调仓间隔：澄清信号回执直通模型，不弹确认窗', async () => {

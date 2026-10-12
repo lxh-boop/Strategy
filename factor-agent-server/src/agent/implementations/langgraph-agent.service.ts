@@ -369,10 +369,14 @@ export class LangGraphAgentService extends AgentService {
       this.logger.log(`图执行开始 会话=${conversation.id} thread=${threadId} 提问: ${toLogPreview(userText)}`);
       appendConversationLog(conversation.id, `提问: ${toLogPreview(userText)}`);
       onProgress?.({ type: 'start' });
+      // 入口即授权：用户消息精确为"授权调优"（前端授权按钮回发）→ 本次图执行以已授权状态启动，
+      // 模型响应授权而发起的多组回测全部免确认。与确认门 resume 的 delegate 同语义：授权只活本次图执行。
+      const entryDelegated = userText.trim() === '授权调优';
       const state = await this.app.invoke(
         {
           conversationId: conversation.id,
           userText,
+          ...(entryDelegated ? { backtestDelegated: true } : {}),
           messages: this.prepareMessages(conversation, userText),
         },
         { configurable: { thread_id: threadId, onProgress }, recursionLimit: 15 },
