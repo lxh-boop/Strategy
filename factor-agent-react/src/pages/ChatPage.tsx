@@ -298,21 +298,33 @@ export function ChatPage(props: {
   const [optimizeText, setOptimizeText] = useState("");
   /* 确认门：最后一条是智能体的参数提案且未关闭 → 弹窗（确认执行/授权调优/取消） */
   const lastMessage = current && current.messages.length ? current.messages[current.messages.length - 1] : null;
+  /* 弹窗已打扰记忆：按"会话+末条消息"记指纹，同一条消息只弹一次——
+     上面的布尔标记会被"新消息/切会话"重置，导致挂在会话末尾的旧建议回复反复弹窗
+     （2026-10-13：RSI 回测回复结尾带"授权调优"邀请，一整天每次进会话都跳）。
+     指纹不随重置消失：关过的消息永不再弹，新回复指纹变化才重新触发 */
+  const lastKey = current && lastMessage ? `${current.id}:${current.messages.length}:${lastMessage.bubble.slice(0, 80)}` : "";
+  const dismissedRef = useRef<Set<string>>(new Set());
   const gateParams =
     !typingHere && lastMessage && lastMessage.role === "agent" ? parseConfirmGate(lastMessage.bubble) : null;
-  const gateVisible = !!gateParams && !gateClosed && !loading;
-  const closeGate = () => setGateClosed(true);
-  const gateAct = (text: string) => {
+  const gateVisible = !!gateParams && !gateClosed && !dismissedRef.current.has(`gate:${lastKey}`) && !loading;
+  const closeGate = () => {
     setGateClosed(true);
+    dismissedRef.current.add(`gate:${lastKey}`);
+  };
+  const gateAct = (text: string) => {
+    closeGate();
     onSubmit(text);
   };
   /* 优化建议弹窗：模型刚给出多方案建议并邀请授权调优（文案由回复规则锚定，规则匹配无歧义） */
   const optimizeInvite =
     !gateParams && !typingHere && lastMessage && lastMessage.role === "agent" && parseOptimizeInvite(lastMessage.bubble);
-  const optimizeVisible = optimizeInvite && !optimizeClosed && !loading;
-  const closeOptimize = () => setOptimizeClosed(true);
-  const optimizeAct = (text: string) => {
+  const optimizeVisible = optimizeInvite && !optimizeClosed && !dismissedRef.current.has(`opt:${lastKey}`) && !loading;
+  const closeOptimize = () => {
     setOptimizeClosed(true);
+    dismissedRef.current.add(`opt:${lastKey}`);
+  };
+  const optimizeAct = (text: string) => {
+    closeOptimize();
     onSubmit(text);
   };
   useEffect(() => {
