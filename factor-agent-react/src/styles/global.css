@@ -366,7 +366,10 @@ svg { width: 18px; height: 18px; flex-shrink: 0; }
 .plain-select {
   width: 100%; border: none; background: transparent;
   font-size: 14px; outline: none; font-weight: 600;
+  color: var(--text);
 }
+/* 控件被显式接管样式后，原生下拉弹层不再跟随 color-scheme，需逐项给暗色防白字白底 */
+.plain-select option { background: var(--card); color: var(--text); }
 
 /* 回测曲线图 */
 .bt-chart { margin-bottom: 16px; }
