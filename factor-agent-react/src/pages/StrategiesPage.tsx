@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { FactorWeight, Strategy } from "../types";
+import type { Strategy } from "../types";
 import { useConfig } from "../config";
 import { fmtPct, upDownCls } from "../utils/format";
 import { PerfChart, Sparkline } from "../components/charts";
@@ -226,7 +226,25 @@ function BacktestReportModal({ s, onClose }: { s: Strategy; onClose: () => void 
 }
 
 /* ----- 新建策略弹窗：选好参数 → 拼成需求话术 → 跳对话预填，点发送即开始回测。
-     不再直接建草稿（策略收口到对话真引擎），本弹窗只是"结构化输入的帮手" ----- */
+     不再直接建草稿（策略收口到对话真引擎），本弹窗只是"结构化输入的帮手"。
+     参数全部对应真引擎入参（StrategyRunConfig）：区间/资金/调仓间隔/持仓数/基准；
+     股票池如实固定"全市场"——字典无指数成分表，指数池是演示假象不提供 ----- */
+
+const BENCH_LABELS: Record<string, string> = {
+  hs300: "沪深300指数",
+  csi500: "中证500指数",
+  sse: "上证指数",
+};
+
+const isoToday = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+};
+const isoYearsAgo = (n: number) => {
+  const d = new Date();
+  d.setFullYear(d.getFullYear() - n);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+};
 
 function NewStrategyModal({ onClose, onConfirm, notify }: {
   onClose: () => void;
@@ -235,8 +253,13 @@ function NewStrategyModal({ onClose, onConfirm, notify }: {
 }) {
   const { factors: factorLib } = useConfig();
   const [name, setName] = useState("");
-  const [universe, setUniverse] = useState("沪深300");
-  const [rebalance, setRebalance] = useState("每月调仓");
+  const [range, setRange] = useState<"1y" | "2y" | "3y" | "custom">("1y");
+  const [customStart, setCustomStart] = useState(isoYearsAgo(1));
+  const [customEnd, setCustomEnd] = useState(isoToday());
+  const [capital, setCapital] = useState(1000000);
+  const [intervalDays, setIntervalDays] = useState(21);
+  const [maxPositions, setMaxPositions] = useState(10);
+  const [benchmark, setBenchmark] = useState("hs300");
   const [checked, setChecked] = useState<string[]>([]);
 
   const toggle = (id: string) =>
@@ -245,13 +268,19 @@ function NewStrategyModal({ onClose, onConfirm, notify }: {
   const confirm = () => {
     if (!name.trim()) { notify("请填写策略名称"); return; }
     if (!checked.length) { notify("请至少选择一个因子"); return; }
-    const factors: FactorWeight[] = factorLib.filter(f => checked.includes(f.id));
-    const factorsText = factors.map(f => f.name.replace("因子", "")).join("、");
-    /* 需求话术：结构化参数转自然语言，智能体按系统流程澄清/确认后走真引擎回测 */
+    const startIso = range === "custom" ? customStart : isoYearsAgo(range === "1y" ? 1 : range === "2y" ? 2 : 3);
+    const endIso = range === "custom" ? customEnd : isoToday();
+    if (range === "custom" && (!startIso || !endIso)) { notify("请选择回测区间起止日期"); return; }
+    if (range === "custom" && startIso >= endIso) { notify("回测区间起始日需早于结束日"); return; }
+    const factorsText = factorLib.filter(f => checked.includes(f.id))
+      .map(f => f.name.replace("因子", "")).join("、");
+    /* 需求话术：结构化参数转自然语言，智能体按系统流程确认后走真引擎回测
+      （区间如超出因子表数据覆盖，确认门快检会打回并由模型改为可用区间，用户无感） */
     onConfirm(
-      `帮我构建一个多因子策略「${name.trim()}」：股票池选${universe}，${rebalance}，` +
-      `重点考虑${factorsText}。请按这些要求完成回测并给我回测报告，` +
-      `回测区间、持仓数量等参数由你推荐。`,
+      `帮我构建一个多因子策略「${name.trim()}」：全市场选股，重点考虑${factorsText}。` +
+      `回测区间 ${startIso.replace(/-/g, "")}~${endIso.replace(/-/g, "")}（YYYYMMDD），` +
+      `初始资金 ${capital / 10000} 万元，每 ${intervalDays} 个交易日调仓一次，持仓 ${maxPositions} 只，` +
+      `业绩基准${BENCH_LABELS[benchmark]}。请按这些要求完成回测并给我回测报告。`,
     );
     onClose();
   };
@@ -269,21 +298,74 @@ function NewStrategyModal({ onClose, onConfirm, notify }: {
             value={name} onChange={e => setName(e.target.value)} />
         </div>
         <div className="detail-section">
-          <div className="detail-section-title">股票池与调仓</div>
+          <div className="detail-section-title">回测区间</div>
+          <div className="detail-meta" style={{ gridTemplateColumns: range === "custom" ? "1fr 1fr 1fr" : "1fr" }}>
+            <div className="meta-item" style={{ padding: "8px 14px" }}>
+              <div className="meta-label">区间</div>
+              <select className="plain-select" value={range} aria-label="选择回测区间" onChange={e => setRange(e.target.value as typeof range)}>
+                <option value="1y">近一年</option>
+                <option value="2y">近两年</option>
+                <option value="3y">近三年</option>
+                <option value="custom">自定义</option>
+              </select>
+            </div>
+            {range === "custom" && (
+              <>
+                <div className="meta-item" style={{ padding: "8px 14px" }}>
+                  <div className="meta-label">开始日期</div>
+                  <input type="date" className="plain-select" aria-label="回测开始日期"
+                    value={customStart} onChange={e => setCustomStart(e.target.value)} />
+                </div>
+                <div className="meta-item" style={{ padding: "8px 14px" }}>
+                  <div className="meta-label">结束日期</div>
+                  <input type="date" className="plain-select" aria-label="回测结束日期"
+                    value={customEnd} onChange={e => setCustomEnd(e.target.value)} />
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+        <div className="detail-section">
+          <div className="detail-section-title">资金与调仓</div>
           <div className="detail-meta" style={{ gridTemplateColumns: "1fr 1fr" }}>
             <div className="meta-item" style={{ padding: "8px 14px" }}>
-              <div className="meta-label">股票池</div>
-              <select className="plain-select" value={universe} aria-label="选择股票池" onChange={e => setUniverse(e.target.value)}>
-                <option>沪深300</option><option>中证500</option><option>中证800</option>
-                <option>中证1000</option><option>全市场（剔除ST）</option>
+              <div className="meta-label">初始资金</div>
+              <select className="plain-select" value={capital} aria-label="选择初始资金" onChange={e => setCapital(+e.target.value)}>
+                <option value={100000}>10 万元</option>
+                <option value={500000}>50 万元</option>
+                <option value={1000000}>100 万元</option>
+                <option value={5000000}>500 万元</option>
               </select>
             </div>
             <div className="meta-item" style={{ padding: "8px 14px" }}>
               <div className="meta-label">调仓频率</div>
-              <select className="plain-select" value={rebalance} aria-label="选择调仓频率" onChange={e => setRebalance(e.target.value)}>
-                <option>每周调仓</option><option>每月调仓</option><option>每季度调仓</option>
+              <select className="plain-select" value={intervalDays} aria-label="选择调仓频率" onChange={e => setIntervalDays(+e.target.value)}>
+                <option value={5}>每周（5 个交易日）</option>
+                <option value={10}>每两周（10 个交易日）</option>
+                <option value={21}>每月（21 个交易日）</option>
+                <option value={63}>每季度（63 个交易日）</option>
               </select>
             </div>
+            <div className="meta-item" style={{ padding: "8px 14px" }}>
+              <div className="meta-label">持仓数量</div>
+              <select className="plain-select" value={maxPositions} aria-label="选择持仓数量" onChange={e => setMaxPositions(+e.target.value)}>
+                <option value={5}>5 只</option>
+                <option value={10}>10 只</option>
+                <option value={20}>20 只</option>
+                <option value={30}>30 只</option>
+              </select>
+            </div>
+            <div className="meta-item" style={{ padding: "8px 14px" }}>
+              <div className="meta-label">业绩基准</div>
+              <select className="plain-select" value={benchmark} aria-label="选择业绩基准" onChange={e => setBenchmark(e.target.value)}>
+                <option value="hs300">沪深300指数</option>
+                <option value="csi500">中证500指数</option>
+                <option value="sse">上证指数</option>
+              </select>
+            </div>
+          </div>
+          <div className="agent-card-text" style={{ margin: "8px 0 0" }}>
+            股票池：全市场（因子表覆盖）。指数成分股（沪深300 等）数据尚未接入，暂只支持全市场回测。
           </div>
         </div>
         <div className="detail-section" style={{ marginBottom: 0 }}>
@@ -300,7 +382,7 @@ function NewStrategyModal({ onClose, onConfirm, notify }: {
             ))}
           </div>
           <div className="agent-card-text" style={{ margin: "12px 0 0" }}>
-            确定后会跳转到对话页并自动填好以上需求，点击发送即可开始回测。
+            确定后会跳转到对话页并自动填好以上需求，点击发送即可开始回测；区间若超出数据范围，智能体会自动改用可用区间。
           </div>
         </div>
       </div>
