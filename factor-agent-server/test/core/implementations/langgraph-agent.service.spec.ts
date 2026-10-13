@@ -143,6 +143,7 @@ const LEGAL_ARGS = { startDate: '20240101', endDate: '20241231', rebalanceInterv
 function buildTestGraph() {
   const backtest = {
     preflight: jest.fn(),
+    checkRange: jest.fn().mockResolvedValue({ dates: [20240101, 20241231], min: 20200101, max: 20261231 }),
     runStrategyBacktest: jest.fn().mockResolvedValue(FAKE_OUTPUT),
   };
   const service = new LangGraphAgentService(

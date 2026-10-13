@@ -31,7 +31,7 @@ import {
   toDashDate,
   toStrategyMetricItems,
 } from '../strategy-backtest.service';
-import { FactorDataService, QuoteRow } from '../factor-data.service';
+import { FactorDataService, QuoteRow, TradeDateCoverage } from '../factor-data.service';
 import { AgentProgressSink } from '../../types';
 import { loadTableFields, listKnownTables } from '../factor-schema';
 
@@ -104,6 +104,25 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
     this.assertWhitelist(refs);
   }
 
+  /** 区间快检 + 回测日历：日历源 = 首个被引用因子表（缺省用默认动量表）。
+   *  确认门（interrupt 前）与引擎主流程共用：判定与报错文案同源——
+   *  模型在用户确认前就拿到"可用区间 xxx~yyy"自纠参数，用户不会白确认一轮 */
+  async checkRange(input: StrategyBacktestInput): Promise<TradeDateCoverage> {
+    const p = assertStrategyInput(input);
+    const refs = collectFactorRefs(p);
+    this.assertWhitelist(refs);
+    const calendarTable = refs[0]?.table ?? DEFAULT_MOMENTUM_FACTOR.table;
+    const coverage = await this.factorData.readTradeDates(calendarTable, p.startDate, p.endDate);
+    if (Number(p.startDate) < coverage.min || Number(p.endDate) > coverage.max) {
+      throw new ApiException(
+        'INVALID_ARGUMENT',
+        400,
+        `回测区间超出数据范围：${calendarTable} 可用区间 ${coverage.min}~${coverage.max}，请调整 startDate/endDate`,
+      );
+    }
+    return coverage;
+  }
+
   async runStrategyBacktest(input: StrategyBacktestInput, onProgress?: AgentProgressSink): Promise<StrategyBacktestOutput> {
     const p = assertStrategyInput(input);
     const refs = collectFactorRefs(p);
@@ -114,16 +133,8 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
       ? Math.min(...p.sellRules.filter((r) => r.kind === 'rank_out').map((r) => r.bottomN))
       : null;
 
-    // ① 回测日历：区间内交易日 + 全表可用范围校验（日历源 = 首个被引用因子表，缺省用默认动量表）
-    const calendarTable = refs[0]?.table ?? DEFAULT_MOMENTUM_FACTOR.table;
-    const coverage = await this.factorData.readTradeDates(calendarTable, p.startDate, p.endDate);
-    if (Number(p.startDate) < coverage.min || Number(p.endDate) > coverage.max) {
-      throw new ApiException(
-        'INVALID_ARGUMENT',
-        400,
-        `回测区间超出数据范围：${calendarTable} 可用区间 ${coverage.min}~${coverage.max}，请调整 startDate/endDate`,
-      );
-    }
+    // ① 回测日历：区间快检（越界即抛，与确认门同文案）+ 区间内交易日
+    const coverage = await this.checkRange(input);
     const tradeDates = coverage.dates;
     if (tradeDates.length < 2) {
       throw new ApiException('INVALID_ARGUMENT', 400, `区间 ${p.startDate}~${p.endDate} 内交易日不足（${tradeDates.length} 天），无法回测`);

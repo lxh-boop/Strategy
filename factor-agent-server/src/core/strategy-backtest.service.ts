@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { ApiException } from '../common/api.exception';
 import { AgentProgressSink, BacktestCard, RawMetrics } from '../types';
+import { TradeDateCoverage } from './factor-data.service';
 import { maxDrawdownPct, toMetricItems } from './backtest.service';
 
 /* ==========================================================
@@ -746,6 +747,12 @@ export abstract class StrategyBacktestService {
    *  让"字段不存在"这类注定失败的提案在用户确认前就被打回给模型自纠，
    *  避免用户确认一轮之后引擎才报错、又得重新确认一轮 */
   abstract preflight(refs: FactorRef[]): void;
+
+  /** 区间快检 + 回测日历（实现层）：回测区间越界即抛 INVALID_ARGUMENT（文案含可用区间）。
+   *  确认门在 interrupt 前调用它（忽略返回值）——区间超界的提案同样先打回模型自纠，
+   *  否则用户确认后引擎才报错、模型改参重发又要再确认一轮；
+   *  引擎主流程调用它拿交易日历。两次调用命中取数缓存，确认门预热后引擎同区间读取零打库 */
+  abstract checkRange(input: StrategyBacktestInput): Promise<TradeDateCoverage>;
 }
 
 /** 指标数组组装（供实现层拼卡片 metrics：四项绩效 + 年化换手） */

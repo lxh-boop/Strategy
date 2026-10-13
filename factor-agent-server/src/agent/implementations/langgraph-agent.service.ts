@@ -598,8 +598,10 @@ export class LangGraphAgentService extends AgentService {
       this.logger.log(`confirm节点 回测确认 ${call.id}: ${toLogPreview(call.args)}`);
       try {
         const p = assertStrategyInput(call.args as StrategyBacktestInput);
-        // 白名单快检在 interrupt 之前：字段不存在的提案先打回模型自纠，不让用户确认一个注定失败的提案
+        // 白名单 + 区间快检都在 interrupt 之前：字段不存在/区间超界的提案先打回模型自纠，
+        // 不让用户确认一个注定失败的提案（区间报错带可用范围，模型改参重发只需用户确认一次）
         this.backtest.preflight(collectFactorRefs(p));
+        await this.backtest.checkRange(p);
         const sort = effectiveSortFactors(p.sortFactors);
         const decision = interrupt({
           type: 'confirm_backtest',
