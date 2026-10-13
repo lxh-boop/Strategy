@@ -634,9 +634,12 @@ export function annualizeTurnover(turnoverByDay: number[], equities: number[]): 
   const n = equities.length;
   if (!n || !turnoverByDay.length) return 0;
   const totalTurnover = turnoverByDay.reduce((a, t) => a + t, 0) / 2; // 买+卖双边合计 → 单边
-  const totalEquity = equities.reduce((a, v) => a + v, 0);
-  if (totalEquity <= 0) return 0;
-  return round2((totalTurnover / totalEquity) * (252 / n) * 100);
+  // 分母必须是平均权益：用 Σ(每日权益) 当分母，结果会多除 n 倍天数
+  // （659 天回测把年化 ~1500% 显示成 +4%，2026-10-13 实测抓到）
+  const meanEquity = equities.reduce((a, v) => a + v, 0) / n;
+  if (meanEquity <= 0) return 0;
+  // 单边年化换手% = 累计单边成交 / 平均权益 / 年数（n/252）
+  return round2((totalTurnover / meanEquity) * (252 / n) * 100);
 }
 
 /** 月度收益（按自然月复合）：dates/equities 等长对齐，月末相对上月末（首月基期为初始权益） */
