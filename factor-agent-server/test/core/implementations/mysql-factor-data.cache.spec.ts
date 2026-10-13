@@ -51,4 +51,19 @@ describe('MysqlFactorDataService 取数缓存', () => {
     expect(getExecute()).toHaveBeenCalledTimes(1);
     expect(b).toEqual(a);
   });
+
+  it('超过 CACHE_MAX 条后 LRU 淘汰：最旧的重新打库，最新的仍命中（回归：上限须容下大回测的全部条目）', async () => {
+    const svc = makeService();
+    // 依次插入 201 个不同 key（> CACHE_MAX=200）：第 201 个插入时挤掉第 1 个
+    for (let i = 0; i < 201; i++) {
+      await svc.readTable({ ...baseQuery, date: String(20200101 + i) });
+    }
+    expect(getExecute()).toHaveBeenCalledTimes(201);
+    // 最旧的（第 1 个）已被淘汰 → 重新打库
+    await svc.readTable({ ...baseQuery, date: '20200101' });
+    expect(getExecute()).toHaveBeenCalledTimes(202);
+    // 最新的（第 201 个）仍在缓存 → 不打库
+    await svc.readTable({ ...baseQuery, date: '20200200' });
+    expect(getExecute()).toHaveBeenCalledTimes(202);
+  });
 });
