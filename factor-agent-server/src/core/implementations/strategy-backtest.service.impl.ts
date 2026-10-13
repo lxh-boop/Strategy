@@ -31,7 +31,8 @@ import {
   toDashDate,
   toStrategyMetricItems,
 } from '../strategy-backtest.service';
-import { FactorDataService } from '../factor-data.service';
+import { FactorDataService, QuoteRow } from '../factor-data.service';
+import { AgentProgressSink } from '../../types';
 import { loadTableFields, listKnownTables } from '../factor-schema';
 
 /* ==========================================================
@@ -55,6 +56,13 @@ type DayIdx = number;
 
 /** 指数日行情表（SQL/mkt_idxd.md），基准曲线数据源 */
 const INDEX_TABLE = 'mkt_idxd';
+
+/** 信号预计算的进度分批（调仓日数/批）：全市场截面一次约 0.4s，25 日约 10s，
+ *  稳在长回测两批事件之间 < 90s 前端空闲看门狗 */
+const SIGNAL_BATCH = 25;
+
+/** 行情拉取的进度分批（只/批）：与取数服务内部分片同值——SQL 不变、缓存键不变，只逐批上报进度 */
+const QUOTE_BATCH = 400;
 
 interface Quote {
   open: number | null;
@@ -96,7 +104,7 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
     this.assertWhitelist(refs);
   }
 
-  async runStrategyBacktest(input: StrategyBacktestInput): Promise<StrategyBacktestOutput> {
+  async runStrategyBacktest(input: StrategyBacktestInput, onProgress?: AgentProgressSink): Promise<StrategyBacktestOutput> {
     const p = assertStrategyInput(input);
     const refs = collectFactorRefs(p);
     this.assertWhitelist(refs);
@@ -132,26 +140,44 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
     }
 
     // ② 第一遍（信号）：逐调仓日取因子截面 → 过滤 → 排序合成 → 有序候选；累计涉及股票
+    // 按批发进度事件：批间静默约 10s，长区间回测也不会触发前端 90s 空闲看门狗误断
     const signals = new Map<DayIdx, RebalanceSignal>();
     const involved = new Set<string>(p.securityIds ?? []);
-    for (const idx of rebalanceIdx) {
-      const date = String(tradeDates[idx]);
-      const sections = await Promise.all(
-        refs.map((ref) => this.factorData.readFactorSection(ref.table, ref.field, date, p.securityIds)),
-      );
-      const byRef = new Map<string, Map<string, number>>();
-      refs.forEach((ref, i) => {
-        byRef.set(`${ref.table}.${ref.field}`, new Map(sections[i].map((r) => [r.securityId, r.value])));
+    const totalBatches = Math.ceil(rebalanceIdx.length / SIGNAL_BATCH);
+    for (let b = 0; b < rebalanceIdx.length; b += SIGNAL_BATCH) {
+      const batch = rebalanceIdx.slice(b, b + SIGNAL_BATCH);
+      onProgress?.({
+        type: 'tool_call',
+        name: 'run_strategy_backtest',
+        stage: '预计算回测信号',
+        args: `第 ${Math.floor(b / SIGNAL_BATCH) + 1}/${totalBatches} 批 · 调仓日 ${String(tradeDates[batch[0]])} 起 ${batch.length} 个`,
       });
-      // 过滤池：全市场时取全部截面键的并集（缺值股票由过滤/合成逻辑剔除）
-      const rawPool = p.securityIds ?? [...new Set(sections.flat().map((r) => r.securityId))];
-      const sectionMaps = refs.map((ref) => byRef.get(`${ref.table}.${ref.field}`)!);
-      const pool = applyEntryFilters(rawPool, p.entryFilters, sectionMaps);
-      const ranked = rankUniverse(sortFactors.factors, sectionMaps, pool);
-      const candidates = ranked.slice(0, p.maxPositions).map((r) => r.code);
-      const compositeRank = new Map(ranked.map((r, i) => [r.code, i + 1]));
-      signals.set(idx, { candidates, compositeRank });
-      for (const code of candidates) involved.add(code);
+      for (const idx of batch) {
+        const date = String(tradeDates[idx]);
+        const sections = await Promise.all(
+          refs.map((ref) => this.factorData.readFactorSection(ref.table, ref.field, date, p.securityIds)),
+        );
+        const byRef = new Map<string, Map<string, number>>();
+        refs.forEach((ref, i) => {
+          byRef.set(`${ref.table}.${ref.field}`, new Map(sections[i].map((r) => [r.securityId, r.value])));
+        });
+        // 过滤池：全市场时取全部截面键的并集（缺值股票由过滤/合成逻辑剔除）
+        const rawPool = p.securityIds ?? [...new Set(sections.flat().map((r) => r.securityId))];
+        const sectionMaps = refs.map((ref) => byRef.get(`${ref.table}.${ref.field}`)!);
+        const pool = applyEntryFilters(rawPool, p.entryFilters, sectionMaps);
+        const ranked = rankUniverse(sortFactors.factors, sectionMaps, pool);
+        const candidates = ranked.slice(0, p.maxPositions).map((r) => r.code);
+        const compositeRank = new Map(ranked.map((r, i) => [r.code, i + 1]));
+        signals.set(idx, { candidates, compositeRank });
+        for (const code of candidates) involved.add(code);
+      }
+      onProgress?.({
+        type: 'tool_result',
+        name: 'run_strategy_backtest',
+        stage: '预计算回测信号',
+        ok: true,
+        detail: `已预计算 ${Math.min(b + SIGNAL_BATCH, rebalanceIdx.length)}/${rebalanceIdx.length} 个调仓日`,
+      });
     }
     const rebalanceCount = [...signals.values()].filter((s) => s.candidates.length > 0).length;
     if (rebalanceCount === 0) {
@@ -173,7 +199,30 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
     // 行情装载即做脏数据防御：close/preClose 非正数的行丢弃（等同停牌），
     // open 非正数置 null（该日不可开盘成交）——杜绝除零/NaN 顺着资金账户扩散
     const quotes = new Map<string, Map<number, Quote>>();
-    const quoteRows = await this.factorData.readQuoteSeries([...involved], p.startDate, p.endDate);
+    // 行情按批拉取（每批 QUOTE_BATCH 只）：服务内部本就按同值分片执行，但一次全量调用
+    // 会在整个装载期间静默（700+ 只 ≈ 110s > 前端 90s 空闲看门狗）——引擎自己分批才能逐批发事件
+    const involvedCodes = [...involved];
+    let quoteRows: QuoteRow[] = [];
+    for (let i = 0; i < involvedCodes.length; i += QUOTE_BATCH) {
+      const chunk = involvedCodes.slice(i, i + QUOTE_BATCH);
+      const part = Math.floor(i / QUOTE_BATCH) + 1;
+      const parts = Math.ceil(involvedCodes.length / QUOTE_BATCH);
+      onProgress?.({
+        type: 'tool_call',
+        name: 'run_strategy_backtest',
+        stage: '拉取行情日线',
+        args: `第 ${part}/${parts} 批 · ${chunk.length} 只`,
+      });
+      const rows = await this.factorData.readQuoteSeries(chunk, p.startDate, p.endDate);
+      quoteRows = quoteRows.concat(rows);
+      onProgress?.({
+        type: 'tool_result',
+        name: 'run_strategy_backtest',
+        stage: '拉取行情日线',
+        ok: true,
+        detail: `已拉取 ${part}/${parts} 批（累计 ${quoteRows.length} 行）`,
+      });
+    }
     for (const row of quoteRows) {
       if (!(row.close > 0) || !(row.preClose > 0)) continue;
       const code = `${row.ticker}.${row.exchange}`;

@@ -90,6 +90,8 @@ interface ToolOutcome {
 /** 工具执行上下文：随调用传入的图状态只读片段（参数授权标记等） */
 interface ToolContext {
   delegated: boolean;
+  /** 过程事件出口：回测工具透传给引擎，长阶段（信号预计算/行情拉取）内部发进度 */
+  onProgress?: AgentProgressSink;
 }
 
 /* ----- LangGraph 状态定义 -----
@@ -285,6 +287,8 @@ export class LangGraphAgentService extends AgentService {
                 runner(call.args, {
                   // 回测调用走到 tools 必已获授权（confirm 节点放行/委托）——标记仅供执行器记录口径
                   delegated: state.backtestDelegated === true || state.confirmedCalls.includes(call.id ?? ''),
+                  // 过程事件出口：回测工具透传给引擎，长阶段内部发批次进度（防 90s 空闲看门狗误断）
+                  onProgress: progressSink(config),
                 }),
               )
             : { result: { error: `未知工具: ${call.name}` } };
@@ -661,7 +665,7 @@ export class LangGraphAgentService extends AgentService {
 
     let output;
     try {
-      output = await this.backtest.runStrategyBacktest(p);
+      output = await this.backtest.runStrategyBacktest(p, ctx.onProgress);
     } catch (error) {
       // 已授权回测的引擎失败：错误交模型自纠（如区间超出数据范围时改用表内可用区间），
       // 授权仍有效，模型可改参重发；回执带"行动"指引——失败必须告知用户，不许默默重试装作没发生

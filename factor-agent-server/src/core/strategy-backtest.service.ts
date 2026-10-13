@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { ApiException } from '../common/api.exception';
-import { BacktestCard, RawMetrics } from '../types';
+import { AgentProgressSink, BacktestCard, RawMetrics } from '../types';
 import { maxDrawdownPct, toMetricItems } from './backtest.service';
 
 /* ==========================================================
@@ -735,10 +735,12 @@ export interface StrategyBacktestOutput {
 /**
  * 策略回测：输入 StrategySpec v1 数字参数，输出净值卡片（含交易明细/月度归因）与给模型的摘要。
  * 取数全部经 FactorDataService（交易日历/因子截面/行情/基准），本层不触库。
+ * onProgress 可选：长阶段（信号预计算/行情拉取）内部发批次进度事件（复用工具事件形状），
+ * 前端步骤条照常渲染；不传则行为与无进度时完全一致。
  */
 @Injectable()
 export abstract class StrategyBacktestService {
-  abstract runStrategyBacktest(input: StrategyBacktestInput): Promise<StrategyBacktestOutput>;
+  abstract runStrategyBacktest(input: StrategyBacktestInput, onProgress?: AgentProgressSink): Promise<StrategyBacktestOutput>;
 
   /** 执行前快检（实现层做字典白名单校验）：确认门在 interrupt 之前调用，
    *  让"字段不存在"这类注定失败的提案在用户确认前就被打回给模型自纠，
