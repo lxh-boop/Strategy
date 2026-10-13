@@ -186,6 +186,11 @@ export class LangGraphAgentService extends AgentService {
    *  进程内存：重启丢失 = 暂停中的确认作废，用户重发回测请求即自愈 */
   private readonly pendingConfirms = new Map<string, string>();
 
+  /** 确认门恢复防重入：恢复正在执行的会话 id 集合（图收尾/失败即移除）。
+   *  长回测超过前端 90s 空闲看门狗时用户会按"请稍后重试"提示重发确认——
+   *  没有这道闸，第二次 resume 会与第一次并行各跑一遍引擎（双倍打库、两份卡片） */
+  private readonly inflightResumes = new Set<string>();
+
   /** 轮次序号：thread_id = `${conversationId}:${时间戳}:${seq}`，保证进程内唯一 */
   private turnSeq = 0;
 
@@ -353,10 +358,18 @@ export class LangGraphAgentService extends AgentService {
 
     // ② 确认门恢复：会话有挂起的回测确认 → 本条消息是决策不是新提问，在同一 thread 上 resume
     const pendingThread = this.pendingConfirms.get(conversation.id);
+    // 防重入闸：同一确认的上一轮恢复仍在执行（图未收尾）→ 拒绝再次恢复。
+    // 必须在下方 try 之外抛（catch 会把一切异常吞成文本回复），ApiException 直接穿透为 SSE error 帧 → 前端 toast
+    if (pendingThread && this.inflightResumes.has(conversation.id)) {
+      this.logger.warn(`确认门重复恢复被拦 会话=${conversation.id} thread=${pendingThread}`);
+      appendConversationLog(conversation.id, '确认门重复恢复被拦（上一轮仍在执行中）');
+      throw new ApiException('BACKTEST_RUNNING', 409, '上一轮回测正在执行中，请等待本轮结果返回，无需重复确认');
+    }
     // ③ tool-calling 主链路：thread 按轮分配，快照只活一轮（消息真相仍以 conversations 表为准）
     const threadId = `${conversation.id}:${Date.now()}:${this.turnSeq++}`;
     try {
       if (pendingThread) {
+        this.inflightResumes.add(conversation.id);
         try {
           return await this.resumeConfirm(conversation, userText, pendingThread, onProgress);
         } catch (error) {
@@ -364,6 +377,8 @@ export class LangGraphAgentService extends AgentService {
           this.pendingConfirms.delete(conversation.id);
           this.logger.warn(`确认门恢复失败，已退出确认模式 会话=${conversation.id}: ${String(error)}`);
           throw error;
+        } finally {
+          this.inflightResumes.delete(conversation.id);
         }
       }
       this.logger.log(`图执行开始 会话=${conversation.id} thread=${threadId} 提问: ${toLogPreview(userText)}`);
