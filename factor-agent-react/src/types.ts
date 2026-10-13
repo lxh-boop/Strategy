@@ -20,6 +20,8 @@ export interface RawMetrics {
   drawdown: number;
   sharpe: number;
   winRate: number;
+  /** 年化换手（单边，%）：策略回测真引擎填入；mock 引擎与历史存量数据无此字段 */
+  turnover?: number;
 }
 
 export interface Holding {

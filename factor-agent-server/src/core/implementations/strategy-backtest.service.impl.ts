@@ -204,6 +204,7 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
     // ⑤ 聚合 → 卡片 + 摘要
     const aggregate = aggregateNav(loop.equities, benchReturns, tradeDates);
     aggregate.annualTurnoverPct = annualizeTurnover(loop.turnoverByDay, loop.equities);
+    aggregate.metrics.turnover = aggregate.annualTurnoverPct; // 随 RawMetrics 落库，策略页与卡片同源展示
     const card = this.buildCard(p, aggregate, loop, tradeDates, coverage, bench, sortFactors, rebalanceIdx.length);
     const summary = this.buildSummary(p, aggregate, loop, bench, rebalanceIdx.length, sortFactors);
     this.logger.log(

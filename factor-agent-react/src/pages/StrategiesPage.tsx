@@ -166,6 +166,7 @@ function StrategyDetailModal({ s, onClose, onSaveWeights, onRebacktest, onDelete
                 { label: "最大回撤", value: fmtPct(m.drawdown), cls: upDownCls(m.drawdown) },
                 { label: "夏普比率", value: m.sharpe.toFixed(2) },
                 { label: "胜率", value: m.winRate.toFixed(1) + "%" },
+                ...(m.turnover !== undefined ? [{ label: "年化换手(单边)", value: (m.turnover > 0 ? "+" : "") + m.turnover.toFixed(0) + "%" }] : []),
               ]} />
             </>
           ) : (
@@ -243,6 +244,7 @@ function BacktestReportModal({ s, onClose }: { s: Strategy; onClose: () => void 
           { label: "最大回撤", value: fmtPct(m.drawdown), cls: upDownCls(m.drawdown) },
           { label: "夏普比率", value: m.sharpe.toFixed(2) },
           { label: "胜率", value: m.winRate.toFixed(1) + "%" },
+          ...(m.turnover !== undefined ? [{ label: "年化换手(单边)", value: (m.turnover > 0 ? "+" : "") + m.turnover.toFixed(0) + "%" }] : []),
         ]} />
         <div className="detail-section-title" style={{ margin: "18px 0 10px" }}>回测参数</div>
         <ParamsBlock />
