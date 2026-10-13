@@ -1,18 +1,16 @@
 import { useState } from "react";
-import type { Strategy } from "../types";
+import type { FactorWeight, Strategy } from "../types";
+import { useConfig } from "../config";
 import { fmtPct, upDownCls } from "../utils/format";
 import { PerfChart, Sparkline } from "../components/charts";
 import { ConfirmModal, MetricGrid, Modal, ParamsBlock } from "../components/ui";
-import { IconChat, IconClose, IconInfo, IconLogo, IconPlay, IconTrash } from "../components/icons";
+import { IconClose, IconInfo, IconLogo, IconPlay, IconPlus, IconTrash } from "../components/icons";
 
 const STATUS: Record<Strategy["status"], { cls: string; text: string }> = {
   running: { cls: "status-running", text: "运行中" },
   done: { cls: "status-done", text: "回测完成" },
   draft: { cls: "status-draft", text: "草稿" },
 };
-
-/* 「去对话创建」的引导语：用户接着补全因子/区间/条件再发 */
-const CREATE_PROMPT = "帮我构建一个多因子策略，";
 
 /* ----- 策略卡片 ----- */
 
@@ -227,19 +225,107 @@ function BacktestReportModal({ s, onClose }: { s: Strategy; onClose: () => void 
   );
 }
 
+/* ----- 新建策略弹窗：选好参数 → 拼成需求话术 → 跳对话预填，点发送即开始回测。
+     不再直接建草稿（策略收口到对话真引擎），本弹窗只是"结构化输入的帮手" ----- */
+
+function NewStrategyModal({ onClose, onConfirm, notify }: {
+  onClose: () => void;
+  onConfirm: (prompt: string) => void;
+  notify: (m: string) => void;
+}) {
+  const { factors: factorLib } = useConfig();
+  const [name, setName] = useState("");
+  const [universe, setUniverse] = useState("沪深300");
+  const [rebalance, setRebalance] = useState("每月调仓");
+  const [checked, setChecked] = useState<string[]>([]);
+
+  const toggle = (id: string) =>
+    setChecked(prev => (prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]));
+
+  const confirm = () => {
+    if (!name.trim()) { notify("请填写策略名称"); return; }
+    if (!checked.length) { notify("请至少选择一个因子"); return; }
+    const factors: FactorWeight[] = factorLib.filter(f => checked.includes(f.id));
+    const factorsText = factors.map(f => f.name.replace("因子", "")).join("、");
+    /* 需求话术：结构化参数转自然语言，智能体按系统流程澄清/确认后走真引擎回测 */
+    onConfirm(
+      `帮我构建一个多因子策略「${name.trim()}」：股票池选${universe}，${rebalance}，` +
+      `重点考虑${factorsText}。请按这些要求完成回测并给我回测报告，` +
+      `回测区间、持仓数量等参数由你推荐。`,
+    );
+    onClose();
+  };
+
+  return (
+    <Modal onClose={onClose} ariaLabel="新建策略">
+      <div className="modal-head">
+        <div className="modal-title">新建策略</div>
+        <button className="icon-btn" aria-label="关闭" onClick={onClose}><IconClose /></button>
+      </div>
+      <div className="modal-body">
+        <div className="detail-section">
+          <div className="detail-section-title">策略名称</div>
+          <input className="text-input" placeholder="例如：大盘价值轮动策略" aria-label="策略名称"
+            value={name} onChange={e => setName(e.target.value)} />
+        </div>
+        <div className="detail-section">
+          <div className="detail-section-title">股票池与调仓</div>
+          <div className="detail-meta" style={{ gridTemplateColumns: "1fr 1fr" }}>
+            <div className="meta-item" style={{ padding: "8px 14px" }}>
+              <div className="meta-label">股票池</div>
+              <select className="plain-select" value={universe} aria-label="选择股票池" onChange={e => setUniverse(e.target.value)}>
+                <option>沪深300</option><option>中证500</option><option>中证800</option>
+                <option>中证1000</option><option>全市场（剔除ST）</option>
+              </select>
+            </div>
+            <div className="meta-item" style={{ padding: "8px 14px" }}>
+              <div className="meta-label">调仓频率</div>
+              <select className="plain-select" value={rebalance} aria-label="选择调仓频率" onChange={e => setRebalance(e.target.value)}>
+                <option>每周调仓</option><option>每月调仓</option><option>每季度调仓</option>
+              </select>
+            </div>
+          </div>
+        </div>
+        <div className="detail-section" style={{ marginBottom: 0 }}>
+          <div className="detail-section-title">选择因子（点击勾选）</div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+            {factorLib.map(f => (
+              <label key={f.id} className="factor-tag"
+                style={{ cursor: "pointer", userSelect: "none", padding: "7px 13px", fontSize: 12 }}>
+                <input type="checkbox" checked={checked.includes(f.id)}
+                  onChange={() => toggle(f.id)}
+                  style={{ accentColor: "var(--primary)", marginRight: 5, verticalAlign: -1 }} />
+                {f.name}
+              </label>
+            ))}
+          </div>
+          <div className="agent-card-text" style={{ margin: "12px 0 0" }}>
+            确定后会跳转到对话页并自动填好以上需求，点击发送即可开始回测。
+          </div>
+        </div>
+      </div>
+      <div className="modal-foot">
+        <button className="btn btn-ghost" onClick={onClose}>取消</button>
+        <button className="btn btn-primary" onClick={confirm}>确定，去对话创建</button>
+      </div>
+    </Modal>
+  );
+}
+
 /* ----- 页面 ----- */
 
 export function StrategiesPage({ strategies, loading, notify, onGoChat, onRebacktest, onDelete }: {
   strategies: Strategy[];
   loading: boolean;
   notify: (m: string) => void;
-  /** 「去对话创建」：切到对话页并预填引导语——策略唯一的出生地是对话 */
+  /** 「确定，去对话创建」：切到对话页并预填需求话术（策略的创建/回测统一在对话完成） */
   onGoChat: (prefill?: string) => void;
   onRebacktest: (id: string) => Promise<Strategy>;
   onDelete: (id: string) => Promise<void>;
 }) {
   const [detailId, setDetailId] = useState<string | null>(null);
   const [reportId, setReportId] = useState<string | null>(null);
+  const [showNew, setShowNew] = useState(false);
   const [confirmDel, setConfirmDel] = useState<Strategy | null>(null);
   const [deleting, setDeleting] = useState(false);
   const detail = strategies.find(s => s.id === detailId) ?? null;
@@ -282,9 +368,9 @@ export function StrategiesPage({ strategies, loading, notify, onGoChat, onReback
       <header className="page-header">
         <div>
           <h1>我的策略</h1>
-          <p className="page-sub">管理你在对话中创建的多因子选股策略，查看回测表现</p>
+          <p className="page-sub">管理你创建的多因子选股策略，查看回测表现</p>
         </div>
-        <button className="btn btn-primary" onClick={() => onGoChat(CREATE_PROMPT)}><IconChat />去对话创建</button>
+        <button className="btn btn-primary" onClick={() => setShowNew(true)}><IconPlus />新建策略</button>
       </header>
 
       <div className="stat-row">
@@ -322,8 +408,8 @@ export function StrategiesPage({ strategies, loading, notify, onGoChat, onReback
           <div className="empty-state">
             <div className="empty-icon"><IconLogo size={24} /></div>
             <div className="empty-title">还没有策略</div>
-            <div className="empty-desc">在对话里让智能体构建并回测策略，回测卡片上「保存为我的策略」即可收进这里。</div>
-            <button className="btn btn-primary" onClick={() => onGoChat(CREATE_PROMPT)}><IconChat />去对话创建</button>
+            <div className="empty-desc">点击「新建策略」选好参数，到对话里发送即可回测；回测卡片上「保存为我的策略」收进这里。</div>
+            <button className="btn btn-primary" onClick={() => setShowNew(true)}><IconPlus />新建策略</button>
           </div>
         )}
       </div>
@@ -333,6 +419,11 @@ export function StrategiesPage({ strategies, loading, notify, onGoChat, onReback
           onClose={() => setDetailId(null)}
           onRebacktest={() => handleRebacktest(detail)}
           onDelete={() => setConfirmDel(detail)} />
+      )}
+      {showNew && (
+        <NewStrategyModal notify={notify}
+          onClose={() => setShowNew(false)}
+          onConfirm={prompt => { setShowNew(false); onGoChat(prompt); }} />
       )}
       {report && (
         <BacktestReportModal s={report} onClose={() => setReportId(null)} />
