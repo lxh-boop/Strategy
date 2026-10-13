@@ -18,15 +18,13 @@ import {
   FACTOR_LIB,
   LastReport,
   nowTime,
-  STOCK_POOL,
-  StockMeta,
   StoreService,
   WELCOME_TEXT,
 } from '../store.service';
 
 /* ==========================================================
    存储实现：内存 + 种子测试样例（演示版）
-   - 测试样例：4 个种子策略、用户资料、因子库、股票池
+   - 测试样例：4 个种子策略、用户资料、因子库
    - 数据不出进程，重启恢复种子；换持久化时新增实现并在 core.module 切换
    ========================================================== */
 
@@ -217,17 +215,13 @@ export class MemoryStoreService extends StoreService {
     this.lastReports.set(convId, report);
   }
 
-  /* ----- 因子库 / 参数 / 筛选池 ----- */
+  /* ----- 因子库 / 参数 ----- */
   getFactorLib(): FactorLibItem[] {
     return FACTOR_LIB;
   }
 
   getBtParams(): BtParamItem[] {
     return BT_PARAMS;
-  }
-
-  getStockPool(): StockMeta[] {
-    return STOCK_POOL;
   }
 
   /* ----- 用户 ----- */

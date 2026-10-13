@@ -1,19 +1,17 @@
 import { Injectable } from '@nestjs/common';
-import { BtParamItem, FactorLibItem, ScreenResult } from '../../types';
-import { ScreenService } from '../../core/screen.service';
+import { BtParamItem, FactorLibItem } from '../../types';
 import { StoreService } from '../../core/store.service';
-import { ScreenDto } from '../dto';
 import { MarketService } from '../market.service';
 
 /* ==========================================================
-   市场数据业务实现：汇聚存储（配置型数据）与筛选引擎
+   市场数据业务实现：汇聚存储（配置型数据）。
+   历史上的"选股筛选"（POST /api/screen，16 只演示股）已随 mock 一起下线。
    ========================================================== */
 
 @Injectable()
 export class MarketServiceImpl extends MarketService {
   constructor(
     private readonly store: StoreService,
-    private readonly screenService: ScreenService,
   ) {
     super();
   }
@@ -24,9 +22,5 @@ export class MarketServiceImpl extends MarketService {
 
   listBtParams(): BtParamItem[] {
     return this.store.getBtParams();
-  }
-
-  screen(dto: ScreenDto): ScreenResult {
-    return this.screenService.screen(dto);
   }
 }

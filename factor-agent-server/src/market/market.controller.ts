@@ -1,10 +1,9 @@
-import { Body, Controller, Get, Post } from '@nestjs/common';
-import { BtParamItem, FactorLibItem, ScreenResult } from '../types';
+import { Controller, Get } from '@nestjs/common';
+import { BtParamItem, FactorLibItem } from '../types';
 import { Public } from '../common/public.decorator';
 import { MarketService } from './market.service';
-import { ScreenDto } from './dto';
 
-/** API-14/15/16 市场数据（公开：公共配置数据，无用户维度） */
+/** API-14/15 市场数据（公开：公共配置数据，无用户维度） */
 @Public()
 @Controller('api')
 export class MarketController {
@@ -20,11 +19,5 @@ export class MarketController {
   @Get('backtest-params')
   backtestParams(): BtParamItem[] {
     return this.market.listBtParams();
-  }
-
-  /** 选股筛选 */
-  @Post('screen')
-  screen(@Body() dto: ScreenDto): ScreenResult {
-    return this.market.screen(dto);
   }
 }

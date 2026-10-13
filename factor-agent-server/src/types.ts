@@ -249,24 +249,6 @@ export interface BtParamItem {
   hint: string;
 }
 
-export interface ScreenFilter {
-  field: string;
-  op: string;
-  value: number;
-}
-
-export interface ScreenResultStock {
-  code: string;
-  name: string;
-  score: number;
-  weight: number | null;
-}
-
-export interface ScreenResult {
-  stocks: ScreenResultStock[];
-  total: number;
-}
-
 /* ----- 登录鉴权（M13，与 backend-api.md §7.1 一致） ----- */
 
 /** 用户公开信息（任何接口都不返回密码哈希） */

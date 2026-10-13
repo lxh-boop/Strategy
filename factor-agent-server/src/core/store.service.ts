@@ -52,41 +52,6 @@ export const BT_DEFAULTS = {
   feeRate: 0.001,
 };
 
-/** 演示股票池：附带筛选用的指标属性（测试样例数据，非真实行情） */
-export interface StockMeta {
-  code: string;
-  name: string;
-  universes: string[];
-  roeTtm: number;
-  pePct: number;
-  divYield: number;
-  vol: number;
-  mom20: number;
-  baseScore: number;
-}
-
-const HS300 = ['沪深300', '中证800', '全市场'];
-const CSI500 = ['中证500', '中证800', '全市场'];
-
-export const STOCK_POOL: StockMeta[] = [
-  { code: '600519', name: '贵州茅台', universes: HS300, roeTtm: 30.2, pePct: 22.5, divYield: 1.2, vol: 24, mom20: 3.1, baseScore: 91.2 },
-  { code: '000858', name: '五粮液', universes: HS300, roeTtm: 24.1, pePct: 18.3, divYield: 1.8, vol: 27, mom20: 2.4, baseScore: 88.4 },
-  { code: '601166', name: '兴业银行', universes: HS300, roeTtm: 17.5, pePct: 12.6, divYield: 5.6, vol: 21, mom20: 0.9, baseScore: 86.9 },
-  { code: '601318', name: '中国平安', universes: HS300, roeTtm: 16.2, pePct: 25.4, divYield: 3.9, vol: 23, mom20: 1.5, baseScore: 85.7 },
-  { code: '600276', name: '恒瑞医药', universes: HS300, roeTtm: 18.4, pePct: 28.2, divYield: 0.6, vol: 28, mom20: 4.3, baseScore: 84.3 },
-  { code: '600036', name: '招商银行', universes: HS300, roeTtm: 15.8, pePct: 31.0, divYield: 5.1, vol: 20, mom20: 1.2, baseScore: 89.6 },
-  { code: '601088', name: '中国神华', universes: HS300, roeTtm: 15.5, pePct: 19.8, divYield: 6.4, vol: 19, mom20: 0.8, baseScore: 86.1 },
-  { code: '600900', name: '长江电力', universes: HS300, roeTtm: 15.1, pePct: 29.4, divYield: 3.2, vol: 14, mom20: 1.1, baseScore: 85.9 },
-  { code: '600941', name: '中国移动', universes: HS300, roeTtm: 12.9, pePct: 33.2, divYield: 4.4, vol: 16, mom20: 2.2, baseScore: 85.2 },
-  { code: '000333', name: '美的集团', universes: HS300, roeTtm: 22.1, pePct: 34.0, divYield: 3.8, vol: 26, mom20: 2.9, baseScore: 87.4 },
-  { code: '002594', name: '比亚迪', universes: HS300, roeTtm: 20.6, pePct: 47.0, divYield: 0.5, vol: 44, mom20: 5.4, baseScore: 88.2 },
-  { code: '601899', name: '紫金矿业', universes: HS300, roeTtm: 21.3, pePct: 58.0, divYield: 1.4, vol: 35, mom20: 8.1, baseScore: 88.5 },
-  { code: '300750', name: '宁德时代', universes: HS300, roeTtm: 22.4, pePct: 55.0, divYield: 0.3, vol: 42, mom20: 6.8, baseScore: 88.9 },
-  { code: '688041', name: '海光信息', universes: CSI500, roeTtm: 26.4, pePct: 78.0, divYield: 0.2, vol: 55, mom20: 9.6, baseScore: 90.3 },
-  { code: '300308', name: '中际旭创', universes: CSI500, roeTtm: 24.8, pePct: 66.0, divYield: 0.4, vol: 58, mom20: 11.2, baseScore: 89.8 },
-  { code: '300059', name: '东方财富', universes: CSI500, roeTtm: 14.2, pePct: 62.0, divYield: 0.3, vol: 48, mom20: 7.3, baseScore: 86.4 },
-];
-
 /** 对话中最近一次构建报告的参数（供后续"回测一下"等追问复用；智能体的会话级记忆） */
 export interface LastReport {
   name: string;
@@ -139,7 +104,6 @@ export abstract class StoreService {
   /* ----- 配置型数据 ----- */
   abstract getFactorLib(): FactorLibItem[];
   abstract getBtParams(): BtParamItem[];
-  abstract getStockPool(): StockMeta[];
 
   /* ----- 用户 ----- */
   abstract getProfile(): UserProfile;
