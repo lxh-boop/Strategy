@@ -24,6 +24,9 @@ import {
    - readTable 服务 LLM 单点查询；readTradeDates/readFactorSection/readFactorRange/
      readQuoteSeries/readIndexDaily 服务策略回测引擎的批量取数，同池同白名单
    - 无 TRADE_DATE 列的静态表（md_security 等主表）截面/序列查询忽略日期条件
+   - 取数结果带短 TTL 内存缓存（见 CACHE_TTL_MS）：历史行情/因子一经落库不再变化，
+     重复回测/重复查询免打库；近期交易日被数据商修正的情形靠 TTL 过期兜底。
+     只缓存在 query() 这一个收口点，白名单校验照常先行，缓存命中不影响任何校验语义
    ========================================================== */
 
 /** 个股前复权日行情表（SQL/mkt_equd_adj.md）：引擎成交与结算的唯一行情源 */
@@ -37,6 +40,20 @@ const MAX_FIELDS = 200;
 
 /** 批量查询按代码分片的大小（控制 IN 元组长度） */
 const CODE_CHUNK = 400;
+
+/* ----- 取数缓存参数 -----
+   历史行情/因子数据落库后不再变化，可安全复用；TTL 只为兜底两类情形：
+   最近交易日的数据商修正、以及限制长驻进程的内存占用 */
+/** 缓存条目存活时长（10 分钟） */
+const CACHE_TTL_MS = 10 * 60_000;
+/** 缓存最大条目数（LRU 淘汰）：一条 ≈ 一次批量查询的结果集，50 条足够覆盖同配置重复回测 */
+const CACHE_MAX = 50;
+
+/** 缓存条目：入库时间 + 结果集。结果集视为只读，调用方不得改写（当前各方法只做映射不修改） */
+interface FactorCacheEntry {
+  at: number;
+  rows: unknown[];
+}
 
 /** 交易日 YYYYMMDD → 行情表 DATE 参数 'YYYY-MM-DD' */
 function toDashDate(yyyymmdd: string): string {
@@ -52,6 +69,12 @@ function toNum(v: unknown): number {
 export class MysqlFactorDataService extends FactorDataService {
   private readonly logger = new Logger('MysqlFactorData');
   private pool: Pool | null = null;
+  /** (sql+params) → 结果集；Map 迭代序 = 插入序，借它做 LRU：命中删了重插移到队尾，超容从队首删 */
+  private readonly cache = new Map<string, FactorCacheEntry>();
+  /** 同 key 并发查询去重：第一个请求打库，其余搭车等同一个 Promise */
+  private readonly inflight = new Map<string, Promise<unknown[]>>();
+  /** 累计命中次数（仅日志观察用） */
+  private cacheHits = 0;
 
   constructor(private readonly config: ConfigService) {
     super();
@@ -320,14 +343,50 @@ export class MysqlFactorDataService extends FactorDataService {
     return this.pool;
   }
 
+  /** 唯一打库收口：白名单校验已在各方法先行，这里只负责 缓存 → 并发去重 → 连接池执行 */
   private async query(sql: string, params: (string | number)[]): Promise<unknown[]> {
-    try {
-      const [rows] = await this.getPool().execute(sql, params);
-      return rows as unknown[];
-    } catch (error) {
-      const msg = (error as Error).message.slice(0, 200);
-      this.logger.error(`取数失败: ${msg}`);
-      throw new ApiException('DATA_SOURCE_ERROR', 502, `MySQL 取数失败: ${msg}`);
+    const key = sql + '§' + JSON.stringify(params);
+
+    const hit = this.cache.get(key);
+    if (hit) {
+      this.cache.delete(key);
+      if (Date.now() - hit.at < CACHE_TTL_MS) {
+        this.cache.set(key, hit); // 删了重插 = 移到队尾（最新），实现 LRU
+        this.cacheHits++;
+        this.logger.log(`缓存命中（累计 ${this.cacheHits}）: ${sql.slice(0, 72)}…`);
+        return hit.rows;
+      }
+      // 已过期：不回插，走正常查询后以新结果覆盖
+    }
+
+    const running = this.inflight.get(key);
+    if (running) return running; // 并发同查询：等待首个请求的结果，不重复打库
+
+    const task = (async () => {
+      try {
+        const [rows] = await this.getPool().execute(sql, params);
+        const out = rows as unknown[];
+        this.cache.set(key, { at: Date.now(), rows: out });
+        this.evictCacheOverflow();
+        return out;
+      } catch (error) {
+        const msg = (error as Error).message.slice(0, 200);
+        this.logger.error(`取数失败: ${msg}`);
+        throw new ApiException('DATA_SOURCE_ERROR', 502, `MySQL 取数失败: ${msg}`);
+      } finally {
+        this.inflight.delete(key);
+      }
+    })();
+    this.inflight.set(key, task);
+    return task;
+  }
+
+  /** 缓存超容淘汰：从最旧条目开始删（Map 队首），封顶防长驻进程内存膨胀 */
+  private evictCacheOverflow(): void {
+    while (this.cache.size > CACHE_MAX) {
+      const oldest = this.cache.keys().next().value;
+      if (oldest === undefined) break;
+      this.cache.delete(oldest);
     }
   }
 }
