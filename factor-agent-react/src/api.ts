@@ -12,7 +12,6 @@ import type {
   ChatProgressEvent,
   Conversation,
   FactorLibItem,
-  FactorWeight,
   Strategy,
   UserProfile,
 } from "./types";
@@ -283,19 +282,7 @@ export async function sendMessageStream(
 /* ----- 策略模块（契约 §3.2） ----- */
 
 /** 新建策略入参（后端创建草稿并补全其余字段） */
-export interface NewStrategyInput {
-  name: string;
-  universe?: string;
-  rebalance?: string;
-  benchmark?: string;
-  factors: FactorWeight[];
-}
-
 export const listStrategies = () => http<Strategy[]>("GET", "/strategies");
-export const createStrategy = (input: NewStrategyInput) => http<Strategy>("POST", "/strategies", input);
-/** 更新配置 = 保存并自动重新回测（契约：同一动作） */
-export const updateStrategy = (id: string, patch: Partial<NewStrategyInput>) =>
-  http<Strategy>("PATCH", `/strategies/${id}`, patch);
 export const backtestStrategy = (id: string) => http<Strategy>("POST", `/strategies/${id}/backtest`, {});
 export const deleteStrategy = (id: string) => http<void>("DELETE", `/strategies/${id}`);
 

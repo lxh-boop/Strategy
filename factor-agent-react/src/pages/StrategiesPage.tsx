@@ -1,17 +1,18 @@
 import { useState } from "react";
-import type { FactorWeight, Strategy } from "../types";
-import { useConfig } from "../config";
+import type { Strategy } from "../types";
 import { fmtPct, upDownCls } from "../utils/format";
 import { PerfChart, Sparkline } from "../components/charts";
 import { ConfirmModal, MetricGrid, Modal, ParamsBlock } from "../components/ui";
-import { IconClose, IconInfo, IconLogo, IconPlay, IconPlus, IconTrash } from "../components/icons";
-import type { NewStrategyInput } from "../api";
+import { IconChat, IconClose, IconInfo, IconLogo, IconPlay, IconTrash } from "../components/icons";
 
 const STATUS: Record<Strategy["status"], { cls: string; text: string }> = {
   running: { cls: "status-running", text: "运行中" },
   done: { cls: "status-done", text: "回测完成" },
   draft: { cls: "status-draft", text: "草稿" },
 };
+
+/* 「去对话创建」的引导语：用户接着补全因子/区间/条件再发 */
+const CREATE_PROMPT = "帮我构建一个多因子策略，";
 
 /* ----- 策略卡片 ----- */
 
@@ -73,32 +74,22 @@ function StrategyCard({ s, onOpen, onBacktest, onDelete }: {
   );
 }
 
-/* ----- 策略详情弹窗（因子权重可调） ----- */
+/* ----- 策略详情弹窗（只读展示 + 重跑；创建/调参统一在对话完成） ----- */
 
-function StrategyDetailModal({ s, onClose, onSaveWeights, onRebacktest, onDelete }: {
+function StrategyDetailModal({ s, onClose, onRebacktest, onDelete }: {
   s: Strategy;
   onClose: () => void;
-  onSaveWeights: (factors: FactorWeight[]) => Promise<void>;
   onRebacktest: () => Promise<void>;
   onDelete: () => void;
 }) {
-  const [weights, setWeights] = useState<FactorWeight[]>(s.factors.map(f => ({ ...f })));
-  const [busy, setBusy] = useState<null | "save" | "retest">(null);
+  const [busy, setBusy] = useState(false);
   const m = s.metrics;
-  const total = weights.reduce((a, f) => a + f.weight, 0);
-  const setW = (i: number, weight: number) =>
-    setWeights(prev => prev.map((f, j) => (j === i ? { ...f, weight } : f)));
 
-  /* 保存与重新回测都会触发一次完整回测：await 期间双按钮禁用，防重复提交 */
-  const save = async () => {
-    if (busy) return;
-    setBusy("save");
-    try { await onSaveWeights(weights); } finally { setBusy(null); }
-  };
+  /* 重新回测触发一次完整回测：await 期间按钮禁用，防重复提交 */
   const retest = async () => {
     if (busy) return;
-    setBusy("retest");
-    try { await onRebacktest(); } finally { setBusy(null); }
+    setBusy(true);
+    try { await onRebacktest(); } finally { setBusy(false); }
   };
 
   return (
@@ -110,7 +101,7 @@ function StrategyDetailModal({ s, onClose, onSaveWeights, onRebacktest, onDelete
         </div>
         <div style={{ display: "flex", gap: 4 }}>
           <button className="icon-btn icon-btn-danger" title="删除策略" aria-label={`删除策略「${s.name}」`}
-            disabled={busy !== null} onClick={onDelete}><IconTrash /></button>
+            disabled={busy} onClick={onDelete}><IconTrash /></button>
           <button className="icon-btn" title="关闭" aria-label="关闭" onClick={onClose}><IconClose /></button>
         </div>
       </div>
@@ -124,37 +115,17 @@ function StrategyDetailModal({ s, onClose, onSaveWeights, onRebacktest, onDelete
           </div>
         </div>
 
-        {s.backtestConfig ? (
-          /* API-27 保存的等权策略：因子等权合成不可调权重，重回测按原配置重跑真引擎 */
-          <div className="detail-section">
-            <div className="detail-section-title">因子配置（等权合成）</div>
-            <div className="sc-factors">
-              {s.factors.map(f => <span className="factor-tag" key={f.name}>{f.name} <b>{f.weight}%</b></span>)}
-            </div>
-            <div className="agent-card-text" style={{ margin: "8px 0 0" }}>
-              由回测卡片保存：因子截面分位数等权合成，权重不可调；「重新回测」将按原配置重跑真库引擎。
-            </div>
+        <div className="detail-section">
+          <div className="detail-section-title">因子配置</div>
+          <div className="sc-factors">
+            {s.factors.map(f => <span className="factor-tag" key={f.name}>{f.name} <b>{f.weight}%</b></span>)}
           </div>
-        ) : (
-          <div className="detail-section">
-            <div className="detail-section-title">因子权重（可拖动调整）</div>
-            {weights.map((f, i) => (
-              <div className="weight-slider-row" key={f.name}>
-                <span className="ws-name">{f.name}</span>
-                <div className="ws-bar"><i style={{ width: `${f.weight}%` }} /></div>
-                <input type="range" min={0} max={100} value={f.weight} aria-label={`「${f.name}」因子权重`}
-                  disabled={busy !== null}
-                  onChange={e => setW(i, +e.target.value)} />
-                <span className="ws-val">{f.weight}%</span>
-                <span />
-              </div>
-            ))}
-            <div className="weight-total">
-              当前合计 <b>{total}%</b> / 100%
-              {total !== 100 && " · 保存时按比例自动折算为 100"}
-            </div>
+          <div className="agent-card-text" style={{ margin: "8px 0 0" }}>
+            {s.backtestConfig
+              ? "由回测卡片保存：因子等权合成，权重不可调；「重新回测」将按原配置重跑真库引擎。"
+              : "旧版策略仅支持查看；策略创建与调整已统一到对话，请在对话中重新创建。"}
           </div>
-        )}
+        </div>
 
         <div className="detail-section">
           <div className="detail-section-title">绩效概览</div>
@@ -171,7 +142,9 @@ function StrategyDetailModal({ s, onClose, onSaveWeights, onRebacktest, onDelete
             </>
           ) : (
             <div className="agent-card-text" style={{ margin: "4px 0 12px" }}>
-              该策略尚未回测，保存配置后将自动生成回测报告。
+              {s.backtestConfig
+                ? "该策略尚未回测，点击「重新回测」按原配置生成报告。"
+                : "旧版策略未包含回测数据，仅支持查看；请在对话中重新创建策略。"}
             </div>
           )}
         </div>
@@ -207,20 +180,15 @@ function StrategyDetailModal({ s, onClose, onSaveWeights, onRebacktest, onDelete
           <div className="detail-section-title">回测参数</div>
           <ParamsBlock />
           <div className="agent-card-text" style={{ margin: "8px 0 0" }}>
-            以上为本次回测采用的口径，悬停参数可查看说明；调整因子权重并保存后将按新配置重新回测。
+            以上为本次回测采用的口径，悬停参数可查看说明。
           </div>
         </div>
       </div>
       <div className="modal-foot">
-        {/* 破坏性的删除已移到标题栏；页脚只保留"重算/提交"两类决策（等权策略无权重可保存） */}
-        <button className="btn btn-ghost" disabled={busy !== null} onClick={() => void retest()}>
-          {busy === "retest" ? "回测中…" : "重新回测"}
+        {/* 破坏性的删除已移到标题栏；创建/调参统一在对话，页脚只保留重跑 */}
+        <button className="btn btn-ghost" disabled={busy} onClick={() => void retest()}>
+          {busy ? "回测中…" : "重新回测"}
         </button>
-        {!s.backtestConfig && (
-          <button className="btn btn-primary" disabled={busy !== null} onClick={() => void save()}>
-            {busy === "save" ? "回测中…" : "保存并生成回测报告"}
-          </button>
-        )}
       </div>
     </Modal>
   );
@@ -259,137 +227,23 @@ function BacktestReportModal({ s, onClose }: { s: Strategy; onClose: () => void 
   );
 }
 
-/* ----- 新建策略弹窗 ----- */
-
-function NewStrategyModal({ onClose, onCreate, notify }: {
-  onClose: () => void;
-  onCreate: (input: NewStrategyInput) => Promise<Strategy>;
-  notify: (m: string) => void;
-}) {
-  const { factors: factorLib } = useConfig();
-  const [name, setName] = useState("");
-  const [universe, setUniverse] = useState("沪深300");
-  const [rebalance, setRebalance] = useState("每月调仓");
-  const [checked, setChecked] = useState<string[]>([]);
-  const [submitting, setSubmitting] = useState(false);
-
-  const toggle = (id: string) =>
-    setChecked(prev => (prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]));
-
-  const create = async () => {
-    if (!name.trim()) { notify("请填写策略名称"); return; }
-    if (!checked.length) { notify("请至少选择一个因子"); return; }
-    const per = Math.floor(100 / checked.length);
-    const factors: FactorWeight[] = factorLib
-      .filter(f => checked.includes(f.id))
-      .map((f, i) => ({
-        name: f.name.replace("因子", ""),
-        weight: i === 0 ? 100 - per * (checked.length - 1) : per,
-      }));
-    setSubmitting(true);
-    try {
-      /* 权重不要求合计 100：后端保存时会按比例归一化 */
-      await onCreate({ name: name.trim(), universe, rebalance, factors });
-      onClose();
-    } catch (e) {
-      notify(e instanceof Error ? e.message : "创建策略失败");
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  return (
-    <Modal onClose={onClose} ariaLabel="新建策略">
-      <div className="modal-head">
-        <div className="modal-title">新建策略</div>
-        <button className="icon-btn" aria-label="关闭" onClick={onClose}><IconClose /></button>
-      </div>
-      <div className="modal-body">
-        <div className="detail-section">
-          <div className="detail-section-title">策略名称</div>
-          <input className="text-input" placeholder="例如：大盘价值轮动策略" aria-label="策略名称"
-            value={name} onChange={e => setName(e.target.value)} />
-        </div>
-        <div className="detail-section">
-          <div className="detail-section-title">股票池与调仓</div>
-          <div className="detail-meta" style={{ gridTemplateColumns: "1fr 1fr" }}>
-            <div className="meta-item" style={{ padding: "8px 14px" }}>
-              <div className="meta-label">股票池</div>
-              <select className="plain-select" value={universe} aria-label="选择股票池" onChange={e => setUniverse(e.target.value)}>
-                <option>沪深300</option><option>中证500</option><option>中证800</option>
-                <option>中证1000</option><option>全市场（剔除ST）</option>
-              </select>
-            </div>
-            <div className="meta-item" style={{ padding: "8px 14px" }}>
-              <div className="meta-label">调仓频率</div>
-              <select className="plain-select" value={rebalance} aria-label="选择调仓频率" onChange={e => setRebalance(e.target.value)}>
-                <option>每周调仓</option><option>每月调仓</option><option>每季度调仓</option>
-              </select>
-            </div>
-          </div>
-        </div>
-        <div className="detail-section" style={{ marginBottom: 0 }}>
-          <div className="detail-section-title">选择因子（点击勾选）</div>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-            {factorLib.map(f => (
-              <label key={f.id} className="factor-tag"
-                style={{ cursor: "pointer", userSelect: "none", padding: "7px 13px", fontSize: 12 }}>
-                <input type="checkbox" checked={checked.includes(f.id)}
-                  onChange={() => toggle(f.id)}
-                  style={{ accentColor: "var(--primary)", marginRight: 5, verticalAlign: -1 }} />
-                {f.name}
-              </label>
-            ))}
-          </div>
-        </div>
-      </div>
-      <div className="modal-foot">
-        <button className="btn btn-ghost" onClick={onClose}>取消</button>
-        <button className="btn btn-primary" disabled={submitting} onClick={() => void create()}>
-          {submitting ? "创建中…" : "创建策略"}
-        </button>
-      </div>
-    </Modal>
-  );
-}
-
 /* ----- 页面 ----- */
 
-export function StrategiesPage({ strategies, loading, notify, onAdd, onSaveWeights, onRebacktest, onDelete }: {
+export function StrategiesPage({ strategies, loading, notify, onGoChat, onRebacktest, onDelete }: {
   strategies: Strategy[];
   loading: boolean;
   notify: (m: string) => void;
-  onAdd: (input: NewStrategyInput) => Promise<Strategy>;
-  onSaveWeights: (id: string, factors: FactorWeight[]) => Promise<Strategy>;
+  /** 「去对话创建」：切到对话页并预填引导语——策略唯一的出生地是对话 */
+  onGoChat: (prefill?: string) => void;
   onRebacktest: (id: string) => Promise<Strategy>;
   onDelete: (id: string) => Promise<void>;
 }) {
   const [detailId, setDetailId] = useState<string | null>(null);
   const [reportId, setReportId] = useState<string | null>(null);
-  const [showNew, setShowNew] = useState(false);
   const [confirmDel, setConfirmDel] = useState<Strategy | null>(null);
   const [deleting, setDeleting] = useState(false);
   const detail = strategies.find(s => s.id === detailId) ?? null;
   const report = strategies.find(s => s.id === reportId) ?? null;
-
-  const handleSaveWeights = async (s: Strategy, rawFactors: FactorWeight[]) => {
-    const total = rawFactors.reduce((a, f) => a + f.weight, 0);
-    if (total <= 0) {
-      notify("因子权重不能全部为 0");
-      return;
-    }
-    try {
-      /* 权重原样提交，后端归一化（合计 ≠ 100 按比例折算）并随保存自动重新回测 */
-      await onSaveWeights(s.id, rawFactors);
-      setDetailId(null);
-      setReportId(s.id);
-      notify(total === 100
-        ? "因子权重已保存，已按新配置完成回测"
-        : `权重合计 ${total}%，已自动折算为 100% 并完成回测`);
-    } catch (e) {
-      notify(e instanceof Error ? e.message : "保存失败");
-    }
-  };
 
   const handleRebacktest = async (s: Strategy) => {
     try {
@@ -428,9 +282,9 @@ export function StrategiesPage({ strategies, loading, notify, onAdd, onSaveWeigh
       <header className="page-header">
         <div>
           <h1>我的策略</h1>
-          <p className="page-sub">管理你创建的多因子选股策略，查看回测表现</p>
+          <p className="page-sub">管理你在对话中创建的多因子选股策略，查看回测表现</p>
         </div>
-        <button className="btn btn-primary" onClick={() => setShowNew(true)}><IconPlus />新建策略</button>
+        <button className="btn btn-primary" onClick={() => onGoChat(CREATE_PROMPT)}><IconChat />去对话创建</button>
       </header>
 
       <div className="stat-row">
@@ -468,8 +322,8 @@ export function StrategiesPage({ strategies, loading, notify, onAdd, onSaveWeigh
           <div className="empty-state">
             <div className="empty-icon"><IconLogo size={24} /></div>
             <div className="empty-title">还没有策略</div>
-            <div className="empty-desc">在对话里让智能体跑一份回测并「保存为我的策略」，或者直接手动新建一个多因子组合。</div>
-            <button className="btn btn-primary" onClick={() => setShowNew(true)}><IconPlus />新建策略</button>
+            <div className="empty-desc">在对话里让智能体构建并回测策略，回测卡片上「保存为我的策略」即可收进这里。</div>
+            <button className="btn btn-primary" onClick={() => onGoChat(CREATE_PROMPT)}><IconChat />去对话创建</button>
           </div>
         )}
       </div>
@@ -477,18 +331,8 @@ export function StrategiesPage({ strategies, loading, notify, onAdd, onSaveWeigh
       {detail && (
         <StrategyDetailModal key={detail.id} s={detail}
           onClose={() => setDetailId(null)}
-          onSaveWeights={f => handleSaveWeights(detail, f)}
           onRebacktest={() => handleRebacktest(detail)}
           onDelete={() => setConfirmDel(detail)} />
-      )}
-      {showNew && (
-        <NewStrategyModal notify={notify}
-          onClose={() => setShowNew(false)}
-          onCreate={async input => {
-            const s = await onAdd(input);
-            notify(`策略「${s.name}」已创建（草稿），保存配置后自动生成回测报告`);
-            return s;
-          }} />
       )}
       {report && (
         <BacktestReportModal s={report} onClose={() => setReportId(null)} />

@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import type { BacktestCard, ReportCard, Strategy } from "./types";
+import type { BacktestCard, Strategy } from "./types";
 import {
-  ApiError, backtestStrategy as apiBacktest, createStrategy,
-  createStrategyFromBacktest, deleteStrategy as apiDeleteStrategy, getHealth, getToken, listStrategies, updateStrategy,
-  me as apiMe, AUTH_EXPIRED_EVENT, type HealthInfo, type NewStrategyInput, type UserPublic,
+  ApiError, backtestStrategy as apiBacktest,
+  createStrategyFromBacktest, deleteStrategy as apiDeleteStrategy, getHealth, getToken, listStrategies,
+  me as apiMe, AUTH_EXPIRED_EVENT, type HealthInfo, type UserPublic,
 } from "./api";
 import { useConversations } from "./hooks/useConversations";
 import { ConfigProvider } from "./config";
@@ -62,21 +62,7 @@ function MainApp({ user }: { user: UserPublic }) {
 
   /* ----- 策略操作（全部走后端，契约 §3.2） ----- */
 
-  /** 新建策略（草稿）：后端补全字段并归一化因子权重 */
-  const addStrategy = async (input: NewStrategyInput): Promise<Strategy> => {
-    const s = await createStrategy(input);
-    setStrategies(prev => [s, ...prev]);
-    return s;
-  };
-
-  /** 保存因子权重 = 后端自动重新回测（保存与回测是同一动作） */
-  const saveWeights = async (id: string, factors: NewStrategyInput["factors"]): Promise<Strategy> => {
-    const s = await updateStrategy(id, { factors });
-    updateStrategyState(id, s);
-    return s;
-  };
-
-  /** 重新回测 */
+  /** 重新回测（卡片保存的策略按可复现配置重跑真引擎；旧版草稿由后端 400 提示） */
   const rebacktest = async (id: string): Promise<Strategy> => {
     const s = await apiBacktest(id);
     updateStrategyState(id, s);
@@ -88,28 +74,9 @@ function MainApp({ user }: { user: UserPublic }) {
     setStrategies(prev => prev.filter(s => s.id !== id));
   };
 
-  /* 对话报告卡 → 保存为策略：先建草稿，再让后端按该配置出正式回测报告 */
-  const saveStrategyFromCard = async (card: ReportCard) => {
-    const name = card.title.replace(/\s*·\s*(回测报告|策略框架|参考框架)$/, "");
-    try {
-      const draft = await createStrategy({
-        name,
-        universe: card.universe,
-        rebalance: card.rebalance,
-        benchmark: card.benchName,
-        factors: card.factors.map(f => ({ ...f })),
-      });
-      const saved = draft.metrics ? draft : await apiBacktest(draft.id);
-      setStrategies(prev => [saved, ...prev]);
-      if (card.id) setSavedCardIds(prev => [...prev, card.id!]);
-      notify("策略已保存，可在「我的策略」中查看");
-    } catch (e) {
-      notify(e instanceof ApiError ? e.message : "保存策略失败");
-    }
-  };
-
-  /* 回测卡片（TOOL-C07）→ 保存为策略（API-27）：服务端按卡片 config 重跑等权真引擎，
-     数字与卡片一致；成功后卡片进"已保存 ✓"态 */
+  /* 回测卡片（TOOL-C07）→ 保存为策略（API-27）：服务端按卡片 config 重跑真引擎，
+     数字与卡片一致；成功后卡片进"已保存 ✓"态。
+     策略唯一的出生地是对话——「新建策略」入口也已改为跳转对话（goChat）。 */
   const saveBacktestCard = async (card: BacktestCard): Promise<void> => {
     if (!card.config) return;
     try {
@@ -120,6 +87,13 @@ function MainApp({ user }: { user: UserPublic }) {
     } catch (e) {
       notify(e instanceof ApiError ? e.message : "保存策略失败");
     }
+  };
+
+  /* 「去对话创建」：切到对话页并预填输入框（草稿在消费前置空，切页重挂载后由 ChatPage 灌入） */
+  const [chatDraft, setChatDraft] = useState<string | null>(null);
+  const goChat = (prefill?: string) => {
+    setChatDraft(prefill ?? null);
+    setPage("chat");
   };
 
   const navItems: { key: Page; label: string; icon: ReactNode }[] = [
@@ -193,9 +167,10 @@ function MainApp({ user }: { user: UserPublic }) {
               onClear={conv.clearConversation}
               onSubmit={conv.submit}
               onStop={conv.stop}
-              onSaveStrategy={saveStrategyFromCard}
               onSaveBacktest={saveBacktestCard}
               onGotoStrategies={() => setPage("strategies")}
+              draftInput={chatDraft}
+              onDraftConsumed={() => setChatDraft(null)}
             />
           )}
           {page === "strategies" && (
@@ -203,8 +178,7 @@ function MainApp({ user }: { user: UserPublic }) {
               strategies={strategies}
               loading={strategiesLoading}
               notify={notify}
-              onAdd={addStrategy}
-              onSaveWeights={saveWeights}
+              onGoChat={goChat}
               onRebacktest={rebacktest}
               onDelete={id => deleteStrategyById(id).then(() => notify("策略已删除")).catch(() => {})}
             />

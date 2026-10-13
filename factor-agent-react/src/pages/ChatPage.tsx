@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { AgentCard, BacktestCard, ChatMessage, Conversation, MetricItem, ReportCard } from "../types";
+import type { AgentCard, BacktestCard, ChatMessage, Conversation, MetricItem } from "../types";
 import { CHAT_SUGGESTIONS } from "../data/mock";
 import { fmtConvDate } from "../utils/format";
 import { PerfChart } from "../components/charts";
@@ -45,10 +45,9 @@ function MetricGrid({ metrics }: { metrics: MetricItem[] }) {
   );
 }
 
-function AgentCardView({ card, saved, onSave, onSaveBacktest, onAskBacktest, onAskOptimize, onGotoStrategies }: {
+function AgentCardView({ card, saved, onSaveBacktest, onAskBacktest, onAskOptimize, onGotoStrategies }: {
   card: AgentCard;
   saved: string[];
-  onSave: (c: ReportCard) => void;
   onSaveBacktest: (c: BacktestCard) => Promise<void>;
   onAskBacktest: () => void;
   onAskOptimize: () => void;
@@ -73,14 +72,8 @@ function AgentCardView({ card, saved, onSave, onSaveBacktest, onAskBacktest, onA
       </>
     );
   } else if (card.type === "report") {
-    actions = (
-      <>
-        <button className="btn btn-primary btn-sm" data-act="save-strategy" disabled={isSaved} onClick={() => onSave(card)}>
-          {isSaved ? "已保存 ✓" : "保存为我的策略"}
-        </button>
-        <button className="btn btn-ghost btn-sm" data-act="ask-optimize" onClick={onAskOptimize}>请求优化建议</button>
-      </>
-    );
+    /* 历史报告卡只展示：草稿保存链已下线，策略统一由回测卡片（带可复现配置）保存 */
+    actions = <button className="btn btn-ghost btn-sm" data-act="ask-optimize" onClick={onAskOptimize}>请求优化建议</button>;
   } else {
     actions = <button className="btn btn-ghost btn-sm" data-act="ask-backtest" onClick={onAskBacktest}>帮我回测这个结果</button>;
   }
@@ -199,11 +192,10 @@ function AgentCardView({ card, saved, onSave, onSaveBacktest, onAskBacktest, onA
 
 /* ----- 消息 ----- */
 
-function MessageRow({ m, userInitial, saved, onSave, onSaveBacktest, onAskBacktest, onAskOptimize, onGotoStrategies }: {
+function MessageRow({ m, userInitial, saved, onSaveBacktest, onAskBacktest, onAskOptimize, onGotoStrategies }: {
   m: ChatMessage;
   userInitial: string;
   saved: string[];
-  onSave: (c: ReportCard) => void;
   onSaveBacktest: (c: BacktestCard) => Promise<void>;
   onAskBacktest: () => void;
   onAskOptimize: () => void;
@@ -222,7 +214,6 @@ function MessageRow({ m, userInitial, saved, onSave, onSaveBacktest, onAskBackte
           <AgentCardView
             card={m.card}
             saved={saved}
-            onSave={onSave}
             onSaveBacktest={onSaveBacktest}
             onAskBacktest={onAskBacktest}
             onAskOptimize={onAskOptimize}
@@ -276,14 +267,17 @@ export function ChatPage(props: {
   onSubmit: (text: string) => void;
   /** 停止当前会话的流式生成（消息已送达后端） */
   onStop: (convId: string) => void;
-  onSaveStrategy: (c: ReportCard) => void;
   /** API-27：把 TOOL-C07 回测卡片保存为策略（服务端重跑真引擎） */
   onSaveBacktest: (card: BacktestCard) => Promise<void>;
   onGotoStrategies: () => void;
+  /** 「去对话创建」预填输入框的内容（消费后回调置空，防重复灌入） */
+  draftInput?: string | null;
+  onDraftConsumed?: () => void;
 }) {
   const {
     conversations, currentId, typingId, live, loading, savedCardIds, userNickname,
-    onCreate, onSwitch, onDelete, onClear, onSubmit, onStop, onSaveStrategy, onSaveBacktest, onGotoStrategies,
+    onCreate, onSwitch, onDelete, onClear, onSubmit, onStop, onSaveBacktest, onGotoStrategies,
+    draftInput, onDraftConsumed,
   } = props;
   const current = conversations.find(c => c.id === currentId) ?? conversations[0];
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -374,6 +368,21 @@ export function ChatPage(props: {
   };
   const resetHeight = (el: HTMLTextAreaElement) => { el.style.height = "auto"; };
 
+  /* 「去对话创建」等入口的预填草稿：灌入输入框并聚焦；会话未就绪（无输入框）时保留，
+     current 就绪后依赖变化重触发补灌。消费后回调置空，避免切会话/重渲染重复灌入 */
+  const convReady = current != null;
+  useEffect(() => {
+    if (!draftInput || !convReady) return;
+    const el = inputRef.current;
+    if (!el) return;
+    el.value = draftInput;
+    autoResize();
+    el.focus();
+    el.setSelectionRange(draftInput.length, draftInput.length);
+    onDraftConsumed?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [draftInput, convReady]);
+
   const confirmAction = () => {
     if (!confirm || !current) return;
     if (confirm.kind === "delete") onDelete(current.id);
@@ -444,7 +453,6 @@ export function ChatPage(props: {
           <div className="chat-body-inner">
             {current.messages.map((m, i) => (
               <MessageRow key={i} m={m} userInitial={userInitial} saved={savedCardIds}
-                onSave={onSaveStrategy}
                 onSaveBacktest={onSaveBacktest}
                 onAskBacktest={() => onSubmit("帮我回测上面这个策略")}
                 onAskOptimize={() => onSubmit("请求优化建议")}
