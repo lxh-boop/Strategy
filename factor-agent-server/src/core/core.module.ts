@@ -1,6 +1,5 @@
 import { Global, Module } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { BacktestService } from './backtest.service';
 import { FactorDataService } from './factor-data.service';
 import { ScreenService } from './screen.service';
 import { StoreService } from './store.service';
@@ -10,7 +9,6 @@ import { MemoryStoreService } from './implementations/memory-store.service';
 import { MemoryUserStoreService } from './implementations/memory-user-store.service';
 import { MysqlFactorDataService } from './implementations/mysql-factor-data.service';
 import { MysqlUserStoreService } from './implementations/mysql-user-store.service';
-import { MockBacktestService } from './implementations/mock-backtest.service';
 import { MockScreenService } from './implementations/mock-screen.service';
 import { StrategyBacktestServiceImpl } from './implementations/strategy-backtest.service.impl';
 
@@ -19,7 +17,6 @@ import { StrategyBacktestServiceImpl } from './implementations/strategy-backtest
  *   存储   StoreService   → MemoryStoreService（内存 + 种子测试样例，公共配置数据）
  *   用户库 UserStoreService → MysqlUserStoreService（USER_DB_HOST 已配置时）
  *                           / MemoryUserStoreService（未配置时开发兜底）
- *   回测   BacktestService → MockBacktestService（随机数据，确定性可复现）
  *   筛选   ScreenService   → MockScreenService（演示股票池）
  *   因子取数 FactorDataService → MysqlFactorDataService（MySQL herms_data 库）
  *   策略回测 StrategyBacktestService → StrategyBacktestServiceImpl（日频事件内核，经 FactorDataService 取数）
@@ -36,11 +33,10 @@ import { StrategyBacktestServiceImpl } from './implementations/strategy-backtest
         config.get('userDb.host') ? new MysqlUserStoreService(config) : new MemoryUserStoreService(),
       inject: [ConfigService],
     },
-    { provide: BacktestService, useClass: MockBacktestService },
     { provide: ScreenService, useClass: MockScreenService },
     { provide: FactorDataService, useClass: MysqlFactorDataService },
     { provide: StrategyBacktestService, useClass: StrategyBacktestServiceImpl },
   ],
-  exports: [StoreService, UserStoreService, BacktestService, ScreenService, FactorDataService, StrategyBacktestService],
+  exports: [StoreService, UserStoreService, ScreenService, FactorDataService, StrategyBacktestService],
 })
 export class CoreModule {}

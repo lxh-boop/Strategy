@@ -1,15 +1,10 @@
-import { Injectable } from '@nestjs/common';
-import { FactorWeight, Holding, MetricItem, RawMetrics } from '../types';
+import { FactorWeight, MetricItem, RawMetrics } from '../types';
 
 /* ==========================================================
-   回测接口（契约层）—— 定义"回测能做什么"，不关心净值怎么算。
-   实现：implementations/mock-backtest.service.ts（种子伪随机模拟引擎）
+   回测共享工具 —— 策略回测引擎（strategy-backtest）与策略库共用的纯函数。
+   历史上的 mock 回测引擎已下线：策略的创建/回测统一收口到
+   对话 → StrategyBacktestService（日频事件内核，真实因子库数据）。
    ========================================================== */
-
-/** 净值曲线 → 模拟基准曲线（与前端 mkBench 相同参数） */
-export function mkBench(curve: number[], beta = 0.45, wobble = 1.8): number[] {
-  return curve.map((v, i) => +(100 + (v - 100) * beta + Math.sin(i / 4) * wobble).toFixed(1));
-}
 
 /** 最大回撤 %（负数），与前端 maxDrawdownPct 一致 */
 export function maxDrawdownPct(curve: number[]): number {
@@ -48,30 +43,4 @@ export function toMetricItems(m: RawMetrics): MetricItem[] {
     { label: '夏普比率', value: m.sharpe.toFixed(2) },
     { label: '胜率', value: m.winRate.toFixed(1) + '%' },
   ];
-}
-
-export interface BacktestInput {
-  /** 确定性种子来源：策略配置或会话上下文的任意稳定字符串 */
-  seedKey: string;
-  factors: FactorWeight[];
-  universe: string;
-  rebalance: string;
-  /** 持仓只数（Top K 的演示口径），默认 10 */
-  holdingsCount?: number;
-}
-
-export interface BacktestOutput {
-  curve: number[];
-  benchCurve: number[];
-  metrics: RawMetrics;
-  holdings: Holding[];
-}
-
-/**
- * 回测接口：输入策略配置，输出净值曲线 / 绩效指标 / 持仓。
- * 契约口径：曲线起点固定 100；百分比是 14.6（14.6%）不是 0.146。
- */
-@Injectable()
-export abstract class BacktestService {
-  abstract runBacktest(input: BacktestInput): BacktestOutput;
 }

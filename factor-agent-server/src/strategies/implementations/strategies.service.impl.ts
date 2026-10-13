@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { ApiException } from '../../common/api.exception';
-import { normalizeWeights, BacktestService } from '../../core/backtest.service';
+import { normalizeWeights } from '../../core/backtest.service';
 import {
   BENCHMARKS,
   BenchmarkKey,
@@ -9,26 +9,20 @@ import {
   StrategyBacktestInput,
   StrategyBacktestService,
 } from '../../core/strategy-backtest.service';
-import { todayStr, CURVE_FLAT } from '../../core/store.service';
+import { todayStr } from '../../core/store.service';
 import { UserStoreService } from '../../core/user-store.service';
 import { BacktestRunConfig, FactorWeight, Strategy, StrategyRunConfig } from '../../types';
 import { BacktestParamsDto, CreateFromBacktestDto, CreateStrategyDto, UpdateStrategyDto } from '../dto';
 import { StrategiesService } from '../strategies.service';
 
 /* ==========================================================
-   策略业务实现：草稿创建、保存=归一化+自动重新回测（API-10 语义）、报告详情组装
+   策略业务实现：策略唯一的出生地是对话（回测卡片 API-27 保存，带可复现配置）
    M13：数据经 UserStoreService 按 userId 隔离（userId 来自 JWT，不信任入参）
    回测统一走策略回测引擎（日频事件内核）：
    - 新卡片 config（StrategyRunConfig）直接重跑；
-   - 历史等权卡片 config（BacktestRunConfig）经 legacyConfigToInput 适配后重跑。
+   - 历史等权卡片 config（BacktestRunConfig）经 legacyConfigToInput 适配后重跑；
+   - 无 backtestConfig 的旧版草稿为历史演示数据：仅支持查看（重跑/改配置均 400）。
    ========================================================== */
-
-/** 股票池 → 默认业绩基准 */
-const UNIVERSE_BENCH: [string, string][] = [
-  ['中证1000', '中证1000指数'],
-  ['中证800', '中证800成长'],
-  ['沪深300', '沪深300指数'],
-];
 
 /** 旧等权配置的频率标签（展示用；新配置直接按 rebalanceIntervalDays 展示） */
 const LEGACY_FREQUENCY_LABELS: Record<string, string> = {
@@ -41,11 +35,6 @@ const LEGACY_FREQUENCY_LABELS: Record<string, string> = {
   annual: '每年',
   custom: '自定义',
 };
-
-function defaultBenchmark(universe: string): string {
-  const hit = UNIVERSE_BENCH.find(([key]) => universe.includes(key));
-  return hit ? hit[1] : '沪深300指数';
-}
 
 /** 卡片 config → 引擎入参：新 StrategyRunConfig 直接用；旧 BacktestRunConfig 走适配 */
 function toStrategyInput(config: BacktestRunConfig | StrategyRunConfig): StrategyBacktestInput {
@@ -86,7 +75,6 @@ function factorWeights(config: BacktestRunConfig | StrategyRunConfig): FactorWei
 export class StrategiesServiceImpl extends StrategiesService {
   constructor(
     private readonly users: UserStoreService,
-    private readonly backtestEngine: BacktestService,
     private readonly strategyBacktest: StrategyBacktestService,
   ) {
     super();
@@ -96,24 +84,13 @@ export class StrategiesServiceImpl extends StrategiesService {
     return this.users.listStrategies(userId);
   }
 
-  async create(userId: number, dto: CreateStrategyDto): Promise<Strategy> {
-    const universe = dto.universe ?? '沪深300 + 中证500';
-    const strategy: Strategy = {
-      id: 's' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
-      name: dto.name,
-      status: 'draft',
-      universe,
-      rebalance: dto.rebalance ?? '每月调仓',
-      benchmark: dto.benchmark ?? defaultBenchmark(universe),
-      updatedAt: todayStr(),
-      factors: this.normalizeOrThrow(dto.factors),
-      metrics: null,
-      curve: CURVE_FLAT,
-      benchCurve: CURVE_FLAT,
-      holdings: [],
-    };
-    await this.users.saveStrategy(userId, strategy);
-    return strategy;
+  /** 草稿创建已下线：策略唯一的出生地是对话——完成回测后经 API-27 保存（带可复现配置） */
+  async create(_userId: number, _dto: CreateStrategyDto): Promise<Strategy> {
+    throw new ApiException(
+      'INVALID_ARGUMENT',
+      400,
+      '策略请在对话中创建：与智能体完成回测后，在回测卡片上点「保存为我的策略」',
+    );
   }
 
   /** API-27：由回测卡片配置创建策略——服务端按同一配置重跑策略回测真引擎，
@@ -151,24 +128,25 @@ export class StrategiesServiceImpl extends StrategiesService {
     return strategy;
   }
 
-  /** 更新配置并自动重新回测（契约：保存 = 重新回测，同一动作） */
+  /** 更新配置并自动重新回测（契约：保存 = 重新回测，同一动作）。
+   *  旧版草稿（无 backtestConfig）仅支持查看：任何更新都 400 打回。 */
   async update(userId: number, id: string, dto: UpdateStrategyDto): Promise<Strategy> {
     const strategy = await this.getOrThrow(userId, id);
-    if (strategy.backtestConfig) {
-      const cfg = dto.factors !== undefined || dto.universe !== undefined ||
-        dto.rebalance !== undefined || dto.benchmark !== undefined;
-      if (cfg) {
-        throw new ApiException(
-          'INVALID_ARGUMENT', 400,
-          '该策略由回测卡片生成（因子等权合成，权重不可调）；如需调整因子请在对话中重新回测后再保存',
-        );
-      }
+    if (!strategy.backtestConfig) {
+      throw new ApiException(
+        'INVALID_ARGUMENT', 400,
+        '旧版草稿策略仅支持查看，请在对话中重新创建策略',
+      );
+    }
+    const cfg = dto.factors !== undefined || dto.universe !== undefined ||
+      dto.rebalance !== undefined || dto.benchmark !== undefined;
+    if (cfg) {
+      throw new ApiException(
+        'INVALID_ARGUMENT', 400,
+        '该策略由回测卡片生成（因子等权合成，权重不可调）；如需调整因子请在对话中重新回测后再保存',
+      );
     }
     if (dto.name !== undefined) strategy.name = dto.name;
-    if (dto.universe !== undefined) strategy.universe = dto.universe;
-    if (dto.rebalance !== undefined) strategy.rebalance = dto.rebalance;
-    if (dto.benchmark !== undefined) strategy.benchmark = dto.benchmark;
-    if (dto.factors !== undefined) strategy.factors = this.normalizeOrThrow(dto.factors);
     return this.runBacktest(userId, strategy, {});
   }
 
@@ -188,45 +166,24 @@ export class StrategiesServiceImpl extends StrategiesService {
     return { metrics: s.metrics, curve: s.curve, benchCurve: s.benchCurve, holdings: s.holdings };
   }
 
-  /** 执行回测并写回策略（草稿回测完成后状态变为 done，其余保持原状态） */
-  private async runBacktest(userId: number, strategy: Strategy, params: BacktestParamsDto): Promise<Strategy> {
-    /* 由回测卡片生成的策略：重跑策略回测真引擎（按存储的可复现配置），不走 mock */
-    if (strategy.backtestConfig) {
-      const out = await this.strategyBacktest.runStrategyBacktest(toStrategyInput(strategy.backtestConfig));
-      strategy.curve = out.card.curve;
-      strategy.benchCurve = out.card.benchCurve;
-      strategy.dates = out.card.dates;
-      strategy.metrics = out.metrics;
-      if (strategy.status === 'draft') strategy.status = 'done';
-      strategy.updatedAt = todayStr();
-      await this.users.saveStrategy(userId, strategy);
-      return strategy;
+  /** 执行回测并写回策略。无 backtestConfig 的旧版草稿是历史演示数据：不支持重跑。 */
+  private async runBacktest(userId: number, strategy: Strategy, _params: BacktestParamsDto): Promise<Strategy> {
+    if (!strategy.backtestConfig) {
+      throw new ApiException(
+        'INVALID_ARGUMENT', 400,
+        '旧版策略不支持重跑回测，请在对话中重新创建策略',
+      );
     }
-    const bt = this.backtestEngine.runBacktest({
-      seedKey: `${strategy.id}|${strategy.universe}|${strategy.rebalance}|${JSON.stringify(strategy.factors)}`,
-      factors: strategy.factors,
-      universe: strategy.universe,
-      rebalance: strategy.rebalance,
-      holdingsCount: params.topK ? Math.min(params.topK, 10) : 10,
-    });
-
-    strategy.curve = bt.curve;
-    strategy.benchCurve = bt.benchCurve;
-    strategy.metrics = bt.metrics;
-    strategy.holdings = bt.holdings;
+    /* 由回测卡片生成的策略：重跑策略回测真引擎（按存储的可复现配置） */
+    const out = await this.strategyBacktest.runStrategyBacktest(toStrategyInput(strategy.backtestConfig));
+    strategy.curve = out.card.curve;
+    strategy.benchCurve = out.card.benchCurve;
+    strategy.dates = out.card.dates;
+    strategy.metrics = out.metrics;
     if (strategy.status === 'draft') strategy.status = 'done';
     strategy.updatedAt = todayStr();
-
     await this.users.saveStrategy(userId, strategy);
     return strategy;
-  }
-
-  private normalizeOrThrow(factors: FactorWeight[]): FactorWeight[] {
-    const normalized = normalizeWeights(factors);
-    if (normalized.every((f) => f.weight === 0)) {
-      throw new ApiException('INVALID_ARGUMENT', 400, '因子权重合计为 0，属非法输入');
-    }
-    return normalized;
   }
 
   private async getOrThrow(userId: number, id: string): Promise<Strategy> {
