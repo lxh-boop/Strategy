@@ -8,7 +8,7 @@ import { IDENT_RE } from '../../src/core/factor-data.service';
 
 describe('factor-schema（SQL 字段字典解析）', () => {
   describe('listKnownTables（表名白名单）', () => {
-    it('返回 tables.md 中登记的十五张表（6 因子/行情表 + 5 行业主表 + 4 择时表）', () => {
+    it('返回 tables.md 中登记的十一张表（6 因子/行情表 + 5 行业主表）', () => {
       expect(listKnownTables()).toEqual([
         'equ_factor_cf',
         'equ_factor_derive',
@@ -21,11 +21,6 @@ describe('factor-schema（SQL 字段字典解析）', () => {
         'md_type',
         'md_type_description',
         'md_company_status',
-        // 择时相关表（2026-10-15 自通联字典 V1.6 登记）
-        'mkt_idxd_eval',
-        'mkt_idx_eval_ashare',
-        'mkt_idx_mf_new',
-        'fst_total',
       ]);
     });
   });
