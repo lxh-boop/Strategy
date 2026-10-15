@@ -38,6 +38,9 @@
   color-scheme: dark;   /* 原生表单控件按暗色渲染（输入文字/下拉/日历等） */
 }
 
+/* 文字选中高亮：反色（行情黄底×深字），深画布/红气泡等任何底色下选中文本都清晰可辨 */
+::selection { background: var(--warn); color: #0a0f1a; }
+
 /* 键盘焦点：Linear focus ring = primary-focus 2px 半透明 */
 :focus-visible { outline: 2px solid rgba(224, 72, 72, .5); outline-offset: 1px; }
 .sidebar :focus-visible { outline-color: rgba(255, 109, 109, .55); }
