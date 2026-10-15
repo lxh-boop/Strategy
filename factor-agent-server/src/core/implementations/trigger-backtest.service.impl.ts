@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ApiException } from '../../common/api.exception';
 import {
   aggregateNav,
+  aggregatePeriodRows,
   annualizeTurnover,
   applyEntryFilters,
   BENCHMARKS,
@@ -158,8 +159,18 @@ export class TriggerBacktestServiceImpl extends TriggerBacktestService {
     // ④ 主循环（单遍逐日：执行 → 结算 → 信号），行情懒加载、截面逐日取
     const loop = await this.runMainLoop(p, tradeDates, sortFactors.factors, benchReturns, exposureByDay, onProgress);
 
-    // ⑤ 聚合 → 卡片 + 摘要
+    // ⑤ 聚合 → 卡片 + 摘要（按周切期：每 5 个交易日一期）
     const aggregate = aggregateNav(loop.equities, benchReturns, tradeDates);
+    const periodRows = aggregatePeriodRows({
+      tradeDates,
+      equities: loop.equities,
+      benchReturns,
+      turnoverByDay: loop.turnoverByDay,
+      trades: loop.trades,
+      periodStarts: tradeDates.map((_, i) => i).filter((i) => i % 5 === 0),
+      exposureByDay,
+      initialCapital: p.initialCapital,
+    });
     aggregate.annualTurnoverPct = annualizeTurnover(loop.turnoverByDay, loop.equities);
     aggregate.metrics.turnover = aggregate.annualTurnoverPct;
     const timingStats = timing
@@ -169,7 +180,7 @@ export class TriggerBacktestServiceImpl extends TriggerBacktestService {
           missedRallies: missedRallies(benchReturns, tradeDates, exposureByDay),
         }
       : null;
-    const card = this.buildCard(p, aggregate, loop, tradeDates, bench, sortFactors.factors, timingStats);
+    const card = this.buildCard(p, aggregate, loop, tradeDates, bench, sortFactors.factors, periodRows, timingStats);
     const summary = this.buildSummary(p, aggregate, loop, bench, sortFactors.factors, timing, timingStats);
     this.logger.log(
       `触发回测 ${p.startDate}~${p.endDate} 偏离带${p.positionDeviatePct}%: 年化=${summary.年化收益} 回撤=${summary.最大回撤} 交易 ${loop.trades.length} 笔`,
@@ -474,6 +485,7 @@ export class TriggerBacktestServiceImpl extends TriggerBacktestService {
     tradeDates: number[],
     bench: { ticker: string; name: string },
     sortFactors: StrategySortFactor[],
+    periodRows: ReturnType<typeof aggregatePeriodRows>,
     timingStats: { positionDist: { label: string; days: number }[]; holdingDaysPct: number; missedRallies: { date: number; pct: number; exposure: number }[] } | null,
   ) {
     const timing = p.timingOverlay ?? null;
@@ -532,6 +544,7 @@ export class TriggerBacktestServiceImpl extends TriggerBacktestService {
       dates: tradeDates,
       trades: loop.trades.slice(-50),
       monthly: agg.monthlyReturns,
+      periods: periodRows.length ? periodRows : undefined,
       ...(timingStats
         ? {
             positionDist: timingStats.positionDist,

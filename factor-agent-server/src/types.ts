@@ -2,6 +2,7 @@
    共享类型 — 与前端 factor-agent-react/src/types.ts 保持一致
    ========================================================== */
 
+import type { StrategyPeriodRow } from './core/strategy-backtest.service';
 import type { StrategyTimingOverlay } from './core/timing';
 
 export type Role = 'user' | 'agent';
@@ -143,6 +144,8 @@ export interface BacktestCard extends CardBase {
   holdingDaysPct?: number;
   /** 踏空归因：基准单日涨幅 Top10 中暴露不足的交易日；未择时缺省 */
   missedRallies?: { date: number; pct: number; exposure: number }[];
+  /** 历史持仓详情（按调仓期聚合，对标果仁同名面板） */
+  periods?: { seq: number; startDate: number; endDate: number; positionPct: number; stockCount: number; buyCount: number; sellCount: number; turnoverPct: number; periodReturnPct: number; benchReturnPct: number; excessPct: number; cumulativeValue: number }[];
 }
 
 export interface ReportCard extends CardBase {

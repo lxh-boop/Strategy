@@ -120,6 +120,43 @@ function AgentCardView({ card, saved, onSaveBacktest, onAskBacktest, onAskOptimi
             </div>
           </div>
         )}
+        {/* 历史持仓详情：按调仓期聚合（对标果仁同名面板） */}
+        {card.periods && card.periods.length > 0 && (
+          <div style={{ marginTop: 12 }}>
+            <div className="btp-title">历史持仓详情</div>
+            <div className="trade-scroll">
+              <table className="mini-table">
+                <thead>
+                  <tr>
+                    <th>期次</th><th>开始</th><th>结束</th>
+                    <th className="num">仓位%</th><th className="num">只数</th>
+                    <th className="num">买入</th><th className="num">卖出</th>
+                    <th className="num">换手%</th><th className="num">本期%</th>
+                    <th className="num">基准%</th><th className="num">超额%</th><th className="num">千元净值</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {card.periods.map(p => (
+                    <tr key={p.seq}>
+                      <td>{p.seq}</td>
+                      <td>{String(p.startDate).replace(/^(\d{4})(\d{2})(\d{2})$/, "$1-$2-$3")}</td>
+                      <td>{String(p.endDate).replace(/^(\d{4})(\d{2})(\d{2})$/, "$1-$2-$3")}</td>
+                      <td className="num">{p.positionPct}%</td>
+                      <td className="num">{p.stockCount}</td>
+                      <td className="num">{p.buyCount}</td>
+                      <td className="num">{p.sellCount}</td>
+                      <td className="num">{p.turnoverPct}%</td>
+                      <td className={`num ${p.periodReturnPct >= 0 ? "up" : "down"}`}>{p.periodReturnPct > 0 ? "+" : ""}{p.periodReturnPct}%</td>
+                      <td className={`num ${p.benchReturnPct >= 0 ? "up" : "down"}`}>{p.benchReturnPct > 0 ? "+" : ""}{p.benchReturnPct}%</td>
+                      <td className={`num ${p.excessPct >= 0 ? "up" : "down"}`}>{p.excessPct > 0 ? "+" : ""}{p.excessPct}%</td>
+                      <td className="num">{p.cumulativeValue}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
         {card.trades && card.trades.length > 0 && (
           <div style={{ marginTop: 12 }}>
             <div className="btp-title">交易明细（最近 {card.trades.length} 笔）</div>

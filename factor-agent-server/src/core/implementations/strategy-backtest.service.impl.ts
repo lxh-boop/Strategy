@@ -3,6 +3,7 @@ import { forwardRef, Inject, Injectable, Logger, Optional } from '@nestjs/common
 import { ApiException } from '../../common/api.exception';
 import {
   aggregateNav,
+  aggregatePeriodRows,
   annualizeTurnover,
   applyEntryFilters,
   assertStrategyInput,
@@ -333,7 +334,17 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
           missedRallies: missedRallies(benchReturns, tradeDates, exposureByDay),
         }
       : null;
-    const card = this.buildCard(p, aggregate, loop, tradeDates, coverage, bench, sortFactors, rebalanceIdx.length, timing, timingStats);
+    const periodRows = aggregatePeriodRows({
+      tradeDates,
+      equities: loop.equities,
+      benchReturns,
+      turnoverByDay: loop.turnoverByDay,
+      trades: loop.trades,
+      periodStarts: rebalanceIdx,
+      exposureByDay,
+      initialCapital: p.initialCapital,
+    });
+    const card = this.buildCard(p, aggregate, loop, tradeDates, coverage, bench, sortFactors, rebalanceIdx.length, periodRows, timing, timingStats);
     const summary = this.buildSummary(p, aggregate, loop, bench, rebalanceIdx.length, sortFactors, timing, timingStats);
     this.logger.log(
       `策略回测 ${p.startDate}~${p.endDate} 每${p.rebalanceIntervalDays}交易日: ` +
@@ -670,6 +681,7 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
     bench: { ticker: string; name: string },
     sortFactors: { factors: StrategySortFactor[]; usedDefault: boolean },
     rebalanceCount: number,
+    periodRows: ReturnType<typeof aggregatePeriodRows>,
     timing: StrategyTimingOverlay | null,
     timingStats: { positionDist: { label: string; days: number }[]; holdingDaysPct: number; missedRallies: { date: number; pct: number; exposure: number }[] } | null,
   ) {
