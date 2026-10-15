@@ -9,6 +9,8 @@ import { MemoryUserStoreService } from './implementations/memory-user-store.serv
 import { MysqlFactorDataService } from './implementations/mysql-factor-data.service';
 import { MysqlUserStoreService } from './implementations/mysql-user-store.service';
 import { StrategyBacktestServiceImpl } from './implementations/strategy-backtest.service.impl';
+import { TriggerBacktestService } from './trigger-backtest.service';
+import { TriggerBacktestServiceImpl } from './implementations/trigger-backtest.service.impl';
 
 /**
  * 领域共享层：接口（token）→ 实现类 的装配点。
@@ -32,7 +34,8 @@ import { StrategyBacktestServiceImpl } from './implementations/strategy-backtest
     },
     { provide: FactorDataService, useClass: MysqlFactorDataService },
     { provide: StrategyBacktestService, useClass: StrategyBacktestServiceImpl },
+    { provide: TriggerBacktestService, useClass: TriggerBacktestServiceImpl },
   ],
-  exports: [StoreService, UserStoreService, FactorDataService, StrategyBacktestService],
+  exports: [StoreService, UserStoreService, FactorDataService, StrategyBacktestService, TriggerBacktestService],
 })
 export class CoreModule {}

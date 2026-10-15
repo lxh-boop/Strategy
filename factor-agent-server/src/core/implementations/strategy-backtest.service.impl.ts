@@ -1,4 +1,5 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { forwardRef, Inject, Injectable, Logger, Optional } from '@nestjs/common';
+
 import { ApiException } from '../../common/api.exception';
 import {
   aggregateNav,
@@ -6,6 +7,7 @@ import {
   applyEntryFilters,
   assertStrategyInput,
   BENCHMARKS,
+  collectAllRefs,
   collectFactorRefs,
   DEFAULT_MOMENTUM_FACTOR,
   describeFilters,
@@ -31,10 +33,12 @@ import {
   toDashDate,
   toStrategyMetricItems,
 } from '../strategy-backtest.service';
-import { FactorDataService, QuoteRow, TradeDateCoverage } from '../factor-data.service';
-import { AgentProgressSink } from '../../types';
-import { loadTableFields, listKnownTables } from '../factor-schema';
+ import { FactorDataService, QuoteRow, TradeDateCoverage } from '../factor-data.service';
+ import { AgentProgressSink } from '../../types';
+ import { loadTableFields, listKnownTables } from '../factor-schema';
+import { TriggerBacktestService } from '../trigger-backtest.service';
 import {
+  collectTimingRefs,
   describeTimingOverlay,
   exposureOfRegime,
   holdingDaysPct,
@@ -106,7 +110,13 @@ type SellFieldData = Map<string, Map<string, Map<number, number>> | Map<string, 
 export class StrategyBacktestServiceImpl extends StrategyBacktestService {
   private readonly logger = new Logger('StrategyBacktest');
 
-  constructor(private readonly factorData: FactorDataService) {
+  constructor(
+    private readonly factorData: FactorDataService,
+    /** 模型 Ⅱ 触发引擎（rebalanceIntervalDays=0 路由目标）；smoke 脚本直构时可不装配 */
+    @Optional()
+    @Inject(forwardRef(() => TriggerBacktestService))
+    private readonly triggerEngine?: TriggerBacktestService,
+  ) {
     super();
   }
 
@@ -120,7 +130,7 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
    *  模型在用户确认前就拿到"可用区间 xxx~yyy"自纠参数，用户不会白确认一轮 */
   async checkRange(input: StrategyBacktestInput): Promise<TradeDateCoverage> {
     const p = assertStrategyInput(input);
-    const refs = collectFactorRefs(p);
+    const refs = collectAllRefs(p);
     this.assertWhitelist(refs);
     const calendarTable = refs[0]?.table ?? DEFAULT_MOMENTUM_FACTOR.table;
     const coverage = await this.factorData.readTradeDates(calendarTable, p.startDate, p.endDate);
@@ -136,8 +146,15 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
 
   async runStrategyBacktest(input: StrategyBacktestInput, onProgress?: AgentProgressSink): Promise<StrategyBacktestOutput> {
     const p = assertStrategyInput(input);
+    // 触发模式（rebalanceIntervalDays=0）路由到模型 Ⅱ 独立引擎
+    if (p.rebalanceIntervalDays === 0) {
+      if (!this.triggerEngine) {
+        throw new ApiException('INVALID_ARGUMENT', 400, '模型 Ⅱ 触发引擎未装配（触发模式需要完整 DI 环境）');
+      }
+      return this.triggerEngine.run(p, onProgress);
+    }
     const refs = collectFactorRefs(p);
-    this.assertWhitelist(refs);
+    this.assertWhitelist([...refs, ...(p.timingOverlay ? collectTimingRefs(p.timingOverlay) : [])]);
     const sortFactors = effectiveSortFactors(p.sortFactors);
     const fieldSellRules = p.sellRules.filter((r): r is Extract<StrategySellRule, { kind: 'field' }> => r.kind === 'field');
     const rankOutBottomN: number | null = p.sellRules.some((r) => r.kind === 'rank_out')

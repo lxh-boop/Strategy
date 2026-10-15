@@ -11,6 +11,7 @@
  *   node scripts/smoke-backtest.js                                    # 默认组合（20日动量月调仓全市场 Top-10）
  *   node scripts/smoke-backtest.js REVS20 20240101 20241231 21 10
  *   node scripts/smoke-backtest.js REVS20,RSI:-1 20240101 20241231 21 10   # 双因子（RSI 值小优）
+ *   node scripts/smoke-backtest.js REVS20 20240101 20241231 0 3 20 000001.XSHE,600519.XSHG   # 触发模式：偏离带 20%、触发域 2 只
  *   node scripts/smoke-backtest.js REVS20 20240101 20241231 "" 10     # 缺调仓间隔 → 应报澄清信号
  *
  * 前置：.env 里填好 MYSQL_USER / MYSQL_PASSWORD。
@@ -20,16 +21,24 @@ require('dotenv').config({ quiet: true });
 const configuration = require('../dist/config/configuration').default;
 const { MysqlFactorDataService } = require('../dist/core/implementations/mysql-factor-data.service');
 const { StrategyBacktestServiceImpl } = require('../dist/core/implementations/strategy-backtest.service.impl');
+const { TriggerBacktestServiceImpl } = require('../dist/core/implementations/trigger-backtest.service.impl');
 
-const [fieldsArg = 'REVS20', start = '20240101', end = '20241231', interval = '21', maxPositions = '10'] =
+const [fieldsArg = 'REVS20', start = '20240101', end = '20241231', interval = '21', maxPositions = '10', deviate = '20', securityIdsArg = '', timingArg = ''] =
   process.argv.slice(2);
 
 const factorData = new MysqlFactorDataService({ getOrThrow: (key) => configuration()[key] });
-const backtest = new StrategyBacktestServiceImpl(factorData);
+const trigger = new TriggerBacktestServiceImpl(factorData);
+const backtest = new StrategyBacktestServiceImpl(factorData, trigger);
 
 const input = { startDate: start, endDate: end };
 if (interval) input.rebalanceIntervalDays = Number(interval); // 不传 → 验证"缺调仓间隔 → 澄清信号"
 if (maxPositions) input.maxPositions = Number(maxPositions);
+if (Number(interval) === 0) {
+  input.positionDeviatePct = Number(deviate);
+  input.entryFilters = String(fieldsArg).split(',').map((s) => s.trim()).filter(Boolean).map((field) => ({ table: 'equ_factor_obos', field, op: '>', value: 0 })); // 触发条件:因子值 > 0
+}
+if (securityIdsArg) input.securityIds = securityIdsArg.split(',').map((s) => s.trim()).filter(Boolean);
+if (timingArg) input.timingOverlay = JSON.parse(timingArg); // 择时 JSON:{index,rules[],enterVotes,exitVotes,bearPositionPct}
 input.sortFactors = String(fieldsArg)
   .split(',')
   .map((s) => s.trim())

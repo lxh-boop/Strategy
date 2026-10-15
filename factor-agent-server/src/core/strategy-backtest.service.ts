@@ -80,6 +80,8 @@ export interface StrategyBacktestInput {
   feeRate?: unknown;
   /** 每 N 个交易日调仓（必填，无默认值，缺失触发向用户澄清） */
   rebalanceIntervalDays?: unknown;
+  /** 触发模式（rebalanceIntervalDays=0）必填：仓位偏离带宽 %（5~50 整数） */
+  positionDeviatePct?: unknown;
   /** 0=开盘价成交（默认）/ 1=收盘价成交 */
   executionTiming?: unknown;
   /** 最大持仓数，默认 10 */
@@ -110,6 +112,8 @@ export interface NormalizedStrategyInput {
   initialCapital: number;
   feeRate: number;
   rebalanceIntervalDays: number;
+  /** 触发模式（=0）的仓位偏离带宽 %；日历模式无此字段 */
+  positionDeviatePct?: number;
   executionTiming: 0 | 1;
   maxPositions: number;
   idealPositionPct: number;
@@ -277,12 +281,31 @@ export function assertStrategyInput(raw: StrategyBacktestInput): NormalizedStrat
     });
   }
   const rebalanceIntervalDays = Number(raw.rebalanceIntervalDays);
-  if (!Number.isInteger(rebalanceIntervalDays) || rebalanceIntervalDays < REBALANCE_INTERVAL_MIN || rebalanceIntervalDays > REBALANCE_INTERVAL_MAX) {
+  if (
+    !Number.isInteger(rebalanceIntervalDays) ||
+    (rebalanceIntervalDays !== 0 && (rebalanceIntervalDays < REBALANCE_INTERVAL_MIN || rebalanceIntervalDays > REBALANCE_INTERVAL_MAX))
+  ) {
     throw new ApiException(
       'INVALID_ARGUMENT',
       400,
-      `rebalanceIntervalDays 必须是 ${REBALANCE_INTERVAL_MIN}~${REBALANCE_INTERVAL_MAX} 的整数（每隔多少个交易日调仓一次）: ${raw.rebalanceIntervalDays}`,
+      `rebalanceIntervalDays 必须是 0（触发模式，条件触发调仓）或 ${REBALANCE_INTERVAL_MIN}~${REBALANCE_INTERVAL_MAX} 的整数（每隔多少个交易日调仓一次）: ${raw.rebalanceIntervalDays}`,
     );
+  }
+
+  // 触发模式（rebalanceIntervalDays=0，模型 Ⅱ 独立引擎）：必须带仓位偏离带
+  let positionDeviatePct: number | undefined;
+  if (rebalanceIntervalDays === 0) {
+    if (raw.positionDeviatePct === undefined || raw.positionDeviatePct === null || raw.positionDeviatePct === '') {
+      throw new ApiException(
+        'INVALID_ARGUMENT',
+        400,
+        '触发模式（rebalanceIntervalDays=0）必须传 positionDeviatePct：仓位偏离带宽 %（如 20 表示持仓市值偏离目标总仓位 ±20% 时触发再平衡）',
+      );
+    }
+    positionDeviatePct = Number(raw.positionDeviatePct);
+    if (!Number.isInteger(positionDeviatePct) || positionDeviatePct < 5 || positionDeviatePct > 50) {
+      throw new ApiException('INVALID_ARGUMENT', 400, `positionDeviatePct 须为 5~50 的整数（偏离带宽 %）: ${raw.positionDeviatePct}`);
+    }
   }
 
   const executionTiming = raw.executionTiming === undefined || raw.executionTiming === null || raw.executionTiming === ''
@@ -320,6 +343,7 @@ export function assertStrategyInput(raw: StrategyBacktestInput): NormalizedStrat
     initialCapital,
     feeRate,
     rebalanceIntervalDays,
+    ...(positionDeviatePct !== undefined ? { positionDeviatePct } : {}),
     executionTiming: executionTiming as 0 | 1,
     maxPositions,
     idealPositionPct,
@@ -487,9 +511,9 @@ export interface FactorRef {
   field: string;
 }
 
-/** 归一化入参引用的全部 (table, field)：entryFilters + 有效排序因子 + field 类卖出规则 +
- *  择时条件（字段条件同构，序列按挂靠指数读取），去重保序。
- *  择时引用同时决定日历推导——纯择时策略（无选股因子）的日历源 = 择时字段表 */
+/** 归一化入参引用的全部 (table, field)：entryFilters + 有效排序因子 + field 类卖出规则，去重保序。
+ *  注意：不含择时引用——择时字段按挂靠指数走 readIndexFieldSeries 通道（键形态不同，
+ *  混进截面预取会对无 SECURITY_ID 列的指数表报错）；白名单/日历用 collectTimingRefs 单独取 */
 export function collectFactorRefs(p: NormalizedStrategyInput): FactorRef[] {
   const refs: FactorRef[] = [];
   const seen = new Set<string>();
@@ -503,7 +527,18 @@ export function collectFactorRefs(p: NormalizedStrategyInput): FactorRef[] {
   for (const f of p.entryFilters) push(f.table, f.field);
   for (const f of effectiveSortFactors(p.sortFactors).factors) push(f.table, f.field);
   for (const r of p.sellRules) if (r.kind === 'field') push(r.table, r.field);
-  if (p.timingOverlay) for (const r of collectTimingRefs(p.timingOverlay)) push(r.table, r.field);
+  return refs;
+}
+
+/** 全部引用 = 因子引用 + 择时引用（白名单校验/日历推导用；截面预取只能用 collectFactorRefs） */
+export function collectAllRefs(p: NormalizedStrategyInput): FactorRef[] {
+  const refs = collectFactorRefs(p);
+  const seen = new Set(refs.map((r) => `${r.table}.${r.field}`));
+  if (p.timingOverlay) {
+    for (const r of collectTimingRefs(p.timingOverlay)) {
+      if (!seen.has(`${r.table}.${r.field}`)) refs.push(r);
+    }
+  }
   return refs;
 }
 

@@ -11,6 +11,7 @@ import {
   assertStrategyInput,
   BENCHMARKS,
   ClarificationSignal,
+  collectAllRefs,
   collectFactorRefs,
   describeFilters,
   describeSellRules,
@@ -19,6 +20,7 @@ import {
   StrategyBacktestInput,
   StrategyBacktestService,
 } from '../../core/strategy-backtest.service';
+import { describeTimingOverlay } from '../../core/timing';
 import { FactorDataService } from '../../core/factor-data.service';
 import {
   FactorFieldInfo,
@@ -600,7 +602,7 @@ export class LangGraphAgentService extends AgentService {
         const p = assertStrategyInput(call.args as StrategyBacktestInput);
         // 白名单 + 区间快检都在 interrupt 之前：字段不存在/区间超界的提案先打回模型自纠，
         // 不让用户确认一个注定失败的提案（区间报错带可用范围，模型改参重发只需用户确认一次）
-        this.backtest.preflight(collectFactorRefs(p));
+        this.backtest.preflight(collectAllRefs(p));
         await this.backtest.checkRange(p);
         const sort = effectiveSortFactors(p.sortFactors);
         const decision = interrupt({
@@ -613,6 +615,10 @@ export class LangGraphAgentService extends AgentService {
             排序因子: describeSortFactors(sort.factors) + (sort.usedDefault ? '【默认追加】' : ''),
             过滤因子: describeFilters(p.entryFilters),
             卖出规则: describeSellRules(p.sellRules),
+            ...(p.timingOverlay ? { 择时规则: describeTimingOverlay(p.timingOverlay) } : {}),
+            ...(p.rebalanceIntervalDays === 0
+              ? { 交易模型: `条件触发（模型 Ⅱ）· 偏离带 ±${p.positionDeviatePct}%` }
+              : {}),
             '初始资金/费用': `${p.initialCapital} 元 · 单边 ${(p.feeRate * 100).toFixed(2)}%${isUserSet(call.args?.feeRate) ? '' : '（默认）'}`,
             业绩基准: `${BENCHMARKS[p.benchmark].name}${isUserSet(call.args?.benchmark) ? '' : '（默认）'}`,
           },
@@ -663,7 +669,7 @@ export class LangGraphAgentService extends AgentService {
    *  这里只做归一化复核与引擎调用，不再含任何 interrupt，节点重跑也不会重复建仓扣费 */
   private async execRunBacktest(args: StrategyBacktestInput, ctx: ToolContext): Promise<ToolOutcome> {
     const p = assertStrategyInput(args);
-    this.backtest.preflight(collectFactorRefs(p));
+    this.backtest.preflight(collectAllRefs(p));
 
     let output;
     try {
@@ -758,6 +764,14 @@ export class LangGraphAgentService extends AgentService {
         'maxPositions 与业绩基准用户没说时可用引擎默认值，但最终文案要注明"默认"；' +
         'sortFactors 缺省时引擎自动用默认 20 日动量排序（值大优），提案前请向用户说明这一点；' +
         '同一因子既做过滤又做排序时，entryFilters 与 sortFactors 两处都要传；',
+      '- 大盘择时：用户表达总仓位控制意图（如"跌破某点位就空仓""放量才满仓""熊市半仓"）时组装 timingOverlay：' +
+        '字段必须先经 list_factor_fields 确认存在（当前可用 mkt_idxd 的 CLOSE_INDEX/CHG_PCT/TURNOVER_VALUE）；' +
+        '指数没说默认上证、阈值票数没说默认全部、熊市仓位没说默认空仓（提案中注明"默认"）；' +
+        '字典暂无均线/金叉类字段，用户提出时如实告知暂不支持，引导改用点位/涨跌幅/量能条件；' +
+        '择时只影响总仓位，选股条件照常生效；',
+      '- 触发模式（模型 Ⅱ）：用户说"不按月调仓，满足条件就买""偏离 X% 再平衡"时传 rebalanceIntervalDays=0，' +
+        '必须同时传 positionDeviatePct（偏离带宽 %，没说默认 20，需注明"默认"）且预声明触发域 securityIds；' +
+        '触发模式的卖出规则不支持字段条件与排名跌出，如实告知；',
       '- run_strategy_backtest 执行前系统会请用户确认参数：收到"已取消"回执时，' +
         '结合用户反馈调整参数后重新发起（会再次请用户确认），或放弃回测直接回应用户，' +
         '不要声称回测已开始或编造回测结果；',
