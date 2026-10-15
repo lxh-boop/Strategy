@@ -87,6 +87,25 @@ function AgentCardView({ card, saved, onSaveBacktest, onAskBacktest, onAskOptimi
         <div className="agent-card-text">{card.note}</div>
         {/* 本次回测真实参数；旧卡片无 params 时回退策略配置项 */}
         <ParamsBlock items={card.params} />
+        {/* 仓位分布 + 持股占比 + 踏空归因：大盘择时启用时的新产出 */}
+        {card.positionDist && card.positionDist.length > 0 && (
+          <div style={{ marginTop: 12 }}>
+            <div className="btp-title">仓位分布（择时）</div>
+            <div className="monthly-strip">
+              {card.positionDist.map(b => (
+                <span key={b.label} className="monthly-chip">{b.label} · {b.days}日</span>
+              ))}
+              {card.holdingDaysPct !== undefined && (
+                <span className="monthly-chip">持股时间 {card.holdingDaysPct}%</span>
+              )}
+            </div>
+            {card.missedRallies && card.missedRallies.length > 0 && (
+              <div className="agent-card-text" style={{ marginTop: 6 }}>
+                踏空归因（择时期间错过的基准大涨日）：{card.missedRallies.map(m => `${m.date}（基准+${m.pct}%，仓位${m.exposure}%）`).join("、")}
+              </div>
+            )}
+          </div>
+        )}
         {/* 月度归因 + 交易明细：策略回测（日频事件内核）新产出；旧等权卡片无这两个字段 */}
         {card.monthly && card.monthly.length > 0 && (
           <div style={{ marginTop: 12 }}>
