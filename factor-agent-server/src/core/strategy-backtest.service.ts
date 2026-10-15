@@ -170,17 +170,17 @@ export function effectiveSortFactors(sortFactors: StrategySortFactor[]): {
 }
 
 /** 排序因子 → 展示串（含方向与权重，确认弹窗/卡片/摘要共用同一口径） */
-export function describeSortFactors(factors: StrategySortFactor[]): string {
+export function describeSortFactors(factors: StrategySortFactor[], sep = '；'): string {
   return factors
     .map((f) =>
       `${f.table}.${f.field}（${f.direction === 1 ? '值大优' : '值小优'}，${f.weight !== undefined ? `权重 ${f.weight}` : '等权'}）`,
     )
-    .join('；');
+    .join(sep);
 }
 
 /** 过滤规则 → 展示串 */
-export function describeFilters(filters: StrategyFilterRule[]): string {
-  return filters.length ? filters.map((f) => `${f.table}.${f.field} ${f.op} ${f.value}`).join('；') : '无';
+export function describeFilters(filters: StrategyFilterRule[], sep = '；'): string {
+  return filters.length ? filters.map((f) => `${f.table}.${f.field} ${f.op} ${f.value}`).join(sep) : '无';
 }
 
 /** 卖出规则 → 展示串 */

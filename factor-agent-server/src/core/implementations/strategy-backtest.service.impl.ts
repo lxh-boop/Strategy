@@ -716,14 +716,14 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
         },
         {
           label: '排序因子',
-          value: describeSortFactors(sortFactors.factors),
+          value: describeSortFactors(sortFactors.factors, '\n'),
           hint: sortFactors.usedDefault
             ? 'sortFactors 未传，引擎兜底追加默认 20 日动量（REVS20，值大优）'
             : '各因子截面分位数标准化（0~100）后加权合成综合分（weight 缺省等权 1/N）',
         },
         {
           label: '过滤因子',
-          value: describeFilters(p.entryFilters),
+          value: describeFilters(p.entryFilters, '\n'),
           hint: '全部满足才入选；因子值缺失视为不满足',
         },
         {
