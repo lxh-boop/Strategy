@@ -45,11 +45,10 @@ function MetricGrid({ metrics }: { metrics: MetricItem[] }) {
   );
 }
 
-function AgentCardView({ card, saved, onSaveBacktest, onAskBacktest, onAskOptimize, onGotoStrategies }: {
+function AgentCardView({ card, saved, onSaveBacktest, onAskOptimize, onGotoStrategies }: {
   card: AgentCard;
   saved: string[];
   onSaveBacktest: (c: BacktestCard) => Promise<void>;
-  onAskBacktest: () => void;
   onAskOptimize: () => void;
   onGotoStrategies: () => void;
 }) {
@@ -71,16 +70,11 @@ function AgentCardView({ card, saved, onSaveBacktest, onAskBacktest, onAskOptimi
         <button className="btn btn-ghost btn-sm" data-act="ask-optimize" onClick={onAskOptimize}>请求优化建议</button>
       </>
     );
-  } else if (card.type === "report") {
-    /* 历史报告卡只展示：草稿保存链已下线，策略统一由回测卡片（带可复现配置）保存 */
-    actions = <button className="btn btn-ghost btn-sm" data-act="ask-optimize" onClick={onAskOptimize}>请求优化建议</button>;
-  } else {
-    actions = <button className="btn btn-ghost btn-sm" data-act="ask-backtest" onClick={onAskBacktest}>帮我回测这个结果</button>;
   }
 
-  /* 卡片类型分派：backtest = 对话真引擎产物（唯一在产类型）；
-     report / stocks 两种卡的后端产出方已随演示链下线（2026-10-13），
-     以下分支仅为历史会话消息兼容保留——请勿在新链路中产出这两种卡 */
+  /* 卡片类型分派：backtest 是唯一卡片类型（对话真引擎产物）。
+     历史上的 report / stocks 卡（演示时代的报告卡/筛股卡）2026-10-13 已随演示链
+     全量下线：产出方删除、类型定义删除、库中零存量（32 张卡 100% backtest） */
   let body;
   if (card.type === "backtest") {
     body = (
@@ -136,48 +130,6 @@ function AgentCardView({ card, saved, onSaveBacktest, onAskBacktest, onAskOptimi
         )}
       </>
     );
-  } else if (card.type === "report") {
-    body = (
-      <>
-        <div className="btp-title">因子配置</div>
-        <div className="factor-weights" style={{ marginBottom: 14 }}>
-          {card.factors.map(f => (
-            <div className="factor-weight-row" key={f.name}>
-              <span>{f.name}</span>
-              <div className="fw-bar"><i style={{ width: `${f.weight}%` }} /></div>
-              <span className="fw-val">{f.weight}%</span>
-            </div>
-          ))}
-        </div>
-        <PerfChart curve={card.curve} benchCurve={card.benchCurve} benchName={card.benchName} />
-        <MetricGrid metrics={card.metrics} />
-        <ParamsBlock />
-        {card.note && <div className="agent-card-text" style={{ margin: "12px 0 0" }}>{card.note}</div>}
-      </>
-    );
-  } else {
-    body = (
-      <>
-        <table className="mini-table">
-          <thead>
-            <tr>
-              <th>股票</th><th className="num">综合得分</th>
-              <th className="num">{card.stocks[0]?.weight != null ? "建议权重" : "PE分位"}</th>
-            </tr>
-          </thead>
-          <tbody>
-            {card.stocks.map(s => (
-              <tr key={s.code}>
-                <td>{s.name}<span className="stock-code">{s.code}</span></td>
-                <td className="num"><span className="score-pill">{s.score.toFixed(1)}</span></td>
-                <td className="num">{s.weight != null ? s.weight + "%" : "< 30%"}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        {card.note && <div className="agent-card-text" style={{ margin: "12px 0 0" }}>{card.note}</div>}
-      </>
-    );
   }
 
   return (
@@ -195,12 +147,11 @@ function AgentCardView({ card, saved, onSaveBacktest, onAskBacktest, onAskOptimi
 
 /* ----- 消息 ----- */
 
-function MessageRow({ m, userInitial, saved, onSaveBacktest, onAskBacktest, onAskOptimize, onGotoStrategies }: {
+function MessageRow({ m, userInitial, saved, onSaveBacktest, onAskOptimize, onGotoStrategies }: {
   m: ChatMessage;
   userInitial: string;
   saved: string[];
   onSaveBacktest: (c: BacktestCard) => Promise<void>;
-  onAskBacktest: () => void;
   onAskOptimize: () => void;
   onGotoStrategies: () => void;
 }) {
@@ -218,7 +169,6 @@ function MessageRow({ m, userInitial, saved, onSaveBacktest, onAskBacktest, onAs
             card={m.card}
             saved={saved}
             onSaveBacktest={onSaveBacktest}
-            onAskBacktest={onAskBacktest}
             onAskOptimize={onAskOptimize}
             onGotoStrategies={onGotoStrategies}
           />
@@ -457,8 +407,7 @@ export function ChatPage(props: {
             {current.messages.map((m, i) => (
               <MessageRow key={i} m={m} userInitial={userInitial} saved={savedCardIds}
                 onSaveBacktest={onSaveBacktest}
-                onAskBacktest={() => onSubmit("帮我回测上面这个策略")}
-                onAskOptimize={() => onSubmit("请求优化建议")}
+                              onAskOptimize={() => onSubmit("请求优化建议")}
                 onGotoStrategies={onGotoStrategies}
               />
             ))}
