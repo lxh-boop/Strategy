@@ -172,9 +172,12 @@ export interface AgentReply {
 /* ----- 智能体过程事件（SSE 节点级推送；不涉及推理流式） -----
    粒度 = 图节点/工具的开始与结果，一条一个结构化事件；
    stage 为工具中文名（前端可直接展示），detail 为一行结果摘要。
+   keepalive 为链路保活帧（无内容语义）：GLM 思考/工具执行的长静默段定期发送，
+   前端空闲看门狗据此不把"活着但慢"误判成死链路。
    最终文案与卡片不走过程事件，以接口返回值 / final 事件为准。 */
 export type AgentProgressEvent =
   | { type: 'start' }
+  | { type: 'keepalive' }
   | { type: 'tool_call'; name: string; stage: string; args: string }
   | { type: 'tool_result'; name: string; stage: string; ok: boolean; detail: string }
   | { type: 'error'; message: string };

@@ -10,10 +10,11 @@ import { nowTime } from "../utils/format";
 /* 服务端会话标题口径：首条用户消息前 16 字（与后端 renameConversationFromFirstMessage 一致） */
 const shortTitle = (text: string) => (text.length > 16 ? text.slice(0, 16) + "…" : text);
 
-/** 在途会话的过程步骤（SSE 节点级事件）：stage 为工具中文名，ok 缺省 = 进行中 */
+/** 在途会话的过程步骤（SSE 节点级事件）：stage 为工具中文名，ok 缺省 = 进行中；
+ *  detail 为该步的内容摘要（引擎分批上报：第 x/y 批 · N 只 / 已完成 M/K 个调仓日） */
 export interface LiveProgress {
   convId: string;
-  steps: { stage: string; ok?: boolean }[];
+  steps: { stage: string; ok?: boolean; detail?: string }[];
 }
 
 /* ==========================================================
@@ -134,15 +135,26 @@ export function useConversations(notify?: (msg: string) => void) {
         if (ev.type === "start") {
           setLive({ convId, steps: [] });
         } else if (ev.type === "tool_call") {
-          setLive(p => (p && p.convId === convId ? { ...p, steps: [...p.steps, { stage: ev.stage }] } : p));
+          setLive(p => {
+            if (!p || p.convId !== convId) return p;
+            const steps = [...p.steps];
+            const last = steps[steps.length - 1];
+            // 引擎分批上报（第 1/5 批 → 第 2/5 批）：同名阶段原地滚动更新，不堆叠同名行
+            if (last && last.stage === ev.stage) {
+              steps[steps.length - 1] = { stage: ev.stage, detail: ev.args };
+            } else {
+              steps.push({ stage: ev.stage, detail: ev.args });
+            }
+            return { ...p, steps };
+          });
         } else if (ev.type === "tool_result") {
           setLive(p => {
             if (!p || p.convId !== convId) return p;
             const steps = [...p.steps];
-            // 同一工具可能多次调用：从后往前找最近的未定案步骤标记成功/失败
+            // 同一工具可能多次调用：从后往前找最近的未定案步骤标记成功/失败，并写入完成摘要
             for (let i = steps.length - 1; i >= 0; i--) {
               if (steps[i].stage === ev.stage && steps[i].ok === undefined) {
-                steps[i] = { ...steps[i], ok: ev.ok };
+                steps[i] = { ...steps[i], ok: ev.ok, detail: ev.detail || steps[i].detail };
                 break;
               }
             }
@@ -164,9 +176,15 @@ export function useConversations(notify?: (msg: string) => void) {
         return cur ? [cur, ...prev.filter(c => c.id !== convId)] : prev;
       });
     } catch (e) {
-      /* 用户主动停止：消息已送达后端（服务端会继续处理并落库），不回滚乐观消息 */
-      if (e instanceof ApiError && e.code === "ABORTED") {
-        notifyRef.current?.("已停止生成；这条回复稍后可能仍会出现在会话中");
+      /* 消息已送达后端、服务端会继续处理并落库的两类断连：用户主动停止、空闲超时
+       * （后端 keepalive 落地后，超时≈链路真死，但执行结果仍可能已落库）
+       * ——都不回滚乐观消息，避免"发过的消息从界面上消失" */
+      if (e instanceof ApiError && (e.code === "ABORTED" || e.code === "TIMEOUT")) {
+        notifyRef.current?.(
+          e.code === "ABORTED"
+            ? "已停止生成；这条回复稍后可能仍会出现在会话中"
+            : "连接超时，但这条消息已送达、服务端仍在处理，结果稍后会出现在会话中（无需重发）",
+        );
         return;
       }
       setConversations(prev => prev.map(c =>

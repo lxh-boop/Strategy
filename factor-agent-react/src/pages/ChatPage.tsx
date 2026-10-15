@@ -245,7 +245,7 @@ function MessageRow({ m, userInitial, saved, onSaveBacktest, onAskBacktest, onAs
   );
 }
 
-function TypingRow({ steps }: { steps?: { stage: string; ok?: boolean }[] }) {
+function TypingRow({ steps }: { steps?: { stage: string; ok?: boolean; detail?: string }[] }) {
   return (
     <div className="msg agent">
       <div className="msg-avatar" aria-hidden="true"><IconLogo size={18} /></div>
@@ -256,7 +256,9 @@ function TypingRow({ steps }: { steps?: { stage: string; ok?: boolean }[] }) {
             <div className="chat-steps">
               {steps.map((s, i) => (
                 <span className={`chat-step ${s.ok === true ? "ok" : s.ok === false ? "bad" : ""}`} key={i}>
-                  {s.stage}<em>{s.ok === true ? "✓" : s.ok === false ? "✕" : "…"}</em>
+                  {s.stage}
+                  {s.detail ? ` · ${s.detail}` : ""}
+                  <em>{s.ok === true ? "✓" : s.ok === false ? "✕" : "…"}</em>
                 </span>
               ))}
             </div>
@@ -273,8 +275,8 @@ export function ChatPage(props: {
   conversations: Conversation[];
   currentId: string;
   typingId: string | null;
-  /** 在途消息的流式过程步骤（SSE 节点级事件，见 useConversations） */
-  live?: { convId: string; steps: { stage: string; ok?: boolean }[] } | null;
+  /** 在途消息的流式过程步骤（SSE 节点级事件，见 useConversations 的 LiveProgress） */
+  live?: { convId: string; steps: { stage: string; ok?: boolean; detail?: string }[] } | null;
   loading: boolean;
   savedCardIds: string[];
   /** 当前登录用户昵称首字：用户消息头像（替代旧硬编码人设） */
