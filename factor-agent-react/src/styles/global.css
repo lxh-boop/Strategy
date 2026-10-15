@@ -401,6 +401,8 @@ svg { width: 18px; height: 18px; flex-shrink: 0; }
 /* 回测假设参数 */
 .btp-title { font-size: 12px; font-weight: 600; color: var(--text-2); margin: 2px 0 8px; }
 .bt-params { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+.bt-params-rules { grid-template-columns: repeat(3, minmax(0, 1fr)); margin-top: 8px; }
+@media (max-width: 760px) { .bt-params-rules { grid-template-columns: 1fr; } }
 .btp-item {
   background: var(--tile); border: 1px solid var(--tile-border); border-radius: 8px;
   padding: 7px 10px; cursor: default;
