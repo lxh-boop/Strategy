@@ -78,6 +78,9 @@ function AgentCardView({ card, saved, onSaveBacktest, onAskBacktest, onAskOptimi
     actions = <button className="btn btn-ghost btn-sm" data-act="ask-backtest" onClick={onAskBacktest}>帮我回测这个结果</button>;
   }
 
+  /* 卡片类型分派：backtest = 对话真引擎产物（唯一在产类型）；
+     report / stocks 两种卡的后端产出方已随演示链下线（2026-10-13），
+     以下分支仅为历史会话消息兼容保留——请勿在新链路中产出这两种卡 */
   let body;
   if (card.type === "backtest") {
     body = (

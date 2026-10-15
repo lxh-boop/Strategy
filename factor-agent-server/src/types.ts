@@ -237,12 +237,6 @@ export interface UserProfile {
 }
 
 /* ----- 因子库 / 回测参数 / 选股筛选 ----- */
-export interface FactorLibItem {
-  id: string;
-  name: string;
-  desc: string;
-}
-
 export interface BtParamItem {
   label: string;
   value: string;
