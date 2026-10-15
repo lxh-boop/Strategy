@@ -1,10 +1,8 @@
 import { Global, Module } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { FactorDataService } from './factor-data.service';
-import { StoreService } from './store.service';
 import { StrategyBacktestService } from './strategy-backtest.service';
 import { UserStoreService } from './user-store.service';
-import { MemoryStoreService } from './implementations/memory-store.service';
 import { MemoryUserStoreService } from './implementations/memory-user-store.service';
 import { MysqlFactorDataService } from './implementations/mysql-factor-data.service';
 import { MysqlUserStoreService } from './implementations/mysql-user-store.service';
@@ -12,7 +10,6 @@ import { StrategyBacktestServiceImpl } from './implementations/strategy-backtest
 
 /**
  * 领域共享层：接口（token）→ 实现类 的装配点。
- *   存储   StoreService   → MemoryStoreService（内存 + 种子测试样例，公共配置数据）
  *   用户库 UserStoreService → MysqlUserStoreService（USER_DB_HOST 已配置时）
  *                           / MemoryUserStoreService（未配置时开发兜底）
  *   因子取数 FactorDataService → MysqlFactorDataService（MySQL herms_data 库）
@@ -22,7 +19,6 @@ import { StrategyBacktestServiceImpl } from './implementations/strategy-backtest
 @Global()
 @Module({
   providers: [
-    { provide: StoreService, useClass: MemoryStoreService },
     {
       provide: UserStoreService,
       // .env 配了 USER_DB_HOST 走共享 MySQL 用户库，否则内存兜底（本地无库联调）
@@ -33,6 +29,6 @@ import { StrategyBacktestServiceImpl } from './implementations/strategy-backtest
     { provide: FactorDataService, useClass: MysqlFactorDataService },
     { provide: StrategyBacktestService, useClass: StrategyBacktestServiceImpl },
   ],
-  exports: [StoreService, UserStoreService, FactorDataService, StrategyBacktestService],
+  exports: [UserStoreService, FactorDataService, StrategyBacktestService],
 })
 export class CoreModule {}

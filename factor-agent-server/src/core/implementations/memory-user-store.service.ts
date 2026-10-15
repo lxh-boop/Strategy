@@ -4,8 +4,9 @@ import {
   UserRow,
   UserSettingsRow,
   UserStoreService,
+  WELCOME_TEXT,
 } from '../user-store.service';
-import { nowTime, WELCOME_TEXT } from '../store.service';
+import { nowTime } from '../../common/time';
 import { ChatMessage, Conversation, Strategy } from '../../types';
 
 /* ==========================================================

@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { ApiException } from '../../common/api.exception';
-import { normalizeWeights } from '../../core/backtest.service';
+import { normalizeWeights } from '../../core/metrics';
 import {
   BENCHMARKS,
   BenchmarkKey,
@@ -9,7 +9,7 @@ import {
   StrategyBacktestInput,
   StrategyBacktestService,
 } from '../../core/strategy-backtest.service';
-import { todayStr } from '../../core/store.service';
+import { todayStr } from '../../common/time';
 import { UserStoreService } from '../../core/user-store.service';
 import { BacktestRunConfig, FactorWeight, Strategy, StrategyRunConfig } from '../../types';
 import { BacktestParamsDto, CreateFromBacktestDto, CreateStrategyDto, UpdateStrategyDto } from '../dto';

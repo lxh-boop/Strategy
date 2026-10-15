@@ -32,6 +32,10 @@ export interface UserSettingsRow {
 
 export type SettingKey = 'notify' | 'report' | 'risk';
 
+/** 新会话欢迎语（新建会话时第一条 agent 消息，与前端演示文案一致） */
+export const WELCOME_TEXT =
+  '你好，陈研究员 👋 我是你的多因子选股智能体。\n\n我可以帮你：\n· 构建多因子选股策略（价值 / 成长 / 动量 / 质量 / 低波动等）\n· 对策略进行历史回测与绩效归因\n· 按条件筛选股票并输出综合因子得分\n\n试试下方的快捷指令，或直接描述你的需求。';
+
 @Injectable()
 export abstract class UserStoreService {
   /* ----- 账号（B-INT-05 专用） ----- */

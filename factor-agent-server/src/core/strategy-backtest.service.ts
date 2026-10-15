@@ -2,7 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { ApiException } from '../common/api.exception';
 import { AgentProgressSink, BacktestCard, RawMetrics } from '../types';
 import { TradeDateCoverage } from './factor-data.service';
-import { maxDrawdownPct, toMetricItems } from './backtest.service';
+import { maxDrawdownPct, toMetricItems } from './metrics';
 
 /* ==========================================================
    策略回测接口（契约层）—— 日频事件驱动内核（重构方案 v3，StrategySpec v1）
