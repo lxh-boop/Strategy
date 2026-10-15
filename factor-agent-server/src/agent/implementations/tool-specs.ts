@@ -49,9 +49,10 @@ export const READ_FACTOR_DATA_SPEC = {
   function: {
     name: 'read_factor_data',
     description:
-      '按 表/因子字段集合/交易日/证券代码 读取因子数据。' +
+      '按 表/因子字段集合/交易日/证券代码 读取数据。' +
       'table 必须来自系统提示中的表目录，fields 必须来自 list_factor_fields 的返回，' +
-      'date 为纯数字交易日（如 20210506），security 为证券代码（如 000002.XSHE）。',
+      'date 为纯数字交易日（如 20210506），security 为证券或指数代码（如 000002.XSHE / 000001.XSHG 上证指数）；' +
+      '股票因子表按全码匹配，指数/主表自动按交易代码+交易市场匹配，日期对无交易日列的静态表自动忽略。',
     parameters: {
       type: 'object',
       properties: {

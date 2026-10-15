@@ -2,7 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createPool, Pool } from 'mysql2/promise';
 import { ApiException } from '../../common/api.exception';
-import { loadTableFields, listKnownTables } from '../factor-schema';
+import { loadTableFieldDetails, loadTableFields, listKnownTables } from '../factor-schema';
 import {
   DATE_RE,
   CrossSectionRow,
@@ -22,7 +22,8 @@ import {
    因子数据读取实现：MySQL（mysql2 连接池）
    - 表名/字段名只允许 [A-Za-z0-9_] 且反引号包裹，日期/证券代码走参数占位符，杜绝注入
    - 连接池按配置懒创建：.env 未配齐时不阻塞启动，首次取数时给出明确报错
-   - readTable 服务 LLM 单点查询；readTradeDates/readFactorSection/readFactorRange/
+   - readTable 服务 LLM 单点查询，SQL 形状由字段字典推导（日期列/证券列按表里实际有什么拼什么，
+     指数表/主表/ID 键表都能读）；readTradeDates/readFactorSection/readFactorRange/
      readQuoteSeries/readIndexDaily 服务策略回测引擎的批量取数，同池同白名单
    - 无 TRADE_DATE 列的静态表（md_security 等主表）截面/序列查询忽略日期条件
    - 取数结果带短 TTL 内存缓存（见 CACHE_TTL_MS）：历史行情/因子一经落库不再变化，
@@ -41,6 +42,10 @@ const MAX_FIELDS = 200;
 
 /** 批量查询按代码分片的大小（控制 IN 元组长度） */
 const CODE_CHUNK = 400;
+
+/** 单点读行数上限：read_factor_data 的结果直接进模型上下文，
+ *  ID 键表（无证券/日期列可收窄）退化为截断的全表读，必须有顶 */
+const ROW_LIMIT = 200;
 
 /* ----- 取数缓存参数 -----
    历史行情/因子数据落库后不再变化，可安全复用；TTL 只为兜底两类情形：
@@ -86,13 +91,74 @@ export class MysqlFactorDataService extends FactorDataService {
     super();
   }
 
+  /** LLM 单点读（read_factor_data）。SQL 形状完全由字段字典（SQL/<表名>.md）推导，不写死任何列：
+   *  - 日期：字典有 TRADE_DATE 列才加日期条件，参数格式随字典类型（bigint 存 20210506 / date 存 'YYYY-MM-DD'）；
+   *    无该列的静态主表忽略日期
+   *  - 证券：字典有字符串形 SECURITY_ID（varchar，存 000002.XSHE 全码）→ 全码等值；
+   *    否则有 TICKER_SYMBOL → 拆 '000001.XSHG' 为 6 位代码（+EXCHANGE_CD 市场，有才拼）；
+   *    两者皆无的 ID 键表（md_type 等）不加证券条件
+   *  - SELECT 列 = 条件列 + 去重后的请求字段（未指名因子字段 = *），行自带归属信息便于模型核对 */
   async readTable(query: FactorTableQuery): Promise<FactorDataRow[]> {
-    const { table, fields, date, security } = query;
-    const columnList = this.buildColumnList(table, fields ?? [], date, security);
+    const { table, date, security } = query;
+    const fields = query.fields ?? [];
+    if (!DATE_RE.test(date)) {
+      throw new ApiException('INVALID_ARGUMENT', 400, `日期必须是纯数字 YYYYMMDD: ${date}`);
+    }
+    if (!SECURITY_RE.test(security)) {
+      throw new ApiException('INVALID_ARGUMENT', 400, `证券代码格式须为 000002.XSHE: ${security}`);
+    }
+    if (fields.length > MAX_FIELDS) {
+      throw new ApiException('INVALID_ARGUMENT', 400, `因子字段过多（>${MAX_FIELDS}）`);
+    }
 
-    const sql = `SELECT ${columnList} FROM \`${table}\` WHERE SECURITY_ID = ? AND TRADE_DATE = ?`;
-    const rows = await this.query(sql, [security, Number(date)]);
-    this.logger.log(`${table} ${security} ${date}: ${fields?.length ?? '全部列'} 字段，${rows.length} 行`);
+    this.assertTable(table);
+    const details = loadTableFieldDetails(table) ?? [];
+    const byName = new Map(details.map((d) => [d.name, d]));
+    for (const f of fields) {
+      if (!IDENT_RE.test(f)) {
+        throw new ApiException('INVALID_ARGUMENT', 400, `非法字段名: ${f}`);
+      }
+      if (!byName.has(f)) {
+        throw new ApiException('INVALID_ARGUMENT', 400, `表 ${table} 无此因子字段（见 SQL/${table}.md）: ${f}`);
+      }
+    }
+
+    const conds: string[] = [];
+    const params: (string | number)[] = [];
+    const condCols: string[] = [];
+
+    const dateCol = byName.get('TRADE_DATE');
+    if (dateCol) {
+      conds.push('TRADE_DATE = ?');
+      params.push(/^date/.test(dateCol.type) ? toDashDate(date) : Number(date));
+      condCols.push('TRADE_DATE');
+    }
+
+    const secCol = byName.get('SECURITY_ID');
+    if (secCol && /^(varchar|char)/.test(secCol.type)) {
+      conds.push('SECURITY_ID = ?');
+      params.push(security);
+      condCols.push('SECURITY_ID');
+    } else if (byName.has('TICKER_SYMBOL')) {
+      const [ticker, exchange] = security.split('.');
+      conds.push('TICKER_SYMBOL = ?');
+      params.push(ticker);
+      condCols.push('TICKER_SYMBOL');
+      if (byName.has('EXCHANGE_CD')) {
+        conds.push('EXCHANGE_CD = ?');
+        params.push(exchange);
+        condCols.push('EXCHANGE_CD');
+      }
+    }
+
+    const unique = [...new Set(fields)].filter((f) => !condCols.includes(f));
+    const columnList = unique.length === 0 ? '*' : [...condCols, ...unique].map((c) => `\`${c}\``).join(', ');
+    const where = conds.length ? ` WHERE ${conds.join(' AND ')}` : '';
+    const sql = `SELECT ${columnList} FROM \`${table}\`${where} LIMIT ${ROW_LIMIT}`;
+    const rows = await this.query(sql, params);
+    this.logger.log(
+      `${table} ${security} ${date}: ${fields.length} 字段，${rows.length} 行${rows.length >= ROW_LIMIT ? `（触顶截断 ${ROW_LIMIT}）` : ''}`,
+    );
     return rows as FactorDataRow[];
   }
 
@@ -293,51 +359,6 @@ export class MysqlFactorDataService extends FactorDataService {
     const out: string[][] = [];
     for (let i = 0; i < codes.length; i += CODE_CHUNK) out.push(codes.slice(i, i + CODE_CHUNK));
     return out;
-  }
-
-  /** SELECT 列清单：固定带出 SECURITY_ID / TRADE_DATE，其余按传入顺序去重拼接。
-   *  表名 / 因子字段必须是 SQL 目录字段字典（tables.md + <表名>.md）里出现过的。 */
-  private buildColumnList(table: string, fields: string[], date: string, security: string): string {
-    if (!IDENT_RE.test(table)) {
-      throw new ApiException('INVALID_ARGUMENT', 400, `非法表名: ${table}`);
-    }
-    if (!DATE_RE.test(date)) {
-      throw new ApiException('INVALID_ARGUMENT', 400, `日期必须是纯数字 YYYYMMDD: ${date}`);
-    }
-    if (!SECURITY_RE.test(security)) {
-      throw new ApiException('INVALID_ARGUMENT', 400, `证券代码格式须为 000002.XSHE: ${security}`);
-    }
-    if (fields.length > MAX_FIELDS) {
-      throw new ApiException('INVALID_ARGUMENT', 400, `因子字段过多（>${MAX_FIELDS}）`);
-    }
-
-    // 字段字典白名单（按表现读，不缓存）：表必须在 tables.md 中，字段必须在该表 <表名>.md 里出现过
-    const knownFields = loadTableFields(table);
-    if (!knownFields) {
-      const available = listKnownTables();
-      throw new ApiException(
-        'INVALID_ARGUMENT',
-        400,
-        `表不在字段字典中（SQL/tables.md）: ${table}。可用表: ${available.join(', ') || '（无）'}`,
-      );
-    }
-    for (const f of fields) {
-      if (!IDENT_RE.test(f)) {
-        throw new ApiException('INVALID_ARGUMENT', 400, `非法字段名: ${f}`);
-      }
-      if (!knownFields.has(f)) {
-        throw new ApiException(
-          'INVALID_ARGUMENT',
-          400,
-          `表 ${table} 无此因子字段（见 SQL/${table}.md）: ${f}`,
-        );
-      }
-    }
-
-    // 传入集合里可能含固定键列，过滤避免 SELECT 重复列
-    const unique = [...new Set(fields)].filter((f) => f !== 'SECURITY_ID' && f !== 'TRADE_DATE');
-    const columns = unique.length === 0 ? ['*'] : ['SECURITY_ID', 'TRADE_DATE', ...unique];
-    return columns.map((c) => (c === '*' ? '*' : `\`${c}\``)).join(', ');
   }
 
   /** 连接池懒创建；配置缺失时给出可操作的报错信息 */

@@ -1,7 +1,8 @@
 /* ==========================================================
    因子取数（MysqlFactorDataService）单元测试 —— SQL 拼装与错误包装。
    白名单 / 入参格式校验已在 mysql-factor-data.service.spec.ts 覆盖，
-   本文件只钉：SELECT 列清单拼装（固定键列 / 去重 / SELECT *）、
+   SQL 形状按表字典的推导覆盖在 mysql-factor-data.readtable.spec.ts，
+   本文件只钉：SELECT 列清单拼装（键列去重 / SELECT *）、
    字段数上限、连接池懒创建、DB 错误 → 502 DATA_SOURCE_ERROR。
    mysql2/promise 为 mock，不连真库。
    运行：npx jest mysql-factor-data.spec
@@ -50,9 +51,9 @@ describe('因子取数 MysqlFactorDataService（SQL 拼装与错误包装）', (
     });
 
     expect(execute).toHaveBeenCalledWith(
-      'SELECT `SECURITY_ID`, `TRADE_DATE`, `TotalFixedAssets`, `IntFreeCL` ' +
-        'FROM `equ_factor_derive` WHERE SECURITY_ID = ? AND TRADE_DATE = ?',
-      ['000002.XSHE', 20210506],
+      'SELECT `TRADE_DATE`, `SECURITY_ID`, `TotalFixedAssets`, `IntFreeCL` ' +
+        'FROM `equ_factor_derive` WHERE TRADE_DATE = ? AND SECURITY_ID = ? LIMIT 200',
+      [20210506, '000002.XSHE'],
     );
     expect(rows).toEqual([row]);
   });
@@ -61,8 +62,8 @@ describe('因子取数 MysqlFactorDataService（SQL 拼装与错误包装）', (
     execute.mockResolvedValue([[], []]);
     await makeSvc().readTable({ table: 'equ_factor_cf', fields: [], date: '20210506', security: '000002.XSHE' });
     expect(execute).toHaveBeenCalledWith(
-      'SELECT * FROM `equ_factor_cf` WHERE SECURITY_ID = ? AND TRADE_DATE = ?',
-      ['000002.XSHE', 20210506],
+      'SELECT * FROM `equ_factor_cf` WHERE TRADE_DATE = ? AND SECURITY_ID = ? LIMIT 200',
+      [20210506, '000002.XSHE'],
     );
   });
 
@@ -75,8 +76,8 @@ describe('因子取数 MysqlFactorDataService（SQL 拼装与错误包装）', (
       security: '000002.XSHE',
     });
     expect(execute).toHaveBeenCalledWith(
-      'SELECT `SECURITY_ID`, `TRADE_DATE`, `TotalFixedAssets` FROM `equ_factor_derive` WHERE SECURITY_ID = ? AND TRADE_DATE = ?',
-      ['000002.XSHE', 20210506],
+      'SELECT `TRADE_DATE`, `SECURITY_ID`, `TotalFixedAssets` FROM `equ_factor_derive` WHERE TRADE_DATE = ? AND SECURITY_ID = ? LIMIT 200',
+      [20210506, '000002.XSHE'],
     );
   });
 

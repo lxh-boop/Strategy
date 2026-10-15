@@ -53,6 +53,29 @@ describeManual('因子取数真实库（手动集成，DB_IT=1 开启）', () =>
     expect(rows.length).toBeGreaterThan(0);
   });
 
+  it('指数表：000001.XSHG 上证取 CLOSE_INDEX（回归：写死 SECURITY_ID 曾致 Unknown column 三连失败）', async () => {
+    const rows = await svc.readTable({
+      table: 'mkt_idxd',
+      fields: ['CLOSE_INDEX'],
+      date: '20210506',
+      security: '000001.XSHG',
+    });
+    expect(rows.length).toBe(1);
+    expect(rows[0].TICKER_SYMBOL).toBe('000001');
+    expect(Number(rows[0].CLOSE_INDEX)).toBeGreaterThan(1000);
+  });
+
+  it('证券主表：静态表按交易代码+市场读，日期条件自动忽略', async () => {
+    const rows = await svc.readTable({
+      table: 'md_security',
+      fields: ['SEC_SHORT_NAME'],
+      date: '20210506',
+      security: '000002.XSHE',
+    });
+    expect(rows.length).toBeGreaterThan(0);
+    expect(rows[0].TICKER_SYMBOL).toBe('000002');
+  });
+
   it('白名单拦截：表不在 tables.md → 400', async () => {
     const err = (await svc
       .readTable({ table: 'not_in_dict', fields: ['ID'], date: '20210506', security: '000002.XSHE' })
