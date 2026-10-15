@@ -12,6 +12,7 @@ import {
   FactorTableQuery,
   IDENT_RE,
   IndexDailyRow,
+  IndexFieldRow,
   QuoteRow,
   SECURITY_RE,
   TradeDateCoverage,
@@ -224,6 +225,25 @@ export class MysqlFactorDataService extends FactorDataService {
       tradeDate: String(row.TRADE_DATE),
       close: toNum(row.CLOSE_INDEX),
       preClose: toNum(row.PRE_CLOSE_INDEX),
+    }));
+  }
+
+  /** 指数单字段区间序列（择时条件用）：键列为 TICKER_SYMBOL。
+   *  内部 ID 键表（mkt_idxd_eval 等）接入见 TABLE_KEY_COLUMNS 设计（大盘择时重构方案 §3.1） */
+  async readIndexFieldSeries(table: string, field: string, ticker: string, start: string, end: string): Promise<IndexFieldRow[]> {
+    this.assertTable(table);
+    this.assertField(table, field);
+    this.assertRange(start, end);
+    if (!/^\d{6}$/.test(ticker)) {
+      throw new ApiException('INVALID_ARGUMENT', 400, `指数代码格式须为 6 位数字（如 000001）: ${ticker}`);
+    }
+    const sql =
+      `SELECT TRADE_DATE, \`${field}\` AS v FROM \`${table}\` ` +
+      `WHERE TICKER_SYMBOL = ? AND TRADE_DATE BETWEEN ? AND ? AND \`${field}\` IS NOT NULL ORDER BY TRADE_DATE`;
+    const rows = await this.query(sql, [ticker, toDashDate(start), toDashDate(end)]);
+    return (rows as Record<string, unknown>[]).map((row) => ({
+      tradeDate: String(row.TRADE_DATE),
+      value: toNum(row.v),
     }));
   }
 

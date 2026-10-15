@@ -2,6 +2,8 @@
    共享类型 — 与前端 factor-agent-react/src/types.ts 保持一致
    ========================================================== */
 
+import type { StrategyTimingOverlay } from './core/timing';
+
 export type Role = 'user' | 'agent';
 
 export interface MetricItem {
@@ -98,6 +100,8 @@ export interface StrategyRunConfig {
   sortFactors?: StrategySortFactor[];
   sellRules?: StrategySellRule[];
   benchmark?: 'hs300' | 'csi500' | 'sse';
+  /** 大盘择时叠加（结构同 core/timing.ts StrategyTimingOverlay） */
+  timingOverlay?: StrategyTimingOverlay;
 }
 
 /** 回测交易明细（日频事件内核产出；卡片截最近若干笔） */
@@ -133,6 +137,12 @@ export interface BacktestCard extends CardBase {
   trades?: BacktestTrade[];
   /** 月度归因（自然月收益 %）；旧等权卡片无此字段 */
   monthly?: { month: string; pct: number }[];
+  /** 仓位分布（择时启用时的各仓位档天数）；未择时缺省 */
+  positionDist?: { label: string; days: number }[];
+  /** 持股时间占比 %（暴露>0 的交易日占比，对齐果仁 open-rate）；未择时缺省 */
+  holdingDaysPct?: number;
+  /** 踏空归因：基准单日涨幅 Top10 中暴露不足的交易日；未择时缺省 */
+  missedRallies?: { date: number; pct: number; exposure: number }[];
 }
 
 export interface ReportCard extends CardBase {

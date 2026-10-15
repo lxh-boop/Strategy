@@ -34,6 +34,17 @@ import {
 import { FactorDataService, QuoteRow, TradeDateCoverage } from '../factor-data.service';
 import { AgentProgressSink } from '../../types';
 import { loadTableFields, listKnownTables } from '../factor-schema';
+import {
+  describeTimingOverlay,
+  exposureOfRegime,
+  holdingDaysPct,
+  missedRallies,
+  nextTimingRegime,
+  positionDistribution,
+  voteTiming,
+  type StrategyTimingOverlay,
+  type TimingRegime,
+} from '../timing';
 
 /* ==========================================================
    策略回测实现：日频事件驱动内核——只编排与模拟，不触库。
@@ -258,15 +269,55 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
       return row && row.preClose > 0 ? row.close / row.preClose - 1 : 0;
     });
 
+    // ③′ 择时序列预取与逐日状态机（可选）：字段序列按挂靠指数读取，D 日收盘后的
+    // 状态决定 D+1 目标仓位（首日无信号按初始牛 = 满仓）；缺值当日该规则弃权
+    const timing = p.timingOverlay ?? null;
+    const exposureByDay: number[] = [];
+    const timingRegimes: TimingRegime[] = [];
+    if (timing) {
+      const ticker = BENCHMARKS[timing.index].ticker;
+      const seriesByKey = new Map<string, Map<number, number>>();
+      for (const rule of timing.rules) {
+        const key = `${rule.table}.${rule.field}`;
+        if (seriesByKey.has(key)) continue;
+        const rows = await this.factorData.readIndexFieldSeries(rule.table, rule.field, ticker, p.startDate, p.endDate);
+        const byDay = new Map<number, number>();
+        for (const row of rows) byDay.set(Number(row.tradeDate.replaceAll('-', '')), row.value);
+        seriesByKey.set(key, byDay);
+      }
+      let regime: TimingRegime = 'bull';
+      for (let i = 0; i < tradeDates.length; i++) {
+        const day = tradeDates[i];
+        exposureByDay.push(exposureOfRegime(regime, timing)); // 昨收状态 → 当日目标仓位
+        const values = timing.rules.map((r) => seriesByKey.get(`${r.table}.${r.field}`)?.get(day));
+        regime = nextTimingRegime(regime, voteTiming(timing, values), timing);
+        timingRegimes.push(regime);
+      }
+      const bearDays = timingRegimes.filter((r) => r === 'bear').length;
+      this.logger.log(
+        `择时启用：${BENCHMARKS[timing.index].name} ${timing.rules.length} 条件，` +
+          `牛 ${tradeDates.length - bearDays} 日 / 熊 ${bearDays} 日，熊市仓位 ${timing.bearPositionPct}%`,
+      );
+    } else {
+      exposureByDay.push(...tradeDates.map(() => 100));
+    }
+
     // ④ 主循环（逐交易日：执行 → 结算 → 信号）
-    const loop = this.runMainLoop(p, tradeDates, rebalanceIdx, signals, quotes, sellFieldSeries, sortFactors.factors, rankOutBottomN);
+    const loop = this.runMainLoop(p, tradeDates, rebalanceIdx, signals, quotes, sellFieldSeries, sortFactors.factors, rankOutBottomN, exposureByDay);
 
     // ⑤ 聚合 → 卡片 + 摘要
     const aggregate = aggregateNav(loop.equities, benchReturns, tradeDates);
     aggregate.annualTurnoverPct = annualizeTurnover(loop.turnoverByDay, loop.equities);
     aggregate.metrics.turnover = aggregate.annualTurnoverPct; // 随 RawMetrics 落库，策略页与卡片同源展示
-    const card = this.buildCard(p, aggregate, loop, tradeDates, coverage, bench, sortFactors, rebalanceIdx.length);
-    const summary = this.buildSummary(p, aggregate, loop, bench, rebalanceIdx.length, sortFactors);
+    const timingStats = timing
+      ? {
+          positionDist: positionDistribution(exposureByDay),
+          holdingDaysPct: holdingDaysPct(exposureByDay),
+          missedRallies: missedRallies(benchReturns, tradeDates, exposureByDay),
+        }
+      : null;
+    const card = this.buildCard(p, aggregate, loop, tradeDates, coverage, bench, sortFactors, rebalanceIdx.length, timing, timingStats);
+    const summary = this.buildSummary(p, aggregate, loop, bench, rebalanceIdx.length, sortFactors, timing, timingStats);
     this.logger.log(
       `策略回测 ${p.startDate}~${p.endDate} 每${p.rebalanceIntervalDays}交易日: ` +
         `年化=${summary.年化收益} 回撤=${summary.最大回撤} 夏普=${summary.夏普比率} 交易 ${loop.trades.length} 笔 费用 ${summary.总费用}`,
@@ -285,6 +336,7 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
     sellFieldSeries: SellFieldData,
     sortFactors: StrategySortFactor[],
     rankOutBottomN: number | null,
+    exposureByDay: number[],
   ) {
     const staticSellRefs = new Set(
       p.sellRules.filter((r) => r.kind === 'field').map((r) => `${r.table}.${r.field}`)
@@ -359,6 +411,55 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
         }
         pendingSells = new Map();
 
+        // a′. 择时缩放块：目标总仓位（昨收状态）与当前持仓市值的偏差超权益 1% 时拉回——
+        // 独立于调仓日（候选为空也执行）；减仓按市值占比分摊、只卖未 T+1 锁定仓，停牌/涨跌停顺延
+        {
+          const exposure = exposureByDay[i] ?? 100;
+          const equity0 = cash + [...positions.values()].reduce((a, pos) => {
+            const px = execPriceOf(pos.code, day) ?? lastClose.get(pos.code) ?? pos.entryPrice;
+            return a + pos.shares * px;
+          }, 0);
+          const invested = equity0 - cash;
+          const targetMvAll = (equity0 * exposure) / 100;
+          if (equity0 > 0 && Math.abs(targetMvAll - invested) > equity0 * 0.01) {
+            if (targetMvAll < invested) {
+              // 减仓：need = 超出目标的市值；按持仓市值占比分摊到各未锁定仓
+              const need = invested - targetMvAll;
+              const unlocked = [...positions.values()].filter((pos) => pos.buyDayIdx < i);
+              const unlockMv = unlocked.reduce((a, pos) => {
+                const px = execPriceOf(pos.code, day);
+                return a + (px !== undefined ? pos.shares * px : 0);
+              }, 0);
+              for (const pos of unlocked) {
+                const price = execPriceOf(pos.code, day);
+                const q = quoteOf(pos.code, day);
+                if (price === undefined || !q) continue; // 停牌顺延
+                if (price <= q.preClose * LIMIT_DOWN_RATIO) continue; // 跌停顺延
+                const mv = pos.shares * price;
+                let shares = Math.floor(((mv / (unlockMv || 1)) * need) / price / LOT_SIZE) * LOT_SIZE;
+                if (shares > pos.shares) shares = pos.shares; // 最后一仓允许整仓卖出
+                shares = Math.floor(shares / LOT_SIZE) * LOT_SIZE;
+                if (shares < LOT_SIZE) continue; // 不足一手顺延（明日择时块继续收敛）
+                sell(pos, shares, price, day, '择时减仓');
+              }
+            } else if (cash > 0 && invested > 0) {
+              // 加仓：按持仓市值占比整手买入，现金封顶
+              const add = Math.min(targetMvAll - invested, cash / (1 + p.feeRate));
+              for (const pos of [...positions.values()]) {
+                const price = execPriceOf(pos.code, day);
+                const q = quoteOf(pos.code, day);
+                if (price === undefined || !q) continue; // 停牌顺延
+                if (price >= q.preClose * LIMIT_UP_RATIO) continue; // 涨停顺延
+                const mv = pos.shares * price;
+                let shares = Math.floor(((mv / invested) * add) / price / LOT_SIZE) * LOT_SIZE;
+                const affordable = Math.floor(cash / (price * (1 + p.feeRate)) / LOT_SIZE) * LOT_SIZE;
+                if (shares > affordable) shares = affordable;
+                if (Number.isFinite(shares) && shares >= LOT_SIZE) buy(pos.code, shares, price, day, i, '择时加仓');
+              }
+            }
+          }
+        }
+
         // b. 调仓指令：先卖非目标/强制卖出，再按综合分序买入候选，最后已持有的调回目标仓位
         if (pendingRebalance) {
           const { candidates, compositeRank } = pendingRebalance;
@@ -369,7 +470,8 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
               return a + pos.shares * px;
             }, 0);
             const minMv = (equity0 * p.minPositionPct) / 100;
-            const targetMv = (equity0 * p.idealPositionPct) / 100;
+            // 目标市值乘择时暴露系数：熊市仓位 <100% 时，调仓自然落在降档仓位内
+            const targetMv = ((equity0 * p.idealPositionPct) / 100) * ((exposureByDay[i] ?? 100) / 100);
 
             // b1. 清出不在目标（或被 rank_out 强制卖出）的持仓
             for (const pos of [...positions.values()]) {
@@ -551,6 +653,8 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
     bench: { ticker: string; name: string },
     sortFactors: { factors: StrategySortFactor[]; usedDefault: boolean },
     rebalanceCount: number,
+    timing: StrategyTimingOverlay | null,
+    timingStats: { positionDist: { label: string; days: number }[]; holdingDaysPct: number; missedRallies: { date: number; pct: number; exposure: number }[] } | null,
   ) {
     const feePct = (p.feeRate * 100).toFixed(2);
     const sortExpr = sortFactors.factors
@@ -565,7 +669,8 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
         `日频事件内核：T 日收盘出信号 T+1 执行（${p.executionTiming === 0 ? '开盘价' : '收盘价'}成交），T+1/整手/停牌顺延，` +
         `触及涨跌停顺延（±10% 简化口径） ｜ 区间 ${p.startDate}~${p.endDate} ｜ ` +
         `单边费率 ${feePct}% 双边计提 ｜ 排序因子${sortFactors.usedDefault ? '缺省，默认 ' : '：'}${sortExpr}` +
-        `${sortFactors.usedDefault ? '（值大优）' : ''}`,
+        `${sortFactors.usedDefault ? '（值大优）' : ''}` +
+        `${timing ? ` ｜ 大盘择时：字段条件逐日投票，熊市仓位 ${timing.bearPositionPct}%` : ''}`,
       curve: agg.curve,
       benchCurve: agg.benchCurve,
       benchName: bench.name,
@@ -609,6 +714,15 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
           value: describeSellRules(p.sellRules),
           hint: '持仓期每日收盘后检查，命中次日执行；rank_out 在调仓日按综合分排名生效',
         },
+        ...(timing
+          ? [
+              {
+                label: '大盘择时',
+                value: describeTimingOverlay(timing),
+                hint: '字段条件逐日投票（成立=牛票），状态机决定总仓位：牛市满仓、熊市保留仓位；信号 T 日收盘、T+1 执行',
+              },
+            ]
+          : []),
         {
           label: '初始资金/费用',
           value: `${(p.initialCapital / 10000).toFixed(0)} 万 · 单边 ${feePct}%`,
@@ -637,6 +751,7 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
         sortFactors: p.sortFactors,
         sellRules: p.sellRules,
         benchmark: p.benchmark,
+        ...(timing ? { timingOverlay: timing } : {}),
       },
       // 逐点交易日（YYYYMMDD）：前端 x 轴按真实日期打刻度
       dates: tradeDates,
@@ -644,6 +759,14 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
       trades: loop.trades.slice(-50),
       // 月度归因
       monthly: agg.monthlyReturns,
+      // 择时证据三件套（未启用择时则缺省；前端按"仓位分布"区块渲染）
+      ...(timingStats
+        ? {
+            positionDist: timingStats.positionDist,
+            holdingDaysPct: timingStats.holdingDaysPct,
+            missedRallies: timingStats.missedRallies,
+          }
+        : {}),
     };
   }
 
@@ -654,6 +777,8 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
     bench: { ticker: string; name: string },
     rebalanceCount: number,
     sortFactors: { factors: StrategySortFactor[]; usedDefault: boolean },
+    timing: StrategyTimingOverlay | null,
+    timingStats: { positionDist: { label: string; days: number }[]; holdingDaysPct: number; missedRallies: { date: number; pct: number; exposure: number }[] } | null,
   ) {
     const buys = loop.trades.filter((t) => t.direction === 'buy');
     const sells = loop.trades.filter((t) => t.direction === 'sell');
@@ -689,6 +814,16 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
       交易笔数: `买 ${buys.length} / 卖 ${sells.length}`,
       总费用: totalFee.toFixed(0) + ' 元',
       基准: `${bench.name} 年化 ${formatPct(agg.benchAnnual)}，超额 ${formatPct(agg.metrics.annual - agg.benchAnnual)}`,
+      ...(timingStats
+        ? {
+            择时规则: describeTimingOverlay(timing!),
+            仓位分布: timingStats.positionDist.map((b) => `${b.label}:${b.days}日`).join(' '),
+            持股时间占比: `${timingStats.holdingDaysPct}%`,
+            踏空归因: timingStats.missedRallies
+              .map((m) => `${m.date} 基准${formatPct(m.pct)}(仓位${m.exposure}%)`)
+              .join(' ') || '无（择时期间未错过基准大涨日）',
+          }
+        : {}),
       期末持仓: finalPositions.slice(0, 5),
       月度收益: agg.monthlyReturns.map((m) => `${m.month}:${formatPct(m.pct)}`).join(' '),
       提示: '回测卡片已生成并将随回复展示；请用不超过 90 字总结以上结果，只能引用返回数字，不要编造，结尾用短句提醒不构成投资建议。',

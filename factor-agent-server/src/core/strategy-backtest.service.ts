@@ -3,6 +3,7 @@ import { ApiException } from '../common/api.exception';
 import { AgentProgressSink, BacktestCard, RawMetrics } from '../types';
 import { TradeDateCoverage } from './factor-data.service';
 import { maxDrawdownPct, toMetricItems } from './backtest.service';
+import { assertTimingOverlay, collectTimingRefs, StrategyTimingOverlay } from './timing';
 
 /* ==========================================================
    策略回测接口（契约层）—— 日频事件驱动内核（重构方案 v3，StrategySpec v1）
@@ -94,6 +95,8 @@ export interface StrategyBacktestInput {
   /** 卖出规则（持仓期每日检查） */
   sellRules?: unknown;
   benchmark?: unknown;
+  /** 大盘择时叠加（可选）：字段条件投票状态机 + 分级熊市仓位，见 timing.ts */
+  timingOverlay?: unknown;
   /** 策略类型标记（透传卡片/策略库；缺省 equal_weight = 等权特例形态） */
   strategyType?: unknown;
 }
@@ -115,6 +118,8 @@ export interface NormalizedStrategyInput {
   sortFactors: StrategySortFactor[];
   sellRules: StrategySellRule[];
   benchmark: BenchmarkKey;
+  /** 大盘择时叠加（未传 = 不择时，全程满仓） */
+  timingOverlay?: StrategyTimingOverlay;
   strategyType: string;
 }
 
@@ -323,6 +328,7 @@ export function assertStrategyInput(raw: StrategyBacktestInput): NormalizedStrat
     sortFactors: assertSortFactors(raw.sortFactors),
     sellRules: assertSellRules(raw.sellRules),
     benchmark: assertBenchmark(raw.benchmark),
+    timingOverlay: assertTimingOverlay(raw.timingOverlay),
     strategyType: raw.strategyType === undefined || raw.strategyType === null || raw.strategyType === ''
       ? 'equal_weight'
       : String(raw.strategyType).trim(),
@@ -481,7 +487,9 @@ export interface FactorRef {
   field: string;
 }
 
-/** 归一化入参引用的全部 (table, field)：entryFilters + 有效排序因子 + field 类卖出规则，去重保序 */
+/** 归一化入参引用的全部 (table, field)：entryFilters + 有效排序因子 + field 类卖出规则 +
+ *  择时条件（字段条件同构，序列按挂靠指数读取），去重保序。
+ *  择时引用同时决定日历推导——纯择时策略（无选股因子）的日历源 = 择时字段表 */
 export function collectFactorRefs(p: NormalizedStrategyInput): FactorRef[] {
   const refs: FactorRef[] = [];
   const seen = new Set<string>();
@@ -495,6 +503,7 @@ export function collectFactorRefs(p: NormalizedStrategyInput): FactorRef[] {
   for (const f of p.entryFilters) push(f.table, f.field);
   for (const f of effectiveSortFactors(p.sortFactors).factors) push(f.table, f.field);
   for (const r of p.sellRules) if (r.kind === 'field') push(r.table, r.field);
+  if (p.timingOverlay) for (const r of collectTimingRefs(p.timingOverlay)) push(r.table, r.field);
   return refs;
 }
 
