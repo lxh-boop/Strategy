@@ -1,0 +1,328 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>Architecture review — chenhaotao/Agent · factor-agent-server</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+  mermaid.initialize({ startOnLoad: true, theme: "neutral", securityLevel: "loose" });
+</script>
+<style>
+  .seam { stroke-dasharray: 4 4; }
+  .deep { background: linear-gradient(135deg, #0f172a, #1e293b); }
+  .hatch { background-image: repeating-linear-gradient(45deg, #fecaca 0 6px, #fef2f2 6px 12px); }
+</style>
+</head>
+<body class="bg-stone-50 text-slate-900 font-sans">
+<main class="max-w-5xl mx-auto px-6 py-12 space-y-12">
+
+<header class="space-y-3">
+  <h1 class="font-serif text-3xl">Architecture review — factor-agent-server</h1>
+  <p class="text-sm text-slate-500">chenhaotao/Agent · 2026-10-16 · 范围仅后端（前端按分工不在本次扫描）；领域词汇以 GLOSSARY.md 为准，架构决策以 ADR-0001（确认门 interrupt+checkpointer）为既定前提。</p>
+  <div class="flex flex-wrap gap-4 text-xs text-slate-500 pt-1">
+    <span><span class="inline-block w-3 h-3 border border-slate-400 bg-white align-middle"></span> module</span>
+    <span><span class="inline-block w-4 border-t-2 border-dashed border-slate-400 align-middle"></span> seam</span>
+    <span><span class="inline-block w-3 h-3 bg-red-500 align-middle"></span> leakage / 已发生的漂移</span>
+    <span><span class="inline-block w-3 h-3 deep align-middle"></span> deep module</span>
+  </div>
+</header>
+
+<section id="candidates" class="space-y-10">
+
+<!-- ═══════════ C1 ═══════════ -->
+<article id="c1" class="rounded-xl border border-stone-200 bg-white p-6 shadow-sm space-y-4">
+  <div class="flex items-start justify-between gap-4">
+    <h2 class="font-serif text-xl">1 · 收拢双引擎的资金账户执行原语</h2>
+    <div class="flex gap-2 shrink-0 text-xs">
+      <span class="px-2 py-1 rounded-full bg-emerald-100 text-emerald-800 font-medium">Strong</span>
+      <span class="px-2 py-1 rounded-full border border-slate-300 text-slate-500">in-process</span>
+    </div>
+  </div>
+  <p class="font-mono text-sm text-slate-500 leading-relaxed">core/implementations/strategy-backtest.service.impl.ts（882 行）<br/>core/implementations/trigger-backtest.service.impl.ts（602 行）</p>
+
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="rounded-lg border border-slate-200 bg-white p-4">
+      <p class="text-xs uppercase tracking-wider text-slate-400 mb-2">Before — 同一批原语两套拼写</p>
+      <pre class="mermaid">
+flowchart TB
+  subgraph M1["模型 Ⅰ 调仓引擎 · 882 行"]
+    A1["Quote/Position"] --> B1["buy/sell 闭包"] --> C1["仓位缩放·偏离带"] --> D1["结算·权益"] --> E1["matchSellRule"]
+  end
+  subgraph M2["模型 Ⅱ 触发引擎 · 602 行"]
+    A2["Quote/Position"] --> B2["buy/sell 闭包"] --> C2["仓位缩放·偏离带"] --> D2["结算·权益"] --> E2["matchSellRule"]
+  end
+  A1 -. 逐字 16 行 .-> A2
+  B1 -. 近似 27 行 .-> B2
+  C1 -. 近似 46 行 .-> C2
+  D1 -. 逐字 14 行 .-> D2
+  E1 -. 4/5 case 逐字 .-> E2
+  classDef leak stroke:#dc2626,stroke-width:2px;
+  class A2,B2,C2,D2,E2 leak
+      </pre>
+    </div>
+    <div class="rounded-lg border border-slate-200 bg-white p-4 flex flex-col">
+      <p class="text-xs uppercase tracking-wider text-slate-400 mb-2">After — 一个 deep module，两个薄驱动</p>
+      <div class="flex-1 flex items-center gap-3">
+        <div class="space-y-2 shrink-0">
+          <div class="w-28 h-14 border border-slate-400 bg-stone-50 flex items-center justify-center text-xs uppercase tracking-wider text-center p-1">模型 Ⅰ<br/>调仓周期驱动</div>
+          <div class="w-28 h-14 border border-slate-400 bg-stone-50 flex items-center justify-center text-xs uppercase tracking-wider text-center p-1">模型 Ⅱ<br/>逐日触发驱动</div>
+        </div>
+        <svg width="34" height="120" class="shrink-0"><line x1="0" y1="30" x2="30" y2="60" stroke="#334155" stroke-width="1.5"/><line x1="0" y1="90" x2="30" y2="60" stroke="#334155" stroke-width="1.5"/><polygon points="30,60 22,56 22,64" fill="#334155"/></svg>
+        <div class="deep text-white rounded-lg p-4 flex-1">
+          <p class="text-xs uppercase tracking-wider text-slate-300 mb-1">deep module · 资金账户执行原语</p>
+          <p class="text-sm leading-relaxed text-slate-200">Quote/Position · 成交时点取价 · buy/sell · 结算与权益 · 卖出规则判定 · 偏离带缩放 · T+1 信号时序</p>
+        </div>
+      </div>
+      <div class="mt-3 rounded-md bg-red-50 border border-red-200 p-3 text-xs text-red-800 space-y-1">
+        <p class="font-medium">已发生的漂移（非假设）：</p>
+        <p>· 择时引用收集重写后丢了去重 [trigger:458]</p>
+        <p>· minPositionPct 被模型 Ⅱ 静默忽略 [trigger:316]</p>
+        <p>· rank_out 同一输入两套语义 [impl:161 / trigger:92]</p>
+        <p>· mkt_idxd 表名三份定义 [impl:73 / mysql:37 / trigger:127]</p>
+      </div>
+    </div>
+  </div>
+
+  <p class="text-sm"><span class="font-medium">Problem</span> — 约 300 行执行原语（成交时点取价、买卖、结算、卖出规则、偏离带）在两个引擎里逐字或近似重复，重复已经产出三处实证漂移；两个引擎 10-15 同日都在改，重复面还在扩大。</p>
+  <p class="text-sm"><span class="font-medium">Solution</span> — 原语收拢成一个 deep module，两个引擎退化为薄驱动，各自只留约 60 行独有逻辑（调仓周期编排 vs 逐日触发评估与懒装载）。</p>
+  <ul class="text-sm list-disc list-inside space-y-1 text-slate-700">
+    <li>locality：漂移类 bug 集中一处，改一次两引擎同修</li>
+    <li>leverage：一份原语 interface，两个引擎回本</li>
+    <li>原语可直接表驱动测试（结算/卖出规则不必跑完整回测）</li>
+  </ul>
+</article>
+
+<!-- ═══════════ C2 ═══════════ -->
+<article id="c2" class="rounded-xl border border-stone-200 bg-white p-6 shadow-sm space-y-4">
+  <div class="flex items-start justify-between gap-4">
+    <h2 class="font-serif text-xl">2 · 回测参数契约的单一事实源</h2>
+    <div class="flex gap-2 shrink-0 text-xs">
+      <span class="px-2 py-1 rounded-full bg-emerald-100 text-emerald-800 font-medium">Strong</span>
+      <span class="px-2 py-1 rounded-full border border-slate-300 text-slate-500">ports &amp; adapters</span>
+    </div>
+  </div>
+  <p class="font-mono text-sm text-slate-500 leading-relaxed">agent/implementations/tool-specs.ts（233 行）<br/>agent/implementations/langgraph-agent.service.ts:781-829（system prompt）<br/>core/strategy-backtest.service.ts:222-505（assertStrategyInput）<br/>src/types.ts（前端镜像契约）</p>
+
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="rounded-lg border border-slate-200 bg-white p-4 flex flex-col justify-center">
+      <p class="text-xs uppercase tracking-wider text-slate-400 mb-3">Before — 同一约束手抄 2~4 份</p>
+      <div class="space-y-2 text-sm">
+        <div class="border-l-4 border-red-500 bg-red-50 p-2">tool-specs schema → 发往 GLM<br/><span class="text-red-700 text-xs">⚠ timingOverlay 不在 properties 里——schema 损坏，已实证</span></div>
+        <div class="border-l-4 border-amber-400 bg-amber-50 p-2">system prompt 行为规则 <span class="text-xs text-slate-500">rebalanceIntervalDays 规则又教一遍</span></div>
+        <div class="border-l-4 border-amber-400 bg-amber-50 p-2">assertStrategyInput 报错文案 <span class="text-xs text-slate-500">feeRate/成交时点/上限再写一遍</span></div>
+        <div class="border-l-4 border-slate-300 bg-stone-50 p-2">types.ts 注释 <span class="text-xs text-slate-500">feeRate 缺省第三次</span></div>
+        <p class="text-xs text-red-700 pt-1">三处红色箭头互相"人肉同步"，无单一事实源</p>
+      </div>
+    </div>
+    <div class="rounded-lg border border-slate-200 bg-white p-4 flex flex-col justify-center">
+      <p class="text-xs uppercase tracking-wider text-slate-400 mb-3">After — core 契约单源，其余引用派生</p>
+      <div class="deep text-white rounded-lg p-3 text-center text-sm">core 契约单一出口<br/><span class="text-xs text-slate-300">约束常量 · 枚举 · 缺省值 · 报错文案</span></div>
+      <svg height="26" class="mx-auto"><line x1="90" y1="0" x2="20" y2="24" stroke="#334155" class="seam"/><line x1="90" y1="0" x2="90" y2="24" stroke="#334155" class="seam"/><line x1="90" y1="0" x2="160" y2="24" stroke="#334155" class="seam"/></svg>
+      <div class="grid grid-cols-3 gap-2 text-center text-xs">
+        <div class="border border-slate-400 bg-stone-50 p-2">tool-specs<br/>schema 派生</div>
+        <div class="border border-slate-400 bg-stone-50 p-2">assertStrategyInput<br/>唯一校验者</div>
+        <div class="border border-slate-400 bg-stone-50 p-2">system prompt<br/>只引用不改写</div>
+      </div>
+    </div>
+  </div>
+
+  <p class="text-sm"><span class="font-medium">Problem</span> — 参数约束在 schema、prompt、校验文案三处手抄（rebalanceIntervalDays 写了 4 遍、feeRate 3 遍），timingOverlay 已实际漂移：它不在 schema 的 properties 里，模型能否用它全凭 GLM 对未知关键字的宽容度。</p>
+  <p class="text-sm"><span class="font-medium">Solution</span> — 约束常量、枚举、缺省值在 core 契约单源化；schema 描述与 prompt 规则从它引用或派生；schema 结构本身加一条单测防再次漂移。</p>
+  <ul class="text-sm list-disc list-inside space-y-1 text-slate-700">
+    <li>timingOverlay schema 立即可修（独立小刀）</li>
+    <li>leverage：约束改一处，schema/校验/prompt 同步</li>
+    <li>schema 结构正确性成为可测对象</li>
+  </ul>
+</article>
+
+<!-- ═══════════ C3 ═══════════ -->
+<article id="c3" class="rounded-xl border border-stone-200 bg-white p-6 shadow-sm space-y-4">
+  <div class="flex items-start justify-between gap-4">
+    <h2 class="font-serif text-xl">3 · 确认门收拢为显式命名单元</h2>
+    <div class="flex gap-2 shrink-0 text-xs">
+      <span class="px-2 py-1 rounded-full bg-amber-100 text-amber-800 font-medium">Worth exploring</span>
+      <span class="px-2 py-1 rounded-full border border-slate-300 text-slate-500">in-process</span>
+    </div>
+  </div>
+  <p class="font-mono text-sm text-slate-500">agent/implementations/langgraph-agent.service.ts（946 行；确认门散布 9 处，约 250 行）</p>
+
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="rounded-lg border border-slate-200 bg-white p-4">
+      <p class="text-xs uppercase tracking-wider text-slate-400 mb-2">Before — 一个语义，9 个互不相邻的落点</p>
+      <div class="relative h-40 text-[10px] leading-tight">
+        <div class="absolute top-0 left-0 right-0 h-8 bg-stone-100 rounded flex items-center px-2 font-mono text-slate-400">langgraph-agent.service.ts · 946 行</div>
+        <div class="absolute top-10 left-0 right-0 h-6 bg-red-100 border border-red-300 rounded-sm px-1 py-0.5 text-red-800">状态通道 confirmedCalls/rejectedCalls [131]</div>
+        <div class="absolute top-[68px] left-0 w-[30%] h-6 bg-red-100 border border-red-300 rounded-sm px-1 py-0.5 text-red-800">魔串"授权调优" [429]</div>
+        <div class="absolute top-[68px] left-[32%] w-[33%] h-6 bg-red-100 border border-red-300 rounded-sm px-1 py-0.5 text-red-800">决策解析 resumeConfirm [453]</div>
+        <div class="absolute top-[68px] right-0 w-[33%] h-6 bg-red-100 border border-red-300 rounded-sm px-1 py-0.5 text-red-800">interrupt 挂起检测 [483]</div>
+        <div class="absolute top-[96px] left-0 w-[45%] h-6 bg-red-100 border border-red-300 rounded-sm px-1 py-0.5 text-red-800">confirm 节点本体 [628-703]</div>
+        <div class="absolute top-[96px] right-0 w-[53%] h-6 bg-red-100 border border-red-300 rounded-sm px-1 py-0.5 text-red-800">GraphInterrupt 穿透守卫 ①[541] ②[683] 各写一遍</div>
+        <div class="absolute top-[124px] left-0 w-[40%] h-6 bg-red-100 border border-red-300 rounded-sm px-1 py-0.5 text-red-800">拒绝回执透传 [288]</div>
+        <div class="absolute top-[124px] right-0 w-[58%] h-6 bg-red-100 border border-red-300 rounded-sm px-1 py-0.5 text-red-800">delegated 失败策略 [717]</div>
+        <div class="absolute bottom-0 left-0 right-0 h-4 bg-stone-100 rounded flex items-center px-2 text-slate-400 font-mono">其余 15 类职责混排其间</div>
+      </div>
+    </div>
+    <div class="rounded-lg border border-slate-200 bg-white p-4 flex flex-col justify-center">
+      <p class="text-xs uppercase tracking-wider text-slate-400 mb-3">After — 确认门是一个可一次读完的单元</p>
+      <div class="deep text-white rounded-lg p-4">
+        <p class="text-xs uppercase tracking-wider text-slate-300 mb-1">deep module · 确认门</p>
+        <p class="text-sm text-slate-200 leading-relaxed">confirm 节点 + 决策解析 + 状态通道 + 穿透守卫（仅一份）+ 魔串入口，同居一处；interrupt 幂等保证（零副作用 + confirmedCalls 回放 + 重入闸 + fail-open）一次阅读可穷尽</p>
+      </div>
+      <div class="mt-3 h-16 bg-stone-100 rounded flex items-center justify-center text-xs text-slate-400">图拓扑 / 进度管道 / prompt —— 其余职责只依赖它的 interface</div>
+    </div>
+  </div>
+
+  <p class="text-sm"><span class="font-medium">Problem</span> — 确认门语义拆在 9 个位置，穿透守卫写了两遍（"吞掉 = 确认门失效"靠注释维持），改一处决策语义要全文件找点；10-13~10-15 连续五刀补丁全部落在同一个 946 行文件。</p>
+  <p class="text-sm"><span class="font-medium">Solution</span> — 在文件内把确认门收拢为一个显式命名单元（不推翻 ADR-0001，是落实它），其余职责只看到它的 interface。</p>
+  <ul class="text-sm list-disc list-inside space-y-1 text-slate-700">
+    <li>locality：9 处散点进一个单元</li>
+    <li>穿透守卫只写一遍，语义不再靠注释</li>
+    <li>决策语义修改的 diff 不再穿过全文件</li>
+  </ul>
+  <div class="rounded-md bg-amber-50 border border-amber-200 p-3 text-xs text-amber-800">落实 ADR-0001（确认门 interrupt+checkpointer）——收拢其幂等保证，不重开架构决策。</div>
+</article>
+
+<!-- ═══════════ C4 ═══════════ -->
+<article id="c4" class="rounded-xl border border-stone-200 bg-white p-6 shadow-sm space-y-4">
+  <div class="flex items-start justify-between gap-4">
+    <h2 class="font-serif text-xl">4 · 日频主循环阶段化——让卖出规则路径可单独驱动</h2>
+    <div class="flex gap-2 shrink-0 text-xs">
+      <span class="px-2 py-1 rounded-full bg-amber-100 text-amber-800 font-medium">Worth exploring</span>
+      <span class="px-2 py-1 rounded-full border border-slate-300 text-slate-500">in-process</span>
+    </div>
+  </div>
+  <p class="font-mono text-sm text-slate-500">core/implementations/strategy-backtest.service.impl.ts:148-585（runStrategyBacktest 207 行 + runMainLoop 228 行）</p>
+
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="rounded-lg border border-slate-200 bg-white p-4">
+      <p class="text-xs uppercase tracking-wider text-slate-400 mb-3">Before — 六个职责挤在两个巨函数里</p>
+      <div class="space-y-1 text-xs">
+        <p class="font-mono text-slate-400">runStrategyBacktest · 207 行</p>
+        <div class="h-7 flex gap-px"><div class="flex-[2] bg-slate-200 flex items-center justify-center">路由</div><div class="flex-[2] bg-slate-200 flex items-center justify-center">白名单</div><div class="flex-[3] bg-slate-200 flex items-center justify-center">日历·调仓日</div><div class="flex-[4] bg-amber-200 flex items-center justify-center">信号预取 55 行</div><div class="flex-[3] bg-amber-200 flex items-center justify-center">行情 42 行</div><div class="flex-[3] bg-slate-200 flex items-center justify-center">择时状态机</div><div class="flex-[2] bg-slate-200 flex items-center justify-center">组装</div></div>
+        <p class="font-mono text-slate-400 pt-1">runMainLoop · 228 行</p>
+        <div class="h-7 flex gap-px"><div class="flex-[3] bg-slate-200 flex items-center justify-center">buy/sell 闭包</div><div class="flex-[4] bg-slate-200 flex items-center justify-center">执行·择时缩放 47 行</div><div class="flex-[4] bg-slate-200 flex items-center justify-center">调仓块 60 行</div><div class="flex-[2] bg-slate-200 flex items-center justify-center">结算</div><div class="flex-[2] bg-slate-200 flex items-center justify-center">信号</div></div>
+        <div class="pt-2 text-red-700">零测试路径（只能整函数跑，跑不起就测不到）：<br/>· 字段触发卖出规则主循环 [impl:611-620]<br/>· rank_out 路径 [impl:161/506/630]</div>
+      </div>
+    </div>
+    <div class="rounded-lg border border-slate-200 bg-white p-4 flex flex-col justify-center">
+      <p class="text-xs uppercase tracking-wider text-slate-400 mb-3">After — 阶段 seam，主函数只做编排</p>
+      <div class="space-y-2">
+        <div class="deep text-white rounded p-2 text-center text-xs">主循环编排（进度事件 + 阶段串联）</div>
+        <div class="grid grid-cols-5 gap-1 text-center text-[11px]">
+          <div class="border border-slate-400 bg-stone-50 p-2">信号<br/>预取</div>
+          <div class="border border-slate-400 bg-stone-50 p-2">行情<br/>装载</div>
+          <div class="border border-slate-400 bg-stone-50 p-2">择时<br/>序列</div>
+          <div class="border border-slate-400 bg-stone-50 p-2">执行<br/>买卖</div>
+          <div class="border border-slate-400 bg-stone-50 p-2">结算<br/>聚合</div>
+        </div>
+        <p class="text-xs text-slate-500">每阶段纯数据进出 → interface 即测试面；field 卖出 / rank_out 直接构造阶段输入即可测</p>
+      </div>
+    </div>
+  </div>
+
+  <p class="text-sm"><span class="font-medium">Problem</span> — 六个职责内嵌取数编排只能整函数驱动；恰好 field 卖出规则与 rank_out 两条主循环路径因跑不起而零测试（测试目录 989 行里无一条覆盖）。</p>
+  <p class="text-sm"><span class="font-medium">Solution</span> — 信号预取 / 行情装载 / 择时序列 / 执行 / 结算拆为阶段 module，以纯数据交接；主函数退化为编排与进度事件。</p>
+  <ul class="text-sm list-disc list-inside space-y-1 text-slate-700">
+    <li>field 卖出 / rank_out 路径可测</li>
+    <li>阶段 interface 即测试面</li>
+    <li>回测 bug 定位集中到单阶段</li>
+  </ul>
+</article>
+
+<!-- ═══════════ C5 ═══════════ -->
+<article id="c5" class="rounded-xl border border-stone-200 bg-white p-6 shadow-sm space-y-4">
+  <div class="flex items-start justify-between gap-4">
+    <h2 class="font-serif text-xl">5 · 字典与白名单知识的单一出口</h2>
+    <div class="flex gap-2 shrink-0 text-xs">
+      <span class="px-2 py-1 rounded-full bg-amber-100 text-amber-800 font-medium">Worth exploring</span>
+      <span class="px-2 py-1 rounded-full border border-slate-300 text-slate-500">local-substitutable</span>
+    </div>
+  </div>
+  <p class="font-mono text-sm text-slate-500 leading-relaxed">core/factor-schema.ts（129 行）· core/implementations/mysql-factor-data.service.ts:317-338<br/>strategy impl:863-881 与 trigger impl:463-477（assertWhitelist 两份逐字副本）<br/>langgraph-agent.service.ts:805 · tool-specs.ts:203（mkt_idxd 文案字面量）</p>
+
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="rounded-lg border border-slate-200 bg-white p-4">
+      <p class="text-xs uppercase tracking-wider text-slate-400 mb-2">Before — 校验 3 层 4 份，字面量 5 处</p>
+      <pre class="mermaid">
+flowchart TB
+  D[("SQL/ 字典 tables.md")]
+  S[factor-schema 解析]
+  M[mysql assertTable/assertField]
+  W1[策略引擎 assertWhitelist 副本①]
+  W2[触发引擎 assertWhitelist 副本②]
+  L1[agent 文案 mkt_idxd 字面量]
+  L2[tool-specs 文案 mkt_idxd 字面量]
+  D --> S --> M --> W1 --> W2
+  L1 -. 字典知识泄漏 .-> D
+  L2 -. 字典知识泄漏 .-> D
+  classDef leak stroke:#dc2626,stroke-width:2px;
+  class W1,W2,L1,L2 leak
+      </pre>
+    </div>
+    <div class="rounded-lg border border-slate-200 bg-white p-4 flex flex-col justify-center">
+      <p class="text-xs uppercase tracking-wider text-slate-400 mb-3">After — 字典 module 单出口</p>
+      <div class="deep text-white rounded-lg p-3 text-center text-sm">字典 module（含最深的 70 行取数形状推导）</div>
+      <svg height="24" class="mx-auto"><line x1="100" y1="0" x2="30" y2="22" stroke="#334155" class="seam"/><line x1="100" y1="0" x2="100" y2="22" stroke="#334155" class="seam"/><line x1="100" y1="0" x2="170" y2="22" stroke="#334155" class="seam"/></svg>
+      <div class="grid grid-cols-3 gap-2 text-center text-xs">
+        <div class="border border-slate-400 bg-stone-50 p-2">校验<br/>唯一一份</div>
+        <div class="border border-slate-400 bg-stone-50 p-2">表名常量<br/>唯一一份</div>
+        <div class="border border-slate-400 bg-stone-50 p-2">文案标签<br/>派生</div>
+      </div>
+    </div>
+  </div>
+
+  <p class="text-sm"><span class="font-medium">Problem</span> — 同一份字典校验 3 层 4 份（契约层明说双层校验是设计决定，但引擎侧两份副本是纯重复），mkt_idxd 表名 5 处字面量；字典驱动的取数推导——全链最深的 70 行——反而不被校验与文案复用。</p>
+  <p class="text-sm"><span class="font-medium">Solution</span> — 字典解析 module 成为唯一出口：校验、表名常量、展示文案都从它派生；引擎侧 assertWhitelist 副本随 C1 的原语收拢一并消失。</p>
+  <ul class="text-sm list-disc list-inside space-y-1 text-slate-700">
+    <li>校验副本 4 → 1</li>
+    <li>新表登记一处生效（含 agent 文案）</li>
+    <li>与 C1 有交集：副本消失可借道原语收拢</li>
+  </ul>
+</article>
+
+<!-- ═══════════ C6 ═══════════ -->
+<article id="c6" class="rounded-xl border border-stone-200 bg-white p-6 shadow-sm space-y-4">
+  <div class="flex items-start justify-between gap-4">
+    <h2 class="font-serif text-xl">6 · 剪枝第三刀——死参数链与仪式 module</h2>
+    <div class="flex gap-2 shrink-0 text-xs">
+      <span class="px-2 py-1 rounded-full bg-emerald-100 text-emerald-800 font-medium">Strong</span>
+      <span class="px-2 py-1 rounded-full border border-slate-300 text-slate-500">in-process</span>
+    </div>
+  </div>
+  <p class="font-mono text-sm text-slate-500 leading-relaxed">agent.service.ts:20 · conversations.service.impl.ts:71-76 · langgraph-agent.service.ts:364（routeText 死参数链）<br/>market/（65 行 4 文件）· zhipu/http-zhipu.service.ts（170 行死实现）<br/>strategies.controller.ts:17-20 + dto.ts:15-42（create 400 桩）<br/>strategies.service.impl.ts:28-37 与 core:862-870（8 档频率双表）· types.ts:62-84 与 core:44-67（三类型逐字复制）· metrics.ts（46 行墓地杂集）</p>
+
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="rounded-lg border border-slate-200 bg-white p-4 flex flex-col justify-center">
+      <p class="text-xs uppercase tracking-wider text-slate-400 mb-3">Before — 约 500 行 deletion test 通过项</p>
+      <div class="hatch h-24 rounded border border-red-300 flex items-center justify-center text-xs text-red-800 text-center px-4">routeText 三处 · market/ 全部 · zhipu chat/chatStream 130 行<br/>create 桩 + 43 行 DTO · BacktestParamsDto void 参数 · 频率双表<br/>types.ts 三类型复制 · toDashDate 双胞胎 · metrics.ts</div>
+      <p class="text-xs text-slate-500 pt-2">全部满足"删掉后复杂度纯离开，无补集"；仅 create 路由涉及 API 兼容需拍板</p>
+    </div>
+    <div class="rounded-lg border border-slate-200 bg-white p-4 flex flex-col justify-center">
+      <p class="text-xs uppercase tracking-wider text-slate-400 mb-3">After</p>
+      <div class="h-24 rounded border border-emerald-300 bg-emerald-50 flex items-center justify-center text-sm text-emerald-800">0 行死代码；签名与实现重新对齐；<br/>types.ts 镜像类型改 import core 契约</div>
+    </div>
+  </div>
+
+  <p class="text-sm"><span class="font-medium">Problem</span> — 一批 module 与参数在 deletion test 下不产生任何复杂度回流：routeText 三处死链、market/ 的 interface+impl+module 只为读一个常量、zhipu 130 行主链路不用的实现。</p>
+  <p class="text-sm"><span class="font-medium">Solution</span> — 逐项删除；types.ts 已 re-use core 的两个类型（StrategyPeriodRow/StrategyTimingOverlay），同一文件里既 import 又逐字复制的混合状态收尾为全 import。</p>
+  <ul class="text-sm list-disc list-inside space-y-1 text-slate-700">
+    <li>复杂度纯离开，无补集</li>
+    <li>abstract 与实现签名重新对齐</li>
+    <li>频率双表合一、镜像类型归一</li>
+  </ul>
+</article>
+
+</section>
+
+<!-- ═══════════ 首选推荐 ═══════════ -->
+<section id="top-recommendation" class="rounded-xl border-2 border-emerald-600 bg-white p-8 space-y-2">
+  <p class="text-xs uppercase tracking-wider text-emerald-700">首选推荐</p>
+  <h2 class="font-serif text-2xl"><a href="#c1" class="underline decoration-emerald-400 underline-offset-4">1 · 收拢双引擎的资金账户执行原语</a></h2>
+  <p class="text-sm text-slate-700">重复在这里不是风险，是已经发生的 bug（三处实证漂移 + 一处表名三份定义），而两个引擎同日都在改、重复面仍在扩大——deepening 的 leverage 与 locality 收益都是六个候选项里最大的。顺带可把 C5 的 assertWhitelist 副本一起带走。C2 里的 timingOverlay schema 是独立的一行级修复，无论选哪个方向都建议先落这一刀。</p>
+</section>
+
+<p class="text-xs text-slate-400 text-center pt-4">由 /improve-codebase-architecture 生成 · 2026-10-16 · 存放于 docs/architecture-review/</p>
+</main>
+</body>
+</html>
