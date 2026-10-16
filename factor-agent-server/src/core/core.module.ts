@@ -2,6 +2,7 @@ import { Global, Module } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { FactorDataService } from './factor-data.service';
 import { StrategyBacktestService } from './strategy-backtest.service';
+import { BacktestExecutionService } from './backtest-execution.service';
 import { UserStoreService } from './user-store.service';
 import { MemoryUserStoreService } from './implementations/memory-user-store.service';
 import { MysqlFactorDataService } from './implementations/mysql-factor-data.service';
@@ -9,6 +10,9 @@ import { MysqlUserStoreService } from './implementations/mysql-user-store.servic
 import { StrategyBacktestServiceImpl } from './implementations/strategy-backtest.service.impl';
 import { TriggerBacktestService } from './trigger-backtest.service';
 import { TriggerBacktestServiceImpl } from './implementations/trigger-backtest.service.impl';
+import { FactorAnalysisService } from './factor-analysis.service';
+import { FactorAnalysisServiceImpl } from './implementations/factor-analysis.service.impl';
+import { AccountBacktestExecutionService } from './implementations/account-backtest-execution.service.impl';
 
 /**
  * 领域共享层：接口（token）→ 实现类 的装配点。
@@ -16,6 +20,8 @@ import { TriggerBacktestServiceImpl } from './implementations/trigger-backtest.s
  *                           / MemoryUserStoreService（未配置时开发兜底）
  *   因子取数 FactorDataService → MysqlFactorDataService（MySQL herms_data 库）
  *   策略回测 StrategyBacktestService → StrategyBacktestServiceImpl（日频事件内核，经 FactorDataService 取数）
+ *   回测执行层 BacktestExecutionService → AccountBacktestExecutionService（TS 内核包装，dolp 形状输出；
+ *                                       将来切 DolphinDB 插件时换同契约实现）
  * 换实现只改这一处，上层（B/C）零改动。
  */
 @Global()
@@ -31,7 +37,9 @@ import { TriggerBacktestServiceImpl } from './implementations/trigger-backtest.s
     { provide: FactorDataService, useClass: MysqlFactorDataService },
     { provide: StrategyBacktestService, useClass: StrategyBacktestServiceImpl },
     { provide: TriggerBacktestService, useClass: TriggerBacktestServiceImpl },
+    { provide: BacktestExecutionService, useClass: AccountBacktestExecutionService },
+    { provide: FactorAnalysisService, useClass: FactorAnalysisServiceImpl },
   ],
-  exports: [UserStoreService, FactorDataService, StrategyBacktestService],
+  exports: [UserStoreService, FactorDataService, StrategyBacktestService, BacktestExecutionService],
 })
 export class CoreModule {}
