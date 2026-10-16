@@ -49,9 +49,10 @@ export const READ_FACTOR_DATA_SPEC = {
   function: {
     name: 'read_factor_data',
     description:
-      '按 表/因子字段集合/交易日/证券代码 读取因子数据。' +
+      '按 表/因子字段集合/交易日/证券代码 读取数据。' +
       'table 必须来自系统提示中的表目录，fields 必须来自 list_factor_fields 的返回，' +
-      'date 为纯数字交易日（如 20210506），security 为证券代码（如 000002.XSHE）。',
+      'date 为纯数字交易日（如 20210506），security 为证券或指数代码（如 000002.XSHE / 000001.XSHG 上证指数）；' +
+      '股票因子表按全码匹配，指数/主表自动按交易代码+交易市场匹配，日期对无交易日列的静态表自动忽略。',
     parameters: {
       type: 'object',
       properties: {
@@ -194,6 +195,17 @@ export const RUN_STRATEGY_BACKTEST_SPEC = {
           description: '业绩基准：hs300 沪深300（默认）/ csi500 中证500 / sse 上证指数',
         },
       },
+        timingOverlay: {
+          type: 'object',
+          description:
+            '大盘择时叠加（可选）：字段条件逐日投票的状态机决定策略总仓位——牛市满仓、熊市保留 bearPositionPct。' +
+            '仅当用户明确表达总仓位控制意图（如"跌破某点位就空仓""放量才满仓"）时传入；' +
+            'rules 的 table/field 必须来自表目录与 list_factor_fields（当前可用 mkt_idxd 的 CLOSE_INDEX/CHG_PCT/TURNOVER_VALUE 等）；' +
+            'index 缺省 sse（上证）、bearPositionPct 缺省 0（空仓）、enterVotes/exitVotes 缺省 -1（需全部条件），缺省值须在提案中注明；' +
+            '字典暂无均线/金叉类字段，用户提出此类条件时如实告知暂不支持，引导改用点位/涨跌幅/量能条件。' +
+            '结构：{index:"sse"|"hs300"|"csi500", rules:[{table,field,op:">"|"<"|"bw", value 或 low/high}](1~3 条), ' +
+            'enterVotes:-1|数字, exitVotes:-1|数字, bearPositionPct:0~100}',
+        },
       required: ['startDate', 'endDate', 'rebalanceIntervalDays'],
     },
   },

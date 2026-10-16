@@ -60,6 +60,11 @@ export abstract class FactorDataService {
 
   /** 指数日线（回测基准）：[start,end] 的收盘/昨收盘，日收益 = close / preClose - 1。 */
   abstract readIndexDaily(table: string, ticker: string, start: string, end: string): Promise<IndexDailyRow[]>;
+
+  /** 指数单字段区间序列（择时条件用）：指定指数代码在 [start,end] 每个交易日的字段值。
+   *  v1 仅支持 TICKER_SYMBOL 键表（如 mkt_idxd）；内部 ID 键表（mkt_idxd_eval 等）
+   *  接入见 TABLE_KEY_COLUMNS 设计（大盘择时重构方案 §3.1）。 */
+  abstract readIndexFieldSeries(table: string, field: string, ticker: string, start: string, end: string): Promise<IndexFieldRow[]>;
 }
 
 /** 因子表交易日覆盖 */
@@ -111,4 +116,11 @@ export interface IndexDailyRow {
   tradeDate: string;
   close: number;
   preClose: number;
+}
+
+/** 指数单字段区间序列一行（择时条件用） */
+export interface IndexFieldRow {
+  /** 交易日 'YYYY-MM-DD' */
+  tradeDate: string;
+  value: number;
 }

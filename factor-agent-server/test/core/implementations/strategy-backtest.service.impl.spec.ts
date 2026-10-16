@@ -287,12 +287,18 @@ function defaultQuotes(): QuoteRow[] {
 }
 
 interface Fixture {
+  /** 指数字段序列（择时用）：交易日 YYYYMMDD → 字段值；未传 = 无择时序列 */
+  indexSeries?: Record<number, number>;
   /** REVS20 截面：日期 → (code → 值) */
   momentum: Record<number, Record<string, number>>;
   quotes: QuoteRow[];
 }
 
 function makeService(fixture: Fixture): StrategyBacktestServiceImpl {
+  const indexSeriesRows = Object.entries(fixture.indexSeries ?? {}).map(([d, v]) => {
+    const day = String(d);
+    return { tradeDate: `${day.slice(0, 4)}-${day.slice(4, 6)}-${day.slice(6, 8)}`, value: v };
+  });
   const factorData = {
     readTable: async () => [],
     readTradeDates: async () => ({ dates: TRADE_DATES, min: 20200101, max: 20241231 }),
@@ -308,6 +314,7 @@ function makeService(fixture: Fixture): StrategyBacktestServiceImpl {
       { tradeDate: '2024-01-04', close: 102, preClose: 101 },
       { tradeDate: '2024-01-05', close: 101, preClose: 102 },
     ],
+    readIndexFieldSeries: async () => indexSeriesRows,
   } as unknown as FactorDataService;
   return new StrategyBacktestServiceImpl(factorData);
 }
@@ -415,6 +422,92 @@ describe('StrategyBacktestServiceImpl（全流程 stub，不触库）', () => {
       代码: CODE_B,
       股数: 5000,
     });
+  });
+
+  it('大盘择时熊市：先满仓建仓，条件转熊后次日全额择时减仓，后续不再建仓', async () => {
+    const service = makeService({
+      momentum: {
+        20240102: { [CODE_A]: 10, [CODE_B]: 20 }, // → [B]
+        20240104: { [CODE_A]: 30, [CODE_B]: 5 },  // → [A]（但目标仓位已被择时压到 0，不会建仓）
+      },
+      quotes: defaultQuotes(),
+      // 指数：D0=6000（牛票成立），D1 起跌到 2000（恒为熊票）→ D1 收盘转熊，D2 起空仓
+      indexSeries: { 20240102: 6000, 20240103: 2000, 20240104: 2000, 20240105: 2000 },
+    });
+    const out = await service.runStrategyBacktest({
+      securityIds: [CODE_A, CODE_B],
+      startDate: '20240101',
+      endDate: '20240108',
+      initialCapital: 100_000,
+      feeRate: 0,
+      rebalanceIntervalDays: 2,
+      maxPositions: 1,
+      timingOverlay: {
+        index: 'sse',
+        rules: [{ table: 'mkt_idxd', field: 'CLOSE_INDEX', op: '>', value: 5000 }],
+        enterVotes: -1,
+        exitVotes: -1,
+        bearPositionPct: 0,
+      },
+    });
+    const trades = out.card.trades ?? [];
+    expect(trades.map((t) => [t.date, t.code, t.direction, t.reason])).toEqual([
+      [20240103, CODE_B, 'buy', '调仓建仓'],   // D1：D0 收盘仍为牛 → 满仓建仓
+      [20240104, CODE_B, 'sell', '择时减仓'],  // D2：D1 收盘转熊 → 全额清仓（T+1 已解锁）
+    ]);
+    // D2 之后空仓：不再有任何买入
+    expect(trades.every((t) => t.date <= 20240104)).toBe(true);
+    expect(out.summary.期末持仓).toEqual([]);
+    expect(out.card.positionDist).toEqual([
+      { label: '100%(满仓)', days: 2 },
+      { label: '0%(空仓)', days: 2 },
+    ]);
+    expect(out.card.holdingDaysPct).toBe(50);
+    // 踏空归因：D2 暴露 0 而基准上涨（102/101-1 ≈ 0.99%）
+    expect(out.card.missedRallies?.some((m) => m.date === 20240104)).toBe(true);
+    // 确认门/卡片参数行
+    expect((out.card.params ?? []).some((row) => row.label === '大盘择时')).toBe(true);
+  });
+
+  it('大盘择时熊市仓位 50%：转熊后不全清，按市值收敛到半仓', async () => {
+    const service = makeService({
+      momentum: {
+        20240102: { [CODE_A]: 10, [CODE_B]: 20 },
+        20240104: { [CODE_A]: 30, [CODE_B]: 5 },
+      },
+      quotes: defaultQuotes(),
+      indexSeries: { 20240102: 6000, 20240103: 2000, 20240104: 2000, 20240105: 2000 },
+    });
+    const out = await service.runStrategyBacktest({
+      securityIds: [CODE_A, CODE_B],
+      startDate: '20240101',
+      endDate: '20240108',
+      initialCapital: 100_000,
+      feeRate: 0,
+      rebalanceIntervalDays: 2,
+      maxPositions: 1,
+      timingOverlay: {
+        index: 'sse',
+        rules: [{ table: 'mkt_idxd', field: 'CLOSE_INDEX', op: '>', value: 5000 }],
+        enterVotes: -1,
+        exitVotes: -1,
+        bearPositionPct: 50,
+      },
+    });
+    const trades = out.card.trades ?? [];
+    // D2 择时减仓收敛到半仓；20240105 是调仓日——择时只压总仓位，调仓日轮动照常（B→A）
+    expect(trades.map((t) => [t.date, t.direction, t.reason])).toEqual([
+      [20240103, 'buy', '调仓建仓'],
+      [20240104, 'sell', '择时减仓'],
+      [20240105, 'sell', '调仓卖出'],
+      [20240105, 'buy', '调仓建仓'],
+    ]);
+    // 择时减仓：目标市值 52500 ÷ 21 元 = 2500 股
+    const sellTrade = trades.find((t) => t.reason === '择时减仓')!;
+    expect(sellTrade.shares).toBe(2500);
+    // 调仓日建仓 A 的目标市值也被压在半仓（10 万权益 × 100% × 50%）
+    const buyTrade = trades.find((t) => t.reason === '调仓建仓' && t.date === 20240105)!;
+    expect(buyTrade.amount).toBeLessThanOrEqual(52_500);
   });
 
   it('全部调仓日无候选（因子截面为空）→ 报错不跑引擎', async () => {

@@ -98,17 +98,23 @@ export function MetricGrid({ metrics }: { metrics: MetricItem[] }) {
 export function ParamsBlock({ items }: { items?: BtParamItem[] }) {
   const { btParams } = useConfig();
   const rows = items && items.length > 0 ? items : btParams;
+  // 第二排固定放三条长内容（排序/过滤/卖出），其余短参数排第一排；两排各自独立成格，不做列对齐
+  const RULE_LABELS = ["排序因子", "过滤因子", "卖出规则"];
+  const ruleRows = rows.filter(p => RULE_LABELS.includes(p.label));
+  const shortRows = rows.filter(p => !RULE_LABELS.includes(p.label));
+  const tile = (p: BtParamItem) => (
+    <div className="btp-item" key={p.label} title={p.hint}>
+      <div className="btp-label">{p.label}</div>
+      <div className="btp-val">{p.value}</div>
+    </div>
+  );
   return (
     <>
       <div className="btp-title">回测参数（悬停查看口径）</div>
-      <div className="bt-params">
-        {rows.map(p => (
-          <div className="btp-item" key={p.label} title={p.hint}>
-            <div className="btp-label">{p.label}</div>
-            <div className="btp-val">{p.value}</div>
-          </div>
-        ))}
-      </div>
+      <div className="bt-params">{shortRows.map(tile)}</div>
+      {ruleRows.length > 0 && (
+        <div className="bt-params bt-params-rules">{ruleRows.map(tile)}</div>
+      )}
     </>
   );
 }

@@ -1,6 +1,7 @@
 import 'reflect-metadata';
 import { Logger, ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
+import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { AppModule } from './app.module';
 import { ApiException } from './common/api.exception';
 import { ApiErrorFilter } from './common/api-error.filter';
@@ -35,9 +36,15 @@ async function bootstrap() {
     }),
   );
 
+  // Swagger 调试页（对齐 FastAPI /docs 的使用习惯）：浏览器打开 /api/docs 可看全部接口并直接发请求
+  const swaggerConfig = new DocumentBuilder().setTitle('因子智投 API').setVersion('1.0').build();
+  const document = SwaggerModule.createDocument(app, swaggerConfig);
+  SwaggerModule.setup('api/docs', app, document);
+
   const port = Number(process.env.PORT ?? 3000);
   await app.listen(port);
   new Logger('Bootstrap').log(`factor-agent-server 已启动: http://127.0.0.1:${port}`);
+  new Logger('Bootstrap').log(`API 调试页: http://127.0.0.1:${port}/api/docs`);
 }
 
 bootstrap();

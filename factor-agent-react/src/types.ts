@@ -96,6 +96,16 @@ export interface StrategyRunConfig {
   entryFilters?: StrategyFilterRule[];
   sortFactors?: StrategySortFactor[];
   sellRules?: StrategySellRule[];
+  /** 触发模式（rebalanceIntervalDays=0）的仓位偏离带宽 % */
+  positionDeviatePct?: number;
+  /** 大盘择时叠加（结构同后端 core/timing.ts） */
+  timingOverlay?: {
+    index: "hs300" | "csi500" | "sse";
+    rules: { table: string; field: string; op: ">" | "<" | "bw"; value?: number; low?: number; high?: number }[];
+    enterVotes: number;
+    exitVotes: number;
+    bearPositionPct: number;
+  };
   benchmark?: "hs300" | "csi500" | "sse";
 }
 
@@ -134,6 +144,14 @@ export interface BacktestCard extends CardBase {
   trades?: BacktestTrade[];
   /** 月度归因（自然月收益 %）；旧等权卡片无此字段 */
   monthly?: { month: string; pct: number }[];
+  /** 仓位分布（择时启用时的各仓位档天数）；未择时缺省 */
+  positionDist?: { label: string; days: number }[];
+  /** 持股时间占比 %（暴露>0 的交易日占比，对齐果仁 open-rate）；未择时缺省 */
+  holdingDaysPct?: number;
+  /** 踏空归因：基准单日涨幅 Top10 中暴露不足的交易日；未择时缺省 */
+  missedRallies?: { date: number; pct: number; exposure: number }[];
+  /** 历史持仓详情（按调仓期聚合，对标果仁同名面板） */
+  periods?: { seq: number; startDate: number; endDate: number; positionPct: number; stockCount: number; buyCount: number; sellCount: number; turnoverPct: number; periodReturnPct: number; benchReturnPct: number; excessPct: number; cumulativeValue: number }[];
 }
 
 export type AgentCard = BacktestCard; // report/stocks 卡（演示时代）2026-10-13 已下线，库中零存量
@@ -160,9 +178,11 @@ export interface Conversation {
 
 /* ----- 发消息流式过程事件（SSE 节点级推送，契约 §3.1 chat/stream） -----
    粒度 = 工具调用的开始与结果，不做 token 级推理流式；
-   stage 为工具中文名（可直接展示），最终回复以 final 事件为准 */
+   stage 为工具中文名（可直接展示），最终回复以 final 事件为准；
+   keepalive 为链路保活帧（无内容语义），api 层照常喂空闲看门狗、hook 不消费 */
 export type ChatProgressEvent =
   | { type: "start" }
+  | { type: "keepalive" }
   | { type: "tool_call"; name: string; stage: string; args: string }
   | { type: "tool_result"; name: string; stage: string; ok: boolean; detail: string };
 

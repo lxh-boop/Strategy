@@ -11,6 +11,7 @@ import {
   assertStrategyInput,
   BENCHMARKS,
   ClarificationSignal,
+  collectAllRefs,
   collectFactorRefs,
   describeFilters,
   describeSellRules,
@@ -19,6 +20,7 @@ import {
   StrategyBacktestInput,
   StrategyBacktestService,
 } from '../../core/strategy-backtest.service';
+import { describeTimingOverlay } from '../../core/timing';
 import { FactorDataService } from '../../core/factor-data.service';
 import {
   FactorFieldInfo,
@@ -192,6 +194,15 @@ export class LangGraphAgentService extends AgentService {
    *  长回测超过前端 90s 空闲看门狗时用户会按"请稍后重试"提示重发确认——
    *  没有这道闸，第二次 resume 会与第一次并行各跑一遍引擎（双倍打库、两份卡片） */
   private readonly inflightResumes = new Set<string>();
+
+  /** 消息级并发闸：正在跑图的会话 id 集合（图收尾/失败即移除，含确认门恢复）。
+   *  同会话第二条"新消息"直接 409——超时重发/手快连点不再并行起第二个图
+   *  （双倍打库、双倍配额、两份卡片）。确认门答复不查此闸（挂起的确认必须可答），
+   *  其防重入由 inflightResumes 负责 */
+  private readonly inflightRuns = new Set<string>();
+
+  /** 保活帧间隔（前端空闲看门狗 90s 的 1/6，一个看门狗窗口喂 6 次；测试可调小） */
+  private keepaliveMs = 15_000;
 
   /** 轮次序号：thread_id = `${conversationId}:${时间戳}:${seq}`，保证进程内唯一 */
   private turnSeq = 0;
@@ -369,9 +380,34 @@ export class LangGraphAgentService extends AgentService {
       appendConversationLog(conversation.id, '确认门重复恢复被拦（上一轮仍在执行中）');
       throw new ApiException('BACKTEST_RUNNING', 409, '上一轮回测正在执行中，请等待本轮结果返回，无需重复确认');
     }
-    // ③ tool-calling 主链路：thread 按轮分配，快照只活一轮（消息真相仍以 conversations 表为准）
-    const threadId = `${conversation.id}:${Date.now()}:${this.turnSeq++}`;
+    // 消息级并发闸：同会话已有消息在图里跑 → 新提问 409。必须在此处（下方吞异常的 try
+    // 之外）抛，ApiException 才能穿透为 SSE error 帧 → 前端 toast
+    if (!pendingThread && this.inflightRuns.has(conversation.id)) {
+      this.logger.warn(`并发消息被拦 会话=${conversation.id}（上一条消息仍在执行中）`);
+      appendConversationLog(conversation.id, '并发消息被拦（上一条消息仍在执行中）');
+      throw new ApiException(
+        'CONVERSATION_BUSY',
+        409,
+        '上一条消息还在执行中，请等它出结果后再发；结果稍后会出现在会话里，无需重发',
+      );
+    }
+
+    this.inflightRuns.add(conversation.id);
+    // 保活帧：GLM 思考/工具执行都可能数分钟无事件，前端 90s 空闲看门狗会把"活着但慢"
+    // 误判成死链路掐线重发。keepalive 走与进度事件同一条 onProgress 管道，前端每次收到
+    // 字节都重置看门狗时钟；仅流式路径启用（同步 reply 无 onProgress 可发）
+    const keepalive = onProgress
+      ? setInterval(() => {
+          try {
+            onProgress({ type: 'keepalive' });
+          } catch {
+            /* 客户端已断开：写失败静默（与 controller write 的容错口径一致） */
+          }
+        }, this.keepaliveMs)
+      : null;
     try {
+      // ③ tool-calling 主链路：thread 按轮分配，快照只活一轮（消息真相仍以 conversations 表为准）
+      const threadId = `${conversation.id}:${Date.now()}:${this.turnSeq++}`;
       if (pendingThread) {
         this.inflightResumes.add(conversation.id);
         try {
@@ -405,6 +441,9 @@ export class LangGraphAgentService extends AgentService {
       const reply = this.errorReply(error, conversation.id);
       onProgress?.({ type: 'error', message: reply.text });
       return reply;
+    } finally {
+      if (keepalive) clearInterval(keepalive);
+      this.inflightRuns.delete(conversation.id);
     }
   }
 
@@ -600,7 +639,7 @@ export class LangGraphAgentService extends AgentService {
         const p = assertStrategyInput(call.args as StrategyBacktestInput);
         // 白名单 + 区间快检都在 interrupt 之前：字段不存在/区间超界的提案先打回模型自纠，
         // 不让用户确认一个注定失败的提案（区间报错带可用范围，模型改参重发只需用户确认一次）
-        this.backtest.preflight(collectFactorRefs(p));
+        this.backtest.preflight(collectAllRefs(p));
         await this.backtest.checkRange(p);
         const sort = effectiveSortFactors(p.sortFactors);
         const decision = interrupt({
@@ -613,6 +652,10 @@ export class LangGraphAgentService extends AgentService {
             排序因子: describeSortFactors(sort.factors) + (sort.usedDefault ? '【默认追加】' : ''),
             过滤因子: describeFilters(p.entryFilters),
             卖出规则: describeSellRules(p.sellRules),
+            ...(p.timingOverlay ? { 择时规则: describeTimingOverlay(p.timingOverlay) } : {}),
+            ...(p.rebalanceIntervalDays === 0
+              ? { 交易模型: `条件触发（模型 Ⅱ）· 偏离带 ±${p.positionDeviatePct}%` }
+              : {}),
             '初始资金/费用': `${p.initialCapital} 元 · 单边 ${(p.feeRate * 100).toFixed(2)}%${isUserSet(call.args?.feeRate) ? '' : '（默认）'}`,
             业绩基准: `${BENCHMARKS[p.benchmark].name}${isUserSet(call.args?.benchmark) ? '' : '（默认）'}`,
           },
@@ -663,7 +706,7 @@ export class LangGraphAgentService extends AgentService {
    *  这里只做归一化复核与引擎调用，不再含任何 interrupt，节点重跑也不会重复建仓扣费 */
   private async execRunBacktest(args: StrategyBacktestInput, ctx: ToolContext): Promise<ToolOutcome> {
     const p = assertStrategyInput(args);
-    this.backtest.preflight(collectFactorRefs(p));
+    this.backtest.preflight(collectAllRefs(p));
 
     let output;
     try {
@@ -758,6 +801,14 @@ export class LangGraphAgentService extends AgentService {
         'maxPositions 与业绩基准用户没说时可用引擎默认值，但最终文案要注明"默认"；' +
         'sortFactors 缺省时引擎自动用默认 20 日动量排序（值大优），提案前请向用户说明这一点；' +
         '同一因子既做过滤又做排序时，entryFilters 与 sortFactors 两处都要传；',
+      '- 大盘择时：用户表达总仓位控制意图（如"跌破某点位就空仓""放量才满仓""熊市半仓"）时组装 timingOverlay：' +
+        '字段必须先经 list_factor_fields 确认存在（当前可用 mkt_idxd 的 CLOSE_INDEX/CHG_PCT/TURNOVER_VALUE）；' +
+        '指数没说默认上证、阈值票数没说默认全部、熊市仓位没说默认空仓（提案中注明"默认"）；' +
+        '字典暂无均线/金叉类字段，用户提出时如实告知暂不支持，引导改用点位/涨跌幅/量能条件；' +
+        '择时只影响总仓位，选股条件照常生效；',
+      '- 触发模式（模型 Ⅱ）：用户说"不按月调仓，满足条件就买""偏离 X% 再平衡"时传 rebalanceIntervalDays=0，' +
+        '必须同时传 positionDeviatePct（偏离带宽 %，没说默认 20，需注明"默认"）且预声明触发域 securityIds；' +
+        '触发模式的卖出规则不支持字段条件与排名跌出，如实告知；',
       '- run_strategy_backtest 执行前系统会请用户确认参数：收到"已取消"回执时，' +
         '结合用户反馈调整参数后重新发起（会再次请用户确认），或放弃回测直接回应用户，' +
         '不要声称回测已开始或编造回测结果；',
@@ -886,6 +937,10 @@ function toLogPreview(value: unknown): string {
 }
 
 /** GLM 调用失败时的回复正文（唯一内容，不带卡片）：如实展示失败原因，如 429 余额不足 / 403 无模型权限 */
+/** 模型侧失败 → 用户可见文案。限流（429）单独措辞——"请充值"对暂时性限流是误导 */
 function llmErrorText(reason: string): string {
+  if (/429|速率限制/.test(reason)) {
+    return ' 智能体回复生成失败：模型服务限流，请稍后重发这条消息。';
+  }
   return ` 智能体回复生成失败：智谱 GLM ${reason}。请充值或检查 ZHIPU_MODEL 配置后重试。`;
 }

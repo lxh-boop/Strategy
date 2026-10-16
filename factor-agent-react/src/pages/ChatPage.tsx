@@ -84,6 +84,25 @@ function AgentCardView({ card, saved, onSaveBacktest, onAskOptimize, onGotoStrat
         <div className="agent-card-text">{card.note}</div>
         {/* 本次回测真实参数；旧卡片无 params 时回退策略配置项 */}
         <ParamsBlock items={card.params} />
+        {/* 仓位分布 + 持股占比 + 踏空归因：大盘择时启用时的新产出 */}
+        {card.positionDist && card.positionDist.length > 0 && (
+          <div style={{ marginTop: 12 }}>
+            <div className="btp-title">仓位分布（择时）</div>
+            <div className="monthly-strip">
+              {card.positionDist.map(b => (
+                <span key={b.label} className="monthly-chip">{b.label} · {b.days}日</span>
+              ))}
+              {card.holdingDaysPct !== undefined && (
+                <span className="monthly-chip">持股时间 {card.holdingDaysPct}%</span>
+              )}
+            </div>
+            {card.missedRallies && card.missedRallies.length > 0 && (
+              <div className="agent-card-text" style={{ marginTop: 6 }}>
+                踏空归因（择时期间错过的基准大涨日）：{card.missedRallies.map(m => `${m.date}（基准+${m.pct}%，仓位${m.exposure}%）`).join("、")}
+              </div>
+            )}
+          </div>
+        )}
         {/* 月度归因 + 交易明细：策略回测（日频事件内核）新产出；旧等权卡片无这两个字段 */}
         {card.monthly && card.monthly.length > 0 && (
           <div style={{ marginTop: 12 }}>
@@ -95,6 +114,43 @@ function AgentCardView({ card, saved, onSaveBacktest, onAskOptimize, onGotoStrat
                   {m.month.slice(2)} {m.pct > 0 ? "+" : ""}{m.pct}%
                 </span>
               ))}
+            </div>
+          </div>
+        )}
+        {/* 历史持仓详情：按调仓期聚合（对标果仁同名面板） */}
+        {card.periods && card.periods.length > 0 && (
+          <div style={{ marginTop: 12 }}>
+            <div className="btp-title">历史持仓详情</div>
+            <div className="trade-scroll">
+              <table className="mini-table">
+                <thead>
+                  <tr>
+                    <th>期次</th><th>开始</th><th>结束</th>
+                    <th className="num">仓位%</th><th className="num">只数</th>
+                    <th className="num">买入</th><th className="num">卖出</th>
+                    <th className="num">换手%</th><th className="num">本期%</th>
+                    <th className="num">基准%</th><th className="num">超额%</th><th className="num">千元净值</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {card.periods.map(p => (
+                    <tr key={p.seq}>
+                      <td>{p.seq}</td>
+                      <td>{String(p.startDate).replace(/^(\d{4})(\d{2})(\d{2})$/, "$1-$2-$3")}</td>
+                      <td>{String(p.endDate).replace(/^(\d{4})(\d{2})(\d{2})$/, "$1-$2-$3")}</td>
+                      <td className="num">{p.positionPct}%</td>
+                      <td className="num">{p.stockCount}</td>
+                      <td className="num">{p.buyCount}</td>
+                      <td className="num">{p.sellCount}</td>
+                      <td className="num">{p.turnoverPct}%</td>
+                      <td className={`num ${p.periodReturnPct >= 0 ? "up" : "down"}`}>{p.periodReturnPct > 0 ? "+" : ""}{p.periodReturnPct}%</td>
+                      <td className={`num ${p.benchReturnPct >= 0 ? "up" : "down"}`}>{p.benchReturnPct > 0 ? "+" : ""}{p.benchReturnPct}%</td>
+                      <td className={`num ${p.excessPct >= 0 ? "up" : "down"}`}>{p.excessPct > 0 ? "+" : ""}{p.excessPct}%</td>
+                      <td className="num">{p.cumulativeValue}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
           </div>
         )}
@@ -179,7 +235,7 @@ function MessageRow({ m, userInitial, saved, onSaveBacktest, onAskOptimize, onGo
   );
 }
 
-function TypingRow({ steps }: { steps?: { stage: string; ok?: boolean }[] }) {
+function TypingRow({ steps }: { steps?: { stage: string; ok?: boolean; detail?: string }[] }) {
   return (
     <div className="msg agent">
       <div className="msg-avatar" aria-hidden="true"><IconLogo size={18} /></div>
@@ -190,7 +246,9 @@ function TypingRow({ steps }: { steps?: { stage: string; ok?: boolean }[] }) {
             <div className="chat-steps">
               {steps.map((s, i) => (
                 <span className={`chat-step ${s.ok === true ? "ok" : s.ok === false ? "bad" : ""}`} key={i}>
-                  {s.stage}<em>{s.ok === true ? "✓" : s.ok === false ? "✕" : "…"}</em>
+                  {s.stage}
+                  {s.detail ? ` · ${s.detail}` : ""}
+                  <em>{s.ok === true ? "✓" : s.ok === false ? "✕" : "…"}</em>
                 </span>
               ))}
             </div>
@@ -207,8 +265,8 @@ export function ChatPage(props: {
   conversations: Conversation[];
   currentId: string;
   typingId: string | null;
-  /** 在途消息的流式过程步骤（SSE 节点级事件，见 useConversations） */
-  live?: { convId: string; steps: { stage: string; ok?: boolean }[] } | null;
+  /** 在途消息的流式过程步骤（SSE 节点级事件，见 useConversations 的 LiveProgress） */
+  live?: { convId: string; steps: { stage: string; ok?: boolean; detail?: string }[] } | null;
   loading: boolean;
   savedCardIds: string[];
   /** 当前登录用户昵称首字：用户消息头像（替代旧硬编码人设） */

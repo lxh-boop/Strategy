@@ -3,6 +3,7 @@ import { ApiException } from '../common/api.exception';
 import { AgentProgressSink, BacktestCard, RawMetrics } from '../types';
 import { TradeDateCoverage } from './factor-data.service';
 import { maxDrawdownPct, toMetricItems } from './metrics';
+import { assertTimingOverlay, collectTimingRefs, StrategyTimingOverlay } from './timing';
 
 /* ==========================================================
    策略回测接口（契约层）—— 日频事件驱动内核（重构方案 v3，StrategySpec v1）
@@ -79,6 +80,8 @@ export interface StrategyBacktestInput {
   feeRate?: unknown;
   /** 每 N 个交易日调仓（必填，无默认值，缺失触发向用户澄清） */
   rebalanceIntervalDays?: unknown;
+  /** 触发模式（rebalanceIntervalDays=0）必填：仓位偏离带宽 %（5~50 整数） */
+  positionDeviatePct?: unknown;
   /** 0=开盘价成交（默认）/ 1=收盘价成交 */
   executionTiming?: unknown;
   /** 最大持仓数，默认 10 */
@@ -94,6 +97,8 @@ export interface StrategyBacktestInput {
   /** 卖出规则（持仓期每日检查） */
   sellRules?: unknown;
   benchmark?: unknown;
+  /** 大盘择时叠加（可选）：字段条件投票状态机 + 分级熊市仓位，见 timing.ts */
+  timingOverlay?: unknown;
   /** 策略类型标记（透传卡片/策略库；缺省 equal_weight = 等权特例形态） */
   strategyType?: unknown;
 }
@@ -107,6 +112,8 @@ export interface NormalizedStrategyInput {
   initialCapital: number;
   feeRate: number;
   rebalanceIntervalDays: number;
+  /** 触发模式（=0）的仓位偏离带宽 %；日历模式无此字段 */
+  positionDeviatePct?: number;
   executionTiming: 0 | 1;
   maxPositions: number;
   idealPositionPct: number;
@@ -115,6 +122,8 @@ export interface NormalizedStrategyInput {
   sortFactors: StrategySortFactor[];
   sellRules: StrategySellRule[];
   benchmark: BenchmarkKey;
+  /** 大盘择时叠加（未传 = 不择时，全程满仓） */
+  timingOverlay?: StrategyTimingOverlay;
   strategyType: string;
 }
 
@@ -161,17 +170,17 @@ export function effectiveSortFactors(sortFactors: StrategySortFactor[]): {
 }
 
 /** 排序因子 → 展示串（含方向与权重，确认弹窗/卡片/摘要共用同一口径） */
-export function describeSortFactors(factors: StrategySortFactor[]): string {
+export function describeSortFactors(factors: StrategySortFactor[], sep = '；'): string {
   return factors
     .map((f) =>
       `${f.table}.${f.field}（${f.direction === 1 ? '值大优' : '值小优'}，${f.weight !== undefined ? `权重 ${f.weight}` : '等权'}）`,
     )
-    .join('；');
+    .join(sep);
 }
 
 /** 过滤规则 → 展示串 */
-export function describeFilters(filters: StrategyFilterRule[]): string {
-  return filters.length ? filters.map((f) => `${f.table}.${f.field} ${f.op} ${f.value}`).join('；') : '无';
+export function describeFilters(filters: StrategyFilterRule[], sep = '；'): string {
+  return filters.length ? filters.map((f) => `${f.table}.${f.field} ${f.op} ${f.value}`).join(sep) : '无';
 }
 
 /** 卖出规则 → 展示串 */
@@ -272,12 +281,31 @@ export function assertStrategyInput(raw: StrategyBacktestInput): NormalizedStrat
     });
   }
   const rebalanceIntervalDays = Number(raw.rebalanceIntervalDays);
-  if (!Number.isInteger(rebalanceIntervalDays) || rebalanceIntervalDays < REBALANCE_INTERVAL_MIN || rebalanceIntervalDays > REBALANCE_INTERVAL_MAX) {
+  if (
+    !Number.isInteger(rebalanceIntervalDays) ||
+    (rebalanceIntervalDays !== 0 && (rebalanceIntervalDays < REBALANCE_INTERVAL_MIN || rebalanceIntervalDays > REBALANCE_INTERVAL_MAX))
+  ) {
     throw new ApiException(
       'INVALID_ARGUMENT',
       400,
-      `rebalanceIntervalDays 必须是 ${REBALANCE_INTERVAL_MIN}~${REBALANCE_INTERVAL_MAX} 的整数（每隔多少个交易日调仓一次）: ${raw.rebalanceIntervalDays}`,
+      `rebalanceIntervalDays 必须是 0（触发模式，条件触发调仓）或 ${REBALANCE_INTERVAL_MIN}~${REBALANCE_INTERVAL_MAX} 的整数（每隔多少个交易日调仓一次）: ${raw.rebalanceIntervalDays}`,
     );
+  }
+
+  // 触发模式（rebalanceIntervalDays=0，模型 Ⅱ 独立引擎）：必须带仓位偏离带
+  let positionDeviatePct: number | undefined;
+  if (rebalanceIntervalDays === 0) {
+    if (raw.positionDeviatePct === undefined || raw.positionDeviatePct === null || raw.positionDeviatePct === '') {
+      throw new ApiException(
+        'INVALID_ARGUMENT',
+        400,
+        '触发模式（rebalanceIntervalDays=0）必须传 positionDeviatePct：仓位偏离带宽 %（如 20 表示持仓市值偏离目标总仓位 ±20% 时触发再平衡）',
+      );
+    }
+    positionDeviatePct = Number(raw.positionDeviatePct);
+    if (!Number.isInteger(positionDeviatePct) || positionDeviatePct < 5 || positionDeviatePct > 50) {
+      throw new ApiException('INVALID_ARGUMENT', 400, `positionDeviatePct 须为 5~50 的整数（偏离带宽 %）: ${raw.positionDeviatePct}`);
+    }
   }
 
   const executionTiming = raw.executionTiming === undefined || raw.executionTiming === null || raw.executionTiming === ''
@@ -315,6 +343,7 @@ export function assertStrategyInput(raw: StrategyBacktestInput): NormalizedStrat
     initialCapital,
     feeRate,
     rebalanceIntervalDays,
+    ...(positionDeviatePct !== undefined ? { positionDeviatePct } : {}),
     executionTiming: executionTiming as 0 | 1,
     maxPositions,
     idealPositionPct,
@@ -323,6 +352,7 @@ export function assertStrategyInput(raw: StrategyBacktestInput): NormalizedStrat
     sortFactors: assertSortFactors(raw.sortFactors),
     sellRules: assertSellRules(raw.sellRules),
     benchmark: assertBenchmark(raw.benchmark),
+    timingOverlay: assertTimingOverlay(raw.timingOverlay),
     strategyType: raw.strategyType === undefined || raw.strategyType === null || raw.strategyType === ''
       ? 'equal_weight'
       : String(raw.strategyType).trim(),
@@ -481,7 +511,9 @@ export interface FactorRef {
   field: string;
 }
 
-/** 归一化入参引用的全部 (table, field)：entryFilters + 有效排序因子 + field 类卖出规则，去重保序 */
+/** 归一化入参引用的全部 (table, field)：entryFilters + 有效排序因子 + field 类卖出规则，去重保序。
+ *  注意：不含择时引用——择时字段按挂靠指数走 readIndexFieldSeries 通道（键形态不同，
+ *  混进截面预取会对无 SECURITY_ID 列的指数表报错）；白名单/日历用 collectTimingRefs 单独取 */
 export function collectFactorRefs(p: NormalizedStrategyInput): FactorRef[] {
   const refs: FactorRef[] = [];
   const seen = new Set<string>();
@@ -495,6 +527,18 @@ export function collectFactorRefs(p: NormalizedStrategyInput): FactorRef[] {
   for (const f of p.entryFilters) push(f.table, f.field);
   for (const f of effectiveSortFactors(p.sortFactors).factors) push(f.table, f.field);
   for (const r of p.sellRules) if (r.kind === 'field') push(r.table, r.field);
+  return refs;
+}
+
+/** 全部引用 = 因子引用 + 择时引用（白名单校验/日历推导用；截面预取只能用 collectFactorRefs） */
+export function collectAllRefs(p: NormalizedStrategyInput): FactorRef[] {
+  const refs = collectFactorRefs(p);
+  const seen = new Set(refs.map((r) => `${r.table}.${r.field}`));
+  if (p.timingOverlay) {
+    for (const r of collectTimingRefs(p.timingOverlay)) {
+      if (!seen.has(`${r.table}.${r.field}`)) refs.push(r);
+    }
+  }
   return refs;
 }
 
@@ -677,6 +721,139 @@ function compound(returns: number[]): number[] {
 
 function round2(v: number): number {
   return +v.toFixed(2);
+}
+
+/* ----- 历史持仓详情：按调仓期聚合（对标果仁"历史持仓详情"面板） ----- */
+
+export interface StrategyPeriodRow {
+  /** 期序（1 起） */
+  seq: number;
+  /** 开始日期 YYYYMMDD */
+  startDate: number;
+  /** 结束日期 YYYYMMDD */
+  endDate: number;
+  /** 期间平均目标仓位 %（无择时恒 100） */
+  positionPct: number;
+  /** 期末持仓只数 */
+  stockCount: number;
+  /** 期间买入只数（去重） */
+  buyCount: number;
+  /** 期间卖出只数（去重） */
+  sellCount: number;
+  /** 期间换手 %（单边成交 ÷ 期间平均权益） */
+  turnoverPct: number;
+  /** 本期收益 %（期末权益/期初权益-1；首期基期为初始资金） */
+  periodReturnPct: number;
+  /** 基准收益 %（同期复合） */
+  benchReturnPct: number;
+  /** 超额收益 % = 本期 - 基准 */
+  excessPct: number;
+  /** 1000 元投资累计净值（按各期收益复利） */
+  cumulativeValue: number;
+}
+
+/**
+ * 按调仓期聚合逐日数据 → 历史持仓详情行。
+ * @param periodStarts 每期起始交易日下标（升序，含首期；末期止于最后交易日）
+ * @param exposureByDay 逐日目标仓位 %（无择时传全 100）
+ */
+export function aggregatePeriodRows(opts: {
+  tradeDates: number[];
+  equities: number[];
+  benchReturns: number[];
+  turnoverByDay: number[];
+  trades: StrategyTrade[];
+  periodStarts: number[];
+  exposureByDay: number[];
+  initialCapital: number;
+}): StrategyPeriodRow[] {
+  const { tradeDates, equities, benchReturns, turnoverByDay, trades, exposureByDay, initialCapital } = opts;
+  const starts = [...opts.periodStarts].sort((a, b) => a - b).filter((i) => i >= 0 && i < tradeDates.length);
+  if (!starts.length || tradeDates.length < 2) return [];
+
+  // 按日聚合交易流水：买卖代码集合（去重）+ 逐日净持仓股数（期末只数快照用）
+  const tradesByDay = new Map<number, StrategyTrade[]>();
+  for (const t of trades) {
+    const list = tradesByDay.get(t.date);
+    if (list) list.push(t);
+    else tradesByDay.set(t.date, [t]);
+  }
+  const netShares = new Map<string, number>();
+  const buyByDay = new Map<number, Set<string>>();
+  const sellByDay = new Map<number, Set<string>>();
+  const endCountByDay: number[] = [];
+  for (let i = 0; i < tradeDates.length; i++) {
+    const day = tradeDates[i];
+    const list = tradesByDay.get(day) ?? [];
+    const buys = new Set<string>();
+    const sells = new Set<string>();
+    for (const t of list) {
+      netShares.set(t.code, (netShares.get(t.code) ?? 0) + (t.direction === 'buy' ? t.shares : -t.shares));
+      (t.direction === 'buy' ? buys : sells).add(t.code);
+    }
+    buyByDay.set(day, buys);
+    sellByDay.set(day, sells);
+    let c = 0;
+    for (const v of netShares.values()) if (v > 0) c++;
+    endCountByDay.push(c);
+  }
+
+  const out: StrategyPeriodRow[] = [];
+  let cum = 1000;
+  for (let k = 0; k < starts.length; k++) {
+    const s = starts[k];
+    const e = k + 1 < starts.length ? starts[k + 1] - 1 : tradeDates.length - 1;
+    if (e < s) continue;
+    const startDay = tradeDates[s];
+    const endDay = tradeDates[e];
+
+    const baseEquity = k === 0 ? initialCapital : equities[s - 1];
+    const periodReturnPct = baseEquity > 0 ? (equities[e] / baseEquity - 1) * 100 : 0;
+    let b = 1;
+    for (let i = s; i <= e; i++) b *= 1 + (benchReturns[i] ?? 0);
+    const benchReturnPct = (b - 1) * 100;
+
+    let turnover = 0;
+    let meanEquity = 0;
+    for (let i = s; i <= e; i++) {
+      turnover += turnoverByDay[i] ?? 0;
+      meanEquity += equities[i] ?? 0;
+    }
+    meanEquity /= e - s + 1;
+    const turnoverPct = meanEquity > 0 ? ((turnover / 2) / meanEquity) * 100 : 0;
+
+    const buyCodes = new Set<string>();
+    const sellCodes = new Set<string>();
+    for (let i = s; i <= e; i++) {
+      const day = tradeDates[i];
+      for (const c of buyByDay.get(day) ?? []) buyCodes.add(c);
+      for (const c of sellByDay.get(day) ?? []) sellCodes.add(c);
+    }
+
+    let posSum = 0;
+    for (let i = s; i <= e; i++) posSum += exposureByDay[i] ?? 100;
+    const positionPct = +(posSum / (e - s + 1)).toFixed(1);
+
+    cum = cum * (1 + periodReturnPct / 100);
+    const periodReturnRounded = +periodReturnPct.toFixed(2);
+    const benchRounded = +benchReturnPct.toFixed(2);
+
+    out.push({
+      seq: out.length + 1,
+      startDate: startDay,
+      endDate: endDay,
+      positionPct,
+      stockCount: endCountByDay[e] ?? 0,
+      buyCount: buyCodes.size,
+      sellCount: sellCodes.size,
+      turnoverPct: +turnoverPct.toFixed(2),
+      periodReturnPct: periodReturnRounded,
+      benchReturnPct: benchRounded,
+      excessPct: +(periodReturnRounded - benchRounded).toFixed(2),
+      cumulativeValue: +cum.toFixed(2),
+    });
+  }
+  return out;
 }
 
 /* ----- 旧等权配置 → 新引擎入参（策略库 backtestConfig 重跑适配） ----- */

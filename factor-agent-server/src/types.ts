@@ -2,6 +2,9 @@
    共享类型 — 与前端 factor-agent-react/src/types.ts 保持一致
    ========================================================== */
 
+import type { StrategyPeriodRow } from './core/strategy-backtest.service';
+import type { StrategyTimingOverlay } from './core/timing';
+
 export type Role = 'user' | 'agent';
 
 export interface MetricItem {
@@ -98,6 +101,8 @@ export interface StrategyRunConfig {
   sortFactors?: StrategySortFactor[];
   sellRules?: StrategySellRule[];
   benchmark?: 'hs300' | 'csi500' | 'sse';
+  /** 大盘择时叠加（结构同 core/timing.ts StrategyTimingOverlay） */
+  timingOverlay?: StrategyTimingOverlay;
 }
 
 /** 回测交易明细（日频事件内核产出；卡片截最近若干笔） */
@@ -133,6 +138,14 @@ export interface BacktestCard extends CardBase {
   trades?: BacktestTrade[];
   /** 月度归因（自然月收益 %）；旧等权卡片无此字段 */
   monthly?: { month: string; pct: number }[];
+  /** 仓位分布（择时启用时的各仓位档天数）；未择时缺省 */
+  positionDist?: { label: string; days: number }[];
+  /** 持股时间占比 %（暴露>0 的交易日占比，对齐果仁 open-rate）；未择时缺省 */
+  holdingDaysPct?: number;
+  /** 踏空归因：基准单日涨幅 Top10 中暴露不足的交易日；未择时缺省 */
+  missedRallies?: { date: number; pct: number; exposure: number }[];
+  /** 历史持仓详情（按调仓期聚合，对标果仁同名面板） */
+  periods?: { seq: number; startDate: number; endDate: number; positionPct: number; stockCount: number; buyCount: number; sellCount: number; turnoverPct: number; periodReturnPct: number; benchReturnPct: number; excessPct: number; cumulativeValue: number }[];
 }
 
 export type AgentCard = BacktestCard; // report/stocks 卡（演示时代）2026-10-13 已下线，库中零存量
@@ -145,9 +158,12 @@ export interface AgentReply {
 /* ----- 智能体过程事件（SSE 节点级推送；不涉及推理流式） -----
    粒度 = 图节点/工具的开始与结果，一条一个结构化事件；
    stage 为工具中文名（前端可直接展示），detail 为一行结果摘要。
+   keepalive 为链路保活帧（无内容语义）：GLM 思考/工具执行的长静默段定期发送，
+   前端空闲看门狗据此不把"活着但慢"误判成死链路。
    最终文案与卡片不走过程事件，以接口返回值 / final 事件为准。 */
 export type AgentProgressEvent =
   | { type: 'start' }
+  | { type: 'keepalive' }
   | { type: 'tool_call'; name: string; stage: string; args: string }
   | { type: 'tool_result'; name: string; stage: string; ok: boolean; detail: string }
   | { type: 'error'; message: string };

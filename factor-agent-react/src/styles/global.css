@@ -379,8 +379,8 @@ svg { width: 18px; height: 18px; flex-shrink: 0; }
 .bt-chart svg { width: 100%; height: auto; display: block; }
 .bt-legend { display: flex; gap: 16px; font-size: 12px; color: var(--text-2); margin-bottom: 6px; }
 .bt-legend span { display: inline-flex; align-items: center; gap: 6px; }
-.lg-line { width: 16px; height: 0; border-top: 2px solid var(--primary); display: inline-block; }
-.lg-line.lg-bench { border-top: 2px dashed var(--bench-line); }
+.lg-line { width: 16px; height: 0; border-top: 2.2px solid var(--warn); display: inline-block; }
+.lg-line.lg-bench { width: 16px; height: 0; border-top: 1.8px dashed var(--bench-line); display: inline-block; }
 /* 区间收益高亮条 */
 .bt-return {
   display: flex; margin-top: 8px;
@@ -401,12 +401,14 @@ svg { width: 18px; height: 18px; flex-shrink: 0; }
 /* 回测假设参数 */
 .btp-title { font-size: 12px; font-weight: 600; color: var(--text-2); margin: 2px 0 8px; }
 .bt-params { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+.bt-params-rules { grid-template-columns: repeat(3, minmax(0, 1fr)); margin-top: 8px; }
+@media (max-width: 760px) { .bt-params-rules { grid-template-columns: 1fr; } }
 .btp-item {
   background: var(--tile); border: 1px solid var(--tile-border); border-radius: 8px;
   padding: 7px 10px; cursor: default;
 }
 .btp-label { font-size: 12px; color: var(--text-3); }
-.btp-val { font-size: 12px; font-weight: 600; margin-top: 1px; white-space: nowrap; }
+.btp-val { font-size: 12px; font-weight: 600; margin-top: 1px; white-space: pre-line; }
 
 /* 回测指标网格（auto-fit：列数随条目数自适应，4 项/5 项均一行排开） */
 .backtest-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(72px, 1fr)); gap: 10px; margin-bottom: 14px; }
