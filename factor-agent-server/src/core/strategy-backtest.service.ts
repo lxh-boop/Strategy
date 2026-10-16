@@ -2,7 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { ApiException } from '../common/api.exception';
 import { AgentProgressSink, BacktestCard, RawMetrics } from '../types';
 import { TradeDateCoverage } from './factor-data.service';
-import { maxDrawdownPct, toMetricItems } from './backtest.service';
+import { maxDrawdownPct, toMetricItems } from './metrics';
 import { assertTimingOverlay, collectTimingRefs, StrategyTimingOverlay } from './timing';
 
 /* ==========================================================

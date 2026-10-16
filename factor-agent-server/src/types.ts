@@ -148,24 +148,7 @@ export interface BacktestCard extends CardBase {
   periods?: { seq: number; startDate: number; endDate: number; positionPct: number; stockCount: number; buyCount: number; sellCount: number; turnoverPct: number; periodReturnPct: number; benchReturnPct: number; excessPct: number; cumulativeValue: number }[];
 }
 
-export interface ReportCard extends CardBase {
-  type: 'report';
-  factors: FactorWeight[];
-  curve: number[];
-  benchCurve: number[];
-  benchName?: string;
-  metrics: MetricItem[];
-  rawMetrics?: RawMetrics;
-  universe?: string;
-  rebalance?: string;
-}
-
-export interface StocksCard extends CardBase {
-  type: 'stocks';
-  stocks: { code: string; name: string; score: number; weight: number | null }[];
-}
-
-export type AgentCard = BacktestCard | ReportCard | StocksCard;
+export type AgentCard = BacktestCard; // report/stocks 卡（演示时代）2026-10-13 已下线，库中零存量
 
 export interface AgentReply {
   text: string;
@@ -253,12 +236,6 @@ export interface UserProfile {
 }
 
 /* ----- 因子库 / 回测参数 / 选股筛选 ----- */
-export interface FactorLibItem {
-  id: string;
-  name: string;
-  desc: string;
-}
-
 export interface BtParamItem {
   label: string;
   value: string;

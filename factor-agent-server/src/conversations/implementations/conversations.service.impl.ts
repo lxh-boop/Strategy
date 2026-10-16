@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { ApiException } from '../../common/api.exception';
 import { AgentService } from '../../agent/agent.service';
-import { nowTime } from '../../core/store.service';
+import { nowTime } from '../../common/time';
 import { UserStoreService } from '../../core/user-store.service';
 import { AgentProgressSink, ChatMessage, Conversation } from '../../types';
 import { ConversationsService, SendMessageResult } from '../conversations.service';
