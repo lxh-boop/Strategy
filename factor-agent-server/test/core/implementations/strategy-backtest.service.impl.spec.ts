@@ -291,6 +291,8 @@ interface Fixture {
   indexSeries?: Record<number, number>;
   /** REVS20 截面：日期 → (code → 值) */
   momentum: Record<number, Record<string, number>>;
+  /** 按列名区分的截面（"表.字段" → 日期 → (code → 值)）；缺省该列回落 momentum——排序列对齐回归用 */
+  panels?: Record<string, Record<number, Record<string, number>>>;
   quotes: QuoteRow[];
 }
 
@@ -302,8 +304,9 @@ function makeService(fixture: Fixture): StrategyBacktestServiceImpl {
   const factorData = {
     readTable: async () => [],
     readTradeDates: async () => ({ dates: TRADE_DATES, min: 20200101, max: 20241231 }),
-    readFactorSection: async (_table: string, _field: string, date: string) => {
-      const section = fixture.momentum[Number(date)] ?? {};
+    readFactorSection: async (table: string, field: string, date: string) => {
+      const panel = fixture.panels?.[`${table}.${field}`] ?? fixture.momentum;
+      const section = panel[Number(date)] ?? {};
       return Object.entries(section).map(([securityId, value]) => ({ securityId, value }));
     },
     readFactorRange: async () => [],
@@ -354,6 +357,49 @@ describe('StrategyBacktestServiceImpl（全流程 stub，不触库）', () => {
     expect(out.summary.排序因子).toContain('REVS20');
     expect(out.summary.排序因子).toContain('引擎默认追加');
     expect(out.card.config).toMatchObject({ strategyType: 'equal_weight', rebalanceIntervalDays: 2, maxPositions: 1 });
+    // 每期持仓明细：两期切片，期末收盘快照、连续持有股进入基准滚动
+    expect(out.card.periodHoldings).toEqual([
+      { seq: 1, startDate: 20240102, endDate: 20240103, holdings: [
+        { code: CODE_B, shares: 5000, closePrice: 21, entryPrice: 20, periodReturnPct: 5, weightPct: 100 },
+      ] },
+      { seq: 2, startDate: 20240104, endDate: 20240105, holdings: [
+        { code: CODE_A, shares: 10800, closePrice: 9.9, entryPrice: 9.9, periodReturnPct: 0, weightPct: 100 },
+      ] },
+    ]);
+    expect(out.card.latestOrders?.map((t) => [t.code, t.direction])).toEqual([
+      [CODE_B, 'sell'], [CODE_A, 'buy'],
+    ]);
+    expect(out.card.recentSold).toEqual([CODE_B]);
+  });
+
+  it('排序列按列名对齐：过滤列与排序列不同时，排序用排序列而非过滤列（错位修复回归）', async () => {
+    const service = makeService({
+      momentum: {},
+      panels: {
+        // RSI 只做过滤（<100 全通过），值与 REVS20 相反：错用 RSI 排名会选 B，对齐后按 REVS20 选 A
+        'equ_factor_obos.RSI': {
+          20240102: { [CODE_A]: 5, [CODE_B]: 95 },
+          20240104: { [CODE_A]: 5, [CODE_B]: 95 },
+        },
+        'equ_factor_obos.REVS20': {
+          20240102: { [CODE_A]: 90, [CODE_B]: 10 },
+          20240104: { [CODE_A]: 90, [CODE_B]: 10 },
+        },
+      },
+      quotes: defaultQuotes(),
+    });
+    const out = await service.runStrategyBacktest({
+      securityIds: [CODE_A, CODE_B],
+      startDate: '20240101',
+      endDate: '20240108',
+      initialCapital: 100_000,
+      feeRate: 0,
+      rebalanceIntervalDays: 2,
+      maxPositions: 1,
+      entryFilters: [{ table: 'equ_factor_obos', field: 'RSI', op: '<', value: 100 }],
+      sortFactors: [{ table: 'equ_factor_obos', field: 'REVS20', direction: 1 }],
+    });
+    expect(out.card.trades?.[0]).toMatchObject({ date: 20240103, code: CODE_A, direction: 'buy' });
   });
 
   it('卖出规则 stop_loss：收盘触发次日执行；现金不足时按可用资金缩股建仓', async () => {
@@ -508,6 +554,36 @@ describe('StrategyBacktestServiceImpl（全流程 stub，不触库）', () => {
     // 调仓日建仓 A 的目标市值也被压在半仓（10 万权益 × 100% × 50%）
     const buyTrade = trades.find((t) => t.reason === '调仓建仓' && t.date === 20240105)!;
     expect(buyTrade.amount).toBeLessThanOrEqual(52_500);
+  });
+
+  it('大盘择时 + positionDeviatePct 带宽：偏离未超带宽不触发择时减仓（带宽参数接通调仓模式）', async () => {
+    const service = makeService({
+      momentum: {
+        20240102: { [CODE_A]: 10, [CODE_B]: 20 },
+        20240104: { [CODE_A]: 30, [CODE_B]: 5 },
+      },
+      quotes: defaultQuotes(),
+      indexSeries: { 20240102: 6000, 20240103: 2000, 20240104: 2000, 20240105: 2000 },
+    });
+    const out = await service.runStrategyBacktest({
+      securityIds: [CODE_A, CODE_B],
+      startDate: '20240101',
+      endDate: '20240108',
+      initialCapital: 100_000,
+      feeRate: 0,
+      rebalanceIntervalDays: 2,
+      maxPositions: 1,
+      positionDeviatePct: 50,
+      timingOverlay: {
+        index: 'sse',
+        rules: [{ table: 'mkt_idxd', field: 'CLOSE_INDEX', op: '>', value: 5000 }],
+        enterVotes: -1,
+        exitVotes: -1,
+        bearPositionPct: 90,
+      },
+    });
+    // 转熊后暴露 90%：持仓偏离目标约 10% < 带宽 50% → 不应有择时减仓（缺省 1% 阈值时会减）
+    expect((out.card.trades ?? []).some((t) => t.reason === '择时减仓')).toBe(false);
   });
 
   it('全部调仓日无候选（因子截面为空）→ 报错不跑引擎', async () => {

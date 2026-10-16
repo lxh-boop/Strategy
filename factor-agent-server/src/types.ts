@@ -2,7 +2,7 @@
    共享类型 — 与前端 factor-agent-react/src/types.ts 保持一致
    ========================================================== */
 
-import type { StrategyPeriodRow } from './core/strategy-backtest.service';
+import type { PeriodHoldingsRow, StrategyPeriodRow } from './core/strategy-backtest.service';
 import type { StrategyTimingOverlay } from './core/timing';
 
 export type Role = 'user' | 'agent';
@@ -92,7 +92,9 @@ export interface StrategyRunConfig {
   endDate: string;                 // YYYYMMDD
   initialCapital?: number;
   feeRate?: number;
-  rebalanceIntervalDays: number;   // 每 N 个交易日调仓
+  rebalanceIntervalDays: number;   // 每 N 个交易日调仓（0 = 触发模式）
+  /** 仓位带宽 %：触发模式必传（5~50，总仓位偏离目标 ±带宽即再平衡）；调仓模式可选（择时拉回阈值，默认 1） */
+  positionDeviatePct?: number;
   executionTiming?: 0 | 1;         // 0=开盘价 1=收盘价
   maxPositions?: number;
   idealPositionPct?: number;
@@ -146,6 +148,12 @@ export interface BacktestCard extends CardBase {
   missedRallies?: { date: number; pct: number; exposure: number }[];
   /** 历史持仓详情（按调仓期聚合，对标果仁同名面板） */
   periods?: { seq: number; startDate: number; endDate: number; positionPct: number; stockCount: number; buyCount: number; sellCount: number; turnoverPct: number; periodReturnPct: number; benchReturnPct: number; excessPct: number; cumulativeValue: number }[];
+  /** 每期持仓明细（重放交易流水聚合，对标果仁「每日选股」历史版）：每期期末持有什么、各股期间收益与权重 */
+  periodHoldings?: PeriodHoldingsRow[];
+  /** 最新调仓指令：最后一期的全部成交（时间正序） */
+  latestOrders?: BacktestTrade[];
+  /** 最近卖出的证券代码（最后一期，按卖出先后去重） */
+  recentSold?: string[];
 }
 
 export type AgentCard = BacktestCard; // report/stocks 卡（演示时代）2026-10-13 已下线，库中零存量

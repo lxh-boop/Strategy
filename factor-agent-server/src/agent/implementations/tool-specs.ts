@@ -111,6 +111,17 @@ export const RUN_STRATEGY_BACKTEST_SPEC = {
           type: 'integer',
           description: '调仓间隔（必填，无默认值）：每隔多少个交易日调仓一次，如 5≈每周、10≈每两周、21≈每月、63≈每季',
         },
+        positionDeviatePct: {
+          type: 'number',
+          description:
+            '仓位带宽，两种模式语义不同：触发模式（rebalanceIntervalDays=0）必传，5~50 的整数，持仓市值偏离目标总仓位 ±该值时再平衡；' +
+            '调仓模式（>0）可选，为择时拉回阈值 %（默认 1，0~100），用户表达"偏离目标仓位超 X% 就拉回"时传入',
+        },
+        minPositionPct: {
+          type: 'number',
+          description:
+            '最小建仓仓位 %，默认 1（0.1~每只目标仓位）：单只目标市值低于权益×该比例时不建仓、顺延下一候选。用户说"每只至少建 X% 仓"时传入',
+        },
         initialCapital: { type: 'number', description: '初始资金，默认 1000000（100 万）。用户提到资金规模时按用户说的传' },
         feeRate: {
           type: 'number',
@@ -194,7 +205,6 @@ export const RUN_STRATEGY_BACKTEST_SPEC = {
           enum: ['hs300', 'csi500', 'sse'],
           description: '业绩基准：hs300 沪深300（默认）/ csi500 中证500 / sse 上证指数',
         },
-      },
         timingOverlay: {
           type: 'object',
           description:
@@ -206,6 +216,7 @@ export const RUN_STRATEGY_BACKTEST_SPEC = {
             '结构：{index:"sse"|"hs300"|"csi500", rules:[{table,field,op:">"|"<"|"bw", value 或 low/high}](1~3 条), ' +
             'enterVotes:-1|数字, exitVotes:-1|数字, bearPositionPct:0~100}',
         },
+      },
       required: ['startDate', 'endDate', 'rebalanceIntervalDays'],
     },
   },

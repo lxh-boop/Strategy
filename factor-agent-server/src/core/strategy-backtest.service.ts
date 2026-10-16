@@ -306,6 +306,16 @@ export function assertStrategyInput(raw: StrategyBacktestInput): NormalizedStrat
     if (!Number.isInteger(positionDeviatePct) || positionDeviatePct < 5 || positionDeviatePct > 50) {
       throw new ApiException('INVALID_ARGUMENT', 400, `positionDeviatePct 须为 5~50 的整数（偏离带宽 %）: ${raw.positionDeviatePct}`);
     }
+  } else if (raw.positionDeviatePct !== undefined && raw.positionDeviatePct !== null && raw.positionDeviatePct !== '') {
+    // 调仓模式：可选，作择时缩放块的拉回阈值 %（缺省 1）
+    positionDeviatePct = Number(raw.positionDeviatePct);
+    if (!Number.isFinite(positionDeviatePct) || positionDeviatePct <= 0 || positionDeviatePct > 100) {
+      throw new ApiException(
+        'INVALID_ARGUMENT',
+        400,
+        `positionDeviatePct 须为 0~100 的百分比数值（择时拉回阈值 %，缺省 1）: ${raw.positionDeviatePct}`,
+      );
+    }
   }
 
   const executionTiming = raw.executionTiming === undefined || raw.executionTiming === null || raw.executionTiming === ''
@@ -854,6 +864,121 @@ export function aggregatePeriodRows(opts: {
     });
   }
   return out;
+}
+
+/* ----- 每期持仓明细（重放交易流水聚合；果仁「每日选股」历史版） ----- */
+
+/** 每期持仓明细的单只股票行 */
+export interface PeriodHoldingStock {
+  code: string;
+  /** 期末股数 */
+  shares: number;
+  /** 期末收盘（停牌回落最近有效收盘） */
+  closePrice: number;
+  /** 本期进入成本基准：期初已持有=上期期末收盘；期内新买=首笔买入价 */
+  entryPrice: number;
+  /** 期间收益 %：(closePrice/entryPrice-1)×100，2 位 */
+  periodReturnPct: number;
+  /** 期末市值占持仓总市值 %（2 位，分母不含现金） */
+  weightPct: number;
+}
+
+/** 每期持仓明细行（seq 从 1 起） */
+export interface PeriodHoldingsRow {
+  seq: number;
+  /** 期首交易日 YYYYMMDD */
+  startDate: number;
+  /** 期末交易日 YYYYMMDD */
+  endDate: number;
+  holdings: PeriodHoldingStock[];
+}
+
+/**
+ * 重放交易流水聚合每期持仓明细：期内更新持仓账本（期内新进股成本=首笔买入价），
+ * 期末按收盘快照并把连续持有股的进入基准滚动为上期期末收盘（期间收益从期初起算）。
+ * priceOf 收盘缺失（停牌）回落最近有效收盘。periodStartIdx = 每期起始交易日下标
+ * （调仓模式传调仓日下标序列，触发模式传每 5 交易日切期）。
+ */
+export function buildPeriodHoldings(
+  trades: StrategyTrade[],
+  tradeDates: number[],
+  periodStartIdx: number[],
+  priceOf: (code: string, day: number) => number | undefined,
+): { periodHoldings: PeriodHoldingsRow[]; latestOrders: StrategyTrade[]; recentSold: string[] } {
+  const starts = periodStartIdx.length ? [...periodStartIdx].sort((a, b) => a - b) : [0];
+  const periods = starts.map((s, i) => ({
+    startIdx: s,
+    endIdx: (i + 1 < starts.length ? starts[i + 1] : tradeDates.length) - 1,
+  }));
+  const dateIdx = new Map(tradeDates.map((d, i) => [d, i]));
+  const book = new Map<string, { shares: number; entryPrice: number; lastPrice: number }>();
+  const periodHoldings: PeriodHoldingsRow[] = [];
+
+  const snapshot = (p: { startIdx: number; endIdx: number }, seq: number): PeriodHoldingsRow => {
+    const endDay = tradeDates[p.endIdx];
+    const staged: { code: string; shares: number; closePrice: number; entryPrice: number }[] = [];
+    let totalMv = 0;
+    for (const [code, h] of book) {
+      if (h.shares <= 0) continue;
+      const closePrice = priceOf(code, endDay) ?? h.lastPrice;
+      if (!(closePrice > 0)) continue;
+      totalMv += h.shares * closePrice;
+      staged.push({ code, shares: h.shares, closePrice, entryPrice: h.entryPrice });
+    }
+    staged.sort((a, b) => b.shares * b.closePrice - a.shares * a.closePrice || a.code.localeCompare(b.code));
+    const holdings = staged.map((s) => ({
+      code: s.code,
+      shares: s.shares,
+      closePrice: s.closePrice,
+      entryPrice: s.entryPrice,
+      periodReturnPct: +(((s.closePrice / s.entryPrice) - 1) * 100).toFixed(2),
+      weightPct: totalMv > 0 ? +(((s.shares * s.closePrice) / totalMv) * 100).toFixed(2) : 0,
+    }));
+    // 连续持有股的进入基准滚动为上期期末收盘（期间收益从期初起算）
+    for (const s of staged) {
+      const h = book.get(s.code);
+      if (h) h.entryPrice = s.closePrice;
+    }
+    return { seq, startDate: tradeDates[p.startIdx], endDate: endDay, holdings };
+  };
+
+  let cursor = 0;
+  const flushThrough = (dayIdx: number) => {
+    while (cursor < periods.length && periods[cursor].endIdx < dayIdx) {
+      periodHoldings.push(snapshot(periods[cursor], cursor + 1));
+      cursor++;
+    }
+  };
+  for (const t of trades) {
+    const idx = dateIdx.get(t.date);
+    if (idx === undefined) continue;
+    flushThrough(idx);
+    const h = book.get(t.code);
+    if (t.direction === 'buy') {
+      if (!h || h.shares <= 0) {
+        book.set(t.code, { shares: t.shares, entryPrice: t.price, lastPrice: t.price });
+      } else {
+        h.shares += t.shares; // 已持有期间加仓不改本期进入基准
+      }
+    } else if (h) {
+      h.shares -= t.shares;
+      if (h.shares <= 0) book.delete(t.code);
+    }
+  }
+  while (cursor < periods.length) {
+    periodHoldings.push(snapshot(periods[cursor], cursor + 1));
+    cursor++;
+  }
+
+  const last = periods[periods.length - 1];
+  const lastStart = tradeDates[last.startIdx];
+  const lastEnd = tradeDates[last.endIdx];
+  const latestOrders = trades.filter((t) => t.date >= lastStart && t.date <= lastEnd);
+  const recentSold: string[] = [];
+  for (const t of latestOrders) {
+    if (t.direction === 'sell' && !recentSold.includes(t.code)) recentSold.push(t.code);
+  }
+  return { periodHoldings, latestOrders, recentSold };
 }
 
 /* ----- 旧等权配置 → 新引擎入参（策略库 backtestConfig 重跑适配） ----- */

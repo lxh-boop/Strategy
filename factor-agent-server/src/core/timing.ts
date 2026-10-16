@@ -11,8 +11,8 @@ import { BENCHMARKS, type BenchmarkKey, type FactorRef } from './strategy-backte
      同时满足 M 个由牛变熊"）：牛→熊需 ≥exitVotes 张熊票、熊→牛需 ≥enterVotes 张牛票，
      -1 = 需全部规则；初始状态 = 牛；
    - 仓位映射：牛市 100%，熊市 bearPositionPct%（分级，默认 0=空仓）；
-   - 职责边界：本模块只做"字段值 → 条件判定 → 投票 → 状态机 → 目标仓位"的纯函数，
-     序列读取由引擎经 FactorDataService 完成，白名单校验由实现层 assertWhitelist 兜底。
+   - 职责边界：本模块承载"字段值 → 条件判定 → 投票 → 状态机 → 目标仓位"的纯函数与序列预计算
+     （序列读取经注入的回调完成），白名单校验由实现层 assertWhitelist 兜底。
    ========================================================== */
 
 /** 择时条件操作符白名单（导出常量：后续追加 'xup'/'xdn' 上穿/下穿只改这里与判定函数，config 无迁移） */
@@ -207,6 +207,49 @@ export function nextTimingRegime(
 /** 状态 → 当日目标总仓位 %：牛市满仓，熊市保留 bearPositionPct */
 export function exposureOfRegime(regime: TimingRegime, overlay: StrategyTimingOverlay): number {
   return regime === 'bull' ? 100 : overlay.bearPositionPct;
+}
+
+/** 逐日字段序列读取回调：返回挂靠指数上某字段在区间内的序列（引擎注入 FactorDataService 读取） */
+export type TimingSeriesReader = (
+  table: string,
+  field: string,
+  ticker: string,
+  startDate: string,
+  endDate: string,
+) => Promise<{ tradeDate: string; value: number }[]>;
+
+/**
+ * 预计算整段逐日目标仓位序列：字段序列按挂靠指数读取，D 日收盘后的状态决定 D+1
+ * 目标仓位（首日无信号按初始牛 = 满仓）；缺值当日该规则弃权。
+ * 同一份"取序列 + 推状态机"驱动此前在两引擎各写一遍，收拢于此；引擎只消费返回的序列。
+ */
+export async function precomputeExposureSeries(
+  overlay: StrategyTimingOverlay,
+  tradeDates: number[],
+  startDate: string,
+  endDate: string,
+  readSeries: TimingSeriesReader,
+): Promise<{ exposureByDay: number[]; bearDays: number }> {
+  const ticker = BENCHMARKS[overlay.index].ticker;
+  const seriesByKey = new Map<string, Map<number, number>>();
+  for (const rule of overlay.rules) {
+    const key = `${rule.table}.${rule.field}`;
+    if (seriesByKey.has(key)) continue;
+    const rows = await readSeries(rule.table, rule.field, ticker, startDate, endDate);
+    const byDay = new Map<number, number>();
+    for (const row of rows) byDay.set(Number(row.tradeDate.replaceAll('-', '')), row.value);
+    seriesByKey.set(key, byDay);
+  }
+  let regime: TimingRegime = 'bull';
+  let bearDays = 0;
+  const exposureByDay: number[] = [];
+  for (const day of tradeDates) {
+    exposureByDay.push(exposureOfRegime(regime, overlay)); // 昨收状态 → 当日目标仓位
+    const values = overlay.rules.map((r) => seriesByKey.get(`${r.table}.${r.field}`)?.get(day));
+    regime = nextTimingRegime(regime, voteTiming(overlay, values), overlay);
+    if (regime === 'bear') bearDays++;
+  }
+  return { exposureByDay, bearDays };
 }
 
 /* ----- 择时统计（卡片三件套） ----- */

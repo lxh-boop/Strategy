@@ -84,6 +84,27 @@ describe('TriggerBacktestServiceImpl（模型 Ⅱ 条件触发，全流程 stub�
     expect(trades[0].shares).toBe(5000);
     // 未启用择时：无仓位分布三件套
     expect(out.card.positionDist).toBeUndefined();
+    // 每期持仓明细：触发模式按 5 交易日切期（4 天区间 = 单期），期末收盘快照
+    expect(out.card.periodHoldings).toEqual([
+      { seq: 1, startDate: 20240102, endDate: 20240105, holdings: [
+        { code: CODE_A, shares: 5000, closePrice: 20, entryPrice: 10, periodReturnPct: 100, weightPct: 100 },
+      ] },
+    ]);
+    expect(out.card.latestOrders?.map((t) => t.direction)).toEqual(['buy']);
+    expect(out.card.recentSold ?? []).toEqual([]);
+  });
+
+  it('最小建仓仓位：目标市值低于权益×minPositionPct% → 跳过候选不建碎仓（与模型 Ⅰ 同口径）', async () => {
+    const service = makeService({ 20240102: { [CODE_A]: 10 } }, quotes());
+    const out = await service.run(triggerInput({ idealPositionPct: 10, minPositionPct: 30, positionDeviatePct: 50 }));
+    // 目标市值 = 10 万 × 10% = 1 万 < 下限 3 万 → 不建仓
+    expect(out.card.trades ?? []).toHaveLength(0);
+  });
+
+  it('最小建仓仓位边界：目标市值恰等于下限 → 正常建仓', async () => {
+    const service = makeService({ 20240102: { [CODE_A]: 10 } }, quotes());
+    const out = await service.run(triggerInput({ idealPositionPct: 50, minPositionPct: 50, positionDeviatePct: 50 }));
+    expect(out.card.trades ?? []).toHaveLength(1);
   });
 
   it('仓位偏离带：大涨使持仓占比超带宽 → 按目标比例偏离带减仓', async () => {
