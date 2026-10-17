@@ -7,30 +7,7 @@ import { IcChart, PerfChart, Sparkline } from "../components/charts";
 import { ConfirmModal, Modal, ParamsBlock } from "../components/ui";
 import { MiniMarkdown } from "../components/markdown";
 import { IconClose, IconLogo, IconPlus, IconSend, IconStop } from "../components/icons";
-
-/* ----- 确认门文案解析：格式由后端 formatConfirmText 生成（稳定契约）。
-   首行为"将按以下参数执行<类型>："（策略回测/等权回测/排名分析/因子相关性等），
-   其后每行"- 标签：值"；
-   命中 = 当前智能体在等用户确认参数，前端以弹窗呈现结构化参数与操作按钮。
-   标签清单由后端决定，前端通用渲染 ----- */
-function parseConfirmGate(bubble: string): { label: string; value: string }[] | null {
-  if (!/^将按以下参数执行[^：]+：/.test(bubble)) return null;
-  const rows = bubble
-    .split("\n")
-    .filter(l => l.startsWith("- "))
-    .map(l => {
-      const idx = l.indexOf("：");
-      return idx > 2 ? { label: l.slice(2, idx), value: l.slice(idx + 1) } : null;
-    })
-    .filter((r): r is { label: string; value: string } => r !== null);
-  return rows.length ? rows : null;
-}
-
-/* ----- 优化建议邀请识别：模型给出多方案建议并邀请"授权调优"
-   （结尾话术由系统提示词回复规则锚定，规则匹配替代自然语言猜测） ----- */
-function parseOptimizeInvite(bubble: string): boolean {
-  return bubble.includes("授权调优") && /建议|方向|对比/.test(bubble);
-}
+import type { ConfirmGatePending } from "../hooks/useConversations";
 
 /* ----- 智能体卡片 ----- */
 
@@ -430,6 +407,8 @@ export function ChatPage(props: {
   typingId: string | null;
   /** 在途消息的流式过程步骤（SSE 节点级事件，见 useConversations 的 LiveProgress） */
   live?: { convId: string; steps: { stage: string; ok?: boolean; detail?: string }[] } | null;
+  /** 确认门挂起（confirm_pending 事件落地态，见 useConversations 的 ConfirmGatePending） */
+  confirmGate?: ConfirmGatePending | null;
   loading: boolean;
   savedCardIds: string[];
   /** 当前登录用户昵称首字：用户消息头像（替代旧硬编码人设） */
@@ -449,7 +428,7 @@ export function ChatPage(props: {
   onDraftConsumed?: () => void;
 }) {
   const {
-    conversations, currentId, typingId, live, loading, savedCardIds, userNickname,
+    conversations, currentId, typingId, live, confirmGate, loading, savedCardIds, userNickname,
     onCreate, onSwitch, onDelete, onClear, onSubmit, onStop, onSaveBacktest, onGotoStrategies,
     draftInput, onDraftConsumed,
   } = props;
@@ -459,48 +438,24 @@ export function ChatPage(props: {
   const typingHere = current ? typingId === current.id : false;
   const liveSteps = typingHere && live && live.convId === current?.id ? live.steps : undefined;
   const userInitial = userNickname.slice(0, 1) || "友";
-  /* 确认门/优化建议弹窗关闭标记（新消息到达/切换会话时自动重置） */
-  const [gateClosed, setGateClosed] = useState(false);
-  const [optimizeClosed, setOptimizeClosed] = useState(false);
+  /* 确认门弹窗：唯一依据 = confirm_pending 事件（后端 confirm 节点 interrupt 挂起时经 SSE 发来）。
+     不再对末条消息做文本反推——挂尾巴的旧提案/邀请话术刷新后一律静默。
+     关闭按对象引用记 dismissed：新事件是新对象、重新弹出；同会话新一轮发送时 hook 已清挂起态 */
+  const [dismissedGate, setDismissedGate] = useState<ConfirmGatePending | null>(null);
   const [gateText, setGateText] = useState("");
-  const [optimizeText, setOptimizeText] = useState("");
-  /* 确认门：最后一条是智能体的参数提案且未关闭 → 弹窗（确认执行/授权调优/取消） */
-  const lastMessage = current && current.messages.length ? current.messages[current.messages.length - 1] : null;
-  /* 弹窗已打扰记忆：按"会话+末条消息"记指纹，同一条消息只弹一次——
-     上面的布尔标记会被"新消息/切会话"重置，导致挂在会话末尾的旧建议回复反复弹窗
-     （2026-10-13：RSI 回测回复结尾带"授权调优"邀请，一整天每次进会话都跳）。
-     指纹不随重置消失：关过的消息永不再弹，新回复指纹变化才重新触发 */
-  const lastKey = current && lastMessage ? `${current.id}:${current.messages.length}:${lastMessage.bubble.slice(0, 80)}` : "";
-  const dismissedRef = useRef<Set<string>>(new Set());
-  const gateParams =
-    !typingHere && lastMessage && lastMessage.role === "agent" ? parseConfirmGate(lastMessage.bubble) : null;
-  const gateVisible = !!gateParams && !gateClosed && !dismissedRef.current.has(`gate:${lastKey}`) && !loading;
+  const gate = confirmGate && confirmGate.convId === current?.id ? confirmGate : null;
+  const gateVisible = !!gate && gate !== dismissedGate && !typingHere;
   const closeGate = () => {
-    setGateClosed(true);
-    dismissedRef.current.add(`gate:${lastKey}`);
+    setDismissedGate(gate);
+    setGateText("");
   };
   const gateAct = (text: string) => {
     closeGate();
     onSubmit(text);
   };
-  /* 优化建议弹窗：模型刚给出多方案建议并邀请授权调优（文案由回复规则锚定，规则匹配无歧义） */
-  const optimizeInvite =
-    !gateParams && !typingHere && lastMessage && lastMessage.role === "agent" && parseOptimizeInvite(lastMessage.bubble);
-  const optimizeVisible = optimizeInvite && !optimizeClosed && !dismissedRef.current.has(`opt:${lastKey}`) && !loading;
-  const closeOptimize = () => {
-    setOptimizeClosed(true);
-    dismissedRef.current.add(`opt:${lastKey}`);
-  };
-  const optimizeAct = (text: string) => {
-    closeOptimize();
-    onSubmit(text);
-  };
   useEffect(() => {
-    setGateClosed(false);
-    setOptimizeClosed(false);
     setGateText("");
-    setOptimizeText("");
-  }, [current?.id, current?.messages.length]);
+  }, [current?.id]);
 
   /* 破坏性操作确认（删除/清空对话），全站统一 ConfirmModal */
   const [confirm, setConfirm] = useState<null | { kind: "delete" | "clear"; title: string }>(null);
@@ -675,7 +630,7 @@ export function ChatPage(props: {
         </footer>
       </div>
 
-      {gateVisible && gateParams && (
+      {gateVisible && gate && (
         <Modal onClose={closeGate} ariaLabel="参数确认">
           <div className="modal-head">
             <div className="modal-title">参数确认</div>
@@ -684,10 +639,10 @@ export function ChatPage(props: {
           <div className="modal-body">
             <div className="agent-card-text" style={{ margin: "0 0 12px" }}>智能体已就绪，将按以下参数执行：</div>
             <div className="gate-params">
-              {gateParams.map(p => (
-                <div className="gate-param" key={p.label}>
-                  <span className="gate-param-label">{p.label}</span>
-                  <span className="gate-param-val">{p.value}</span>
+              {Object.entries(gate.params).map(([label, value]) => (
+                <div className="gate-param" key={label}>
+                  <span className="gate-param-label">{label}</span>
+                  <span className="gate-param-val">{value}</span>
                 </div>
               ))}
             </div>
@@ -706,33 +661,6 @@ export function ChatPage(props: {
           <div className="modal-foot">
             <button className="btn btn-ghost" onClick={() => gateAct("授权调优")}>授权调优</button>
             <button className="btn btn-primary" onClick={() => gateAct("确认")}>确认执行</button>
-          </div>
-        </Modal>
-      )}
-      {optimizeVisible && (
-        <Modal onClose={closeOptimize} ariaLabel="优化建议">
-          <div className="modal-head">
-            <div className="modal-title">优化建议</div>
-            <button className="icon-btn" aria-label="关闭" onClick={closeOptimize}><IconClose /></button>
-          </div>
-          <div className="modal-body">
-            <div className="agent-card-text" style={{ margin: "0 0 12px" }}>
-              智能体给出了优化建议，原文如下（也可在下方直接输入其他要求）：
-            </div>
-            {lastMessage && (
-              <div className="optimize-quote">{lastMessage.bubble}</div>
-            )}
-            <div className="optimize-actions" style={{ marginTop: 12 }}>
-              <button className="btn btn-ghost" onClick={() => optimizeAct("确认")}>按建议执行下一轮</button>
-              <button className="btn btn-primary" onClick={() => optimizeAct("授权调优")}>授权调优·连续多组对比</button>
-            </div>
-            <div className="gate-alt">
-              <input className="gate-alt-input" value={optimizeText} aria-label="输入其他要求"
-                placeholder="或直接输入其他要求…"
-                onChange={e => setOptimizeText(e.target.value)}
-                onKeyDown={e => { if (e.key === "Enter" && optimizeText.trim()) optimizeAct(optimizeText.trim()); }} />
-              <button className="btn btn-sm btn-ghost" onClick={() => optimizeText.trim() && optimizeAct(optimizeText.trim())}>发送</button>
-            </div>
           </div>
         </Modal>
       )}

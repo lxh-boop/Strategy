@@ -17,6 +17,14 @@ export interface LiveProgress {
   steps: { stage: string; ok?: boolean; detail?: string }[];
 }
 
+/** 确认门挂起（confirm_pending 事件的落地态）：只在收到事件的当轮有效——
+ *  同会话下一轮发送即清除；刷新后无事件、不弹窗（历史里的确认提案只是普通消息） */
+export interface ConfirmGatePending {
+  convId: string;
+  kind: "backtest" | "analysis";
+  params: Record<string, string>;
+}
+
 /* ==========================================================
    多会话管理 — 数据全部来自后端接口（契约 §3.1），
    刷新/换浏览器不再丢数据（原 localStorage 方案已移除）。
@@ -30,6 +38,7 @@ export function useConversations(notify?: (msg: string) => void) {
   const [currentId, setCurrentId] = useState("");
   const [typingId, setTypingId] = useState<string | null>(null);
   const [live, setLive] = useState<LiveProgress | null>(null);
+  const [confirmGate, setConfirmGate] = useState<ConfirmGatePending | null>(null);
   const [loading, setLoading] = useState(true);
 
   const notifyRef = useRef(notify);
@@ -125,6 +134,8 @@ export function useConversations(notify?: (msg: string) => void) {
         : c));
     setTypingId(convId);
     setLive({ convId, steps: [] });
+    /* 新一轮开始即作废上一轮的确认门（本轮若再次挂起，confirm_pending 会重新置上） */
+    setConfirmGate(g => (g && g.convId === convId ? null : g));
     inFlight.current.add(convId);
 
     const startedAt = Date.now();
@@ -147,6 +158,8 @@ export function useConversations(notify?: (msg: string) => void) {
             }
             return { ...p, steps };
           });
+        } else if (ev.type === "confirm_pending") {
+          setConfirmGate({ convId, kind: ev.kind, params: ev.params });
         } else if (ev.type === "tool_result") {
           setLive(p => {
             if (!p || p.convId !== convId) return p;
@@ -216,6 +229,7 @@ export function useConversations(notify?: (msg: string) => void) {
     currentId,
     typingId,
     live,
+    confirmGate,
     loading,
     createConversation,
     switchConversation,

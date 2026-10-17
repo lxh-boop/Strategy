@@ -158,6 +158,7 @@ function MainApp({ user }: { user: UserPublic }) {
               currentId={conv.currentId}
               typingId={conv.typingId}
               live={conv.live}
+              confirmGate={conv.confirmGate}
               loading={conv.loading}
               savedCardIds={savedCardIds}
               userNickname={user.nickname}
