@@ -6,39 +6,47 @@ import {
   annualizeTurnover,
   applyEntryFilters,
   BENCHMARKS,
+  buildPeriodHoldings,
   describeFilters,
+  describeKeepRules,
   describeSellRules,
   describeSortFactors,
   effectiveSortFactors,
   formatPct,
+  INDEX_VALUE_KEY,
+  indexFilterCode,
+  isIndexFilterRule,
   LIMIT_DOWN_RATIO,
   LIMIT_UP_RATIO,
   LOT_SIZE,
   NormalizedStrategyInput,
   rankUniverse,
   StrategyBacktestOutput,
-  StrategySellRule,
+  StrategyFilterRule,
+  StrategyKeepRule,
   StrategySortFactor,
-  StrategyTrade,
   toDashDate,
   toStrategyMetricItems,
 } from '../strategy-backtest.service';
 import { FactorDataService } from '../factor-data.service';
 import { TriggerBacktestService } from '../trigger-backtest.service';
-import { loadTableFields, listKnownTables } from '../factor-schema';
+import { assertWhitelist, loadTableFields } from '../factor-schema';
 import {
+  collectTimingRefs,
   describeTimingOverlay,
-  exposureOfRegime,
   holdingDaysPct,
   missedRallies,
-  nextTimingRegime,
   positionDistribution,
-  voteTiming,
+  precomputeExposureSeries,
   type StrategyTimingOverlay,
-  type TimingRegime,
 } from '../timing';
-import { AgentProgressSink } from '../../types';
+import { Account, matchKeepRule, matchSellRule, type Position, type Quote, type SellFieldData } from '../account';
+import { AgentProgressSink, BacktestCard } from '../../types';
 import { TRIGGER_UNIVERSE_MAX, MAX_DAILY_BUYS, MAX_TRADES, MAX_TOTAL_TURNOVER_PCT } from '../trigger-backtest.service';
+
+/** 触发模式不支持 field 卖出规则（校验层已拒），共享卖出判定传入空预取结构 */
+const NO_SELL_FIELD_SERIES: SellFieldData = new Map();
+const NO_STATIC_SELL_REFS = new Set<string>();
 
 /* ==========================================================
    模型 Ⅱ 条件触发引擎（独立实现，单遍逐日评估）：
@@ -50,20 +58,6 @@ import { TRIGGER_UNIVERSE_MAX, MAX_DAILY_BUYS, MAX_TRADES, MAX_TOTAL_TURNOVER_PC
    - 数据：逐日截面（触发域）+ 触发后懒加载个股全区间行情（内存只随触发过的股票增长）；
    - 护栏：触发域 ≤3000、单日买入 ≤20 笔、累计交易 ≤20000 笔、累计换手 ≤MAX_TOTAL_TURNOVER_PCT。
    ========================================================== */
-
-interface Quote {
-  open: number | null;
-  close: number;
-  preClose: number;
-}
-
-interface Position {
-  code: string;
-  shares: number;
-  entryPrice: number;
-  buyDayIdx: number;
-  peakClose: number;
-}
 
 @Injectable()
 export class TriggerBacktestServiceImpl extends TriggerBacktestService {
@@ -97,16 +91,22 @@ export class TriggerBacktestServiceImpl extends TriggerBacktestService {
         '触发模式 v1 的卖出规则不支持 field（字段条件）与 rank_out（排名跌出）——请使用止盈/止损/回撤止盈/持有天数',
       );
     }
+    // 排除时间段第一批只做日历引擎（模型 Ⅰ）；触发引擎显式拒绝，不做静默忽略
+    if (p.excludeRanges.length) {
+      throw new ApiException('INVALID_ARGUMENT', 400, '触发模式暂不支持排除时间段（excludeRanges）——请去掉该参数或改用定期调仓模式');
+    }
     const sortFactors = effectiveSortFactors(p.sortFactors);
     const sortUsed = sortFactors.factors.map((f) => `${f.table}.${f.field}`);
 
-    // 白名单：触发条件 + 排序因子 + 择时引用
+    // 白名单：触发条件（大盘条件除外，走指数通道）+ 排序因子 + 不卖条件 + 择时引用
     const refs = [
-      ...p.entryFilters.map((f) => ({ table: f.table, field: f.field })),
+      ...p.entryFilters.filter((f) => !isIndexFilterRule(f)).map((f) => ({ table: f.table, field: f.field })),
+      ...p.entryFilters.filter(isIndexFilterRule).map((f) => ({ table: f.table, field: f.field })),
       ...sortUsed.map((k) => ({ table: k.split('.')[0], field: k.split('.')[1] })),
-      ...(p.timingOverlay ? this.collectTimingRefsOf(p.timingOverlay) : []),
+      ...p.keepRules.map((r) => ({ table: r.table, field: r.field })),
+      ...(p.timingOverlay ? collectTimingRefs(p.timingOverlay) : []),
     ];
-    this.assertWhitelist(refs);
+    assertWhitelist(refs);
 
     // ① 日历（首个引用表；纯择时+无 entryFilters 已被上面拦截，entryRefs 必非空）
     const coverage = await this.factorData.readTradeDates(refs[0].table, p.startDate, p.endDate);
@@ -131,33 +131,63 @@ export class TriggerBacktestServiceImpl extends TriggerBacktestService {
       return row && row.preClose > 0 ? row.close / row.preClose - 1 : 0;
     });
 
-    // ③ 择时序列（共享构件，逐日状态机）
+    // ③ 择时序列（收拢于 timing.precomputeExposureSeries，逐日状态机）
     const timing = p.timingOverlay ?? null;
-    const exposureByDay: number[] = [];
+    let exposureByDay: number[];
     if (timing) {
-      const ticker = BENCHMARKS[timing.index].ticker;
-      const seriesByKey = new Map<string, Map<number, number>>();
-      for (const rule of timing.rules) {
-        const key = `${rule.table}.${rule.field}`;
-        if (seriesByKey.has(key)) continue;
-        const rows = await this.factorData.readIndexFieldSeries(rule.table, rule.field, ticker, p.startDate, p.endDate);
-        const byDay = new Map<number, number>();
-        for (const row of rows) byDay.set(Number(row.tradeDate.replaceAll('-', '')), row.value);
-        seriesByKey.set(key, byDay);
-      }
-      let regime: TimingRegime = 'bull';
-      for (let i = 0; i < tradeDates.length; i++) {
-        const day = tradeDates[i];
-        exposureByDay.push(exposureOfRegime(regime, timing));
-        const values = timing.rules.map((r) => seriesByKey.get(`${r.table}.${r.field}`)?.get(day));
-        regime = nextTimingRegime(regime, voteTiming(timing, values), timing);
-      }
+      ({ exposureByDay } = await precomputeExposureSeries(
+        timing,
+        tradeDates,
+        p.startDate,
+        p.endDate,
+        (table, field, ticker, start, end) => this.factorData.readIndexFieldSeries(table, field, ticker, start, end),
+      ));
     } else {
-      exposureByDay.push(...tradeDates.map(() => 100));
+      exposureByDay = tradeDates.map(() => 100);
+    }
+
+    // ③′ 大盘条件序列预载 + 不卖条件取数（与模型 Ⅰ 同通道：日期表按日、静态表单值）
+    const indexSeriesByKey = new Map<string, Map<number, number>>();
+    for (const rule of p.entryFilters.filter(isIndexFilterRule)) {
+      const key = `${rule.table}.${rule.field}#${indexFilterCode(rule)}`;
+      if (indexSeriesByKey.has(key)) continue;
+      const rows = await this.factorData.readIndexFieldSeries(
+        rule.table,
+        rule.field,
+        BENCHMARKS[indexFilterCode(rule)].ticker,
+        p.startDate,
+        p.endDate,
+      );
+      indexSeriesByKey.set(key, new Map(rows.map((r) => [Number(r.tradeDate.replaceAll('-', '')), r.value])));
+    }
+    const staticKeepRefs = new Set(
+      p.keepRules.map((r) => `${r.table}.${r.field}`).filter((key) => !(loadTableFields(key.split('.')[0])?.has('TRADE_DATE') ?? false)),
+    );
+    const keepFieldSeries: SellFieldData = new Map();
+    for (const rule of p.keepRules) {
+      const key = `${rule.table}.${rule.field}`;
+      if (keepFieldSeries.has(key)) continue;
+      const rows = await this.factorData.readFactorRange(rule.table, rule.field, p.securityIds!, p.startDate, p.endDate);
+      if (staticKeepRefs.has(key)) {
+        const byCode = new Map<string, number>();
+        for (const row of rows) byCode.set(row.securityId, row.value);
+        keepFieldSeries.set(key, byCode);
+      } else {
+        const byCode = new Map<string, Map<number, number>>();
+        for (const row of rows) {
+          let byDate = byCode.get(row.securityId);
+          if (!byDate) {
+            byDate = new Map<number, number>();
+            byCode.set(row.securityId, byDate);
+          }
+          byDate.set(Number(row.tradeDate.replaceAll('-', '')), row.value);
+        }
+        keepFieldSeries.set(key, byCode);
+      }
     }
 
     // ④ 主循环（单遍逐日：执行 → 结算 → 信号），行情懒加载、截面逐日取
-    const loop = await this.runMainLoop(p, tradeDates, sortFactors.factors, benchReturns, exposureByDay, onProgress);
+    const loop = await this.runMainLoop(p, tradeDates, sortFactors.factors, benchReturns, exposureByDay, indexSeriesByKey, keepFieldSeries, staticKeepRefs, onProgress);
 
     // ⑤ 聚合 → 卡片 + 摘要（按周切期：每 5 个交易日一期）
     const aggregate = aggregateNav(loop.equities, benchReturns, tradeDates);
@@ -181,6 +211,9 @@ export class TriggerBacktestServiceImpl extends TriggerBacktestService {
         }
       : null;
     const card = this.buildCard(p, aggregate, loop, tradeDates, bench, sortFactors.factors, periodRows, timingStats);
+    card.periodHoldings = loop.periodHoldings;
+    card.latestOrders = loop.latestOrders;
+    card.recentSold = loop.recentSold;
     const summary = this.buildSummary(p, aggregate, loop, bench, sortFactors.factors, timing, timingStats);
     this.logger.log(
       `触发回测 ${p.startDate}~${p.endDate} 偏离带${p.positionDeviatePct}%: 年化=${summary.年化收益} 回撤=${summary.最大回撤} 交易 ${loop.trades.length} 笔`,
@@ -196,21 +229,32 @@ export class TriggerBacktestServiceImpl extends TriggerBacktestService {
     sortFactors: StrategySortFactor[],
     benchReturns: number[],
     exposureByDay: number[],
+    indexSeriesByKey: Map<string, Map<number, number>>,
+    keepFieldSeries: SellFieldData,
+    staticKeepRefs: Set<string>,
     onProgress?: AgentProgressSink,
   ) {
-    const entryRefs = [...new Set(p.entryFilters.map((f) => `${f.table}.${f.field}`))];
+    const keepRules: StrategyKeepRule[] = p.keepRules;
+    const factorRefs = [
+      ...new Set([
+        ...p.entryFilters.filter((f) => !isIndexFilterRule(f)).map((f) => `${f.table}.${f.field}`),
+        ...sortFactors.map((f) => `${f.table}.${f.field}`),
+      ]),
+    ];
     const totalTargetPct = Math.min(100, p.maxPositions * p.idealPositionPct);
     const band = p.positionDeviatePct ?? 20;
 
-    let cash = p.initialCapital;
-    const positions = new Map<string, Position>();
-    const trades: StrategyTrade[] = [];
+    const account = new Account(p.initialCapital, {
+      feeRate: p.feeRate,
+      tradeLimit: {
+        max: MAX_TRADES,
+        message: `交易笔数过多（超 ${MAX_TRADES} 笔）：请放宽触发条件、加大偏离带宽或缩短区间`,
+      },
+    });
     const equities: number[] = [];
     const turnoverByDay: number[] = [];
-    const lastClose = new Map<string, number>();
     let pendingSells = new Map<string, string>();
     let pendingBuys: string[] = [];
-    let dayTurnover = 0;
 
     /** 触发后懒加载个股全区间行情（内存只随触发过的股票增长） */
     const quotesByCode = new Map<string, Map<number, Quote>>();
@@ -243,144 +287,71 @@ export class TriggerBacktestServiceImpl extends TriggerBacktestService {
       return p.executionTiming === 0 ? (q.open ?? undefined) : q.close;
     };
 
-    const buy = (code: string, shares: number, price: number, day: number, dayIdx: number, reason: string) => {
-      const amount = shares * price;
-      const fee = amount * p.feeRate;
-      cash -= amount + fee;
-      dayTurnover += amount;
-      const pos = positions.get(code);
-      if (pos) {
-        pos.entryPrice = (pos.entryPrice * pos.shares + price * shares) / (pos.shares + shares);
-        pos.shares += shares;
-        pos.buyDayIdx = dayIdx;
-        pos.peakClose = Math.max(pos.peakClose, price);
-      } else {
-        positions.set(code, { code, shares, entryPrice: price, buyDayIdx: dayIdx, peakClose: price });
-      }
-      trades.push({ date: day, code, direction: 'buy', price, shares, amount, fee, reason });
-      if (trades.length > MAX_TRADES) {
-        throw new ApiException('INVALID_ARGUMENT', 400, `交易笔数过多（超 ${MAX_TRADES} 笔）：请放宽触发条件、加大偏离带宽或缩短区间`);
-      }
-    };
-
-    const sell = (pos: Position, shares: number, price: number, day: number, reason: string) => {
-      const amount = shares * price;
-      const fee = amount * p.feeRate;
-      cash += amount - fee;
-      dayTurnover += amount;
-      pos.shares -= shares;
-      if (pos.shares <= 0) positions.delete(pos.code);
-      trades.push({ date: day, code: pos.code, direction: 'sell', price, shares, amount, fee, reason });
-    };
-
-    const regimeAt = (i: number): number => exposureByDay[i] ?? 100;
-
     for (let i = 0; i < tradeDates.length; i++) {
       const day = tradeDates[i];
-      dayTurnover = 0;
-      const exposure = regimeAt(i);
+      const exposure = exposureByDay[i] ?? 100;
 
       // ── 执行阶段 ──
       if (i > 0) {
         // a. 卖出指令（T+1/停牌/跌停顺延）
         for (const [code, reason] of pendingSells) {
-          const pos = positions.get(code);
+          const pos = account.positionOf(code);
           if (!pos) continue;
           if (pos.buyDayIdx >= i) continue;
           const price = execPriceOf(code, day);
           const q = quoteOf(code, day);
           if (price === undefined || !q) continue;
           if (price <= q.preClose * LIMIT_DOWN_RATIO) continue;
-          sell(pos, pos.shares, price, day, reason);
+          account.sellAll(pos, price, day, reason);
         }
         pendingSells = new Map();
 
-        // b. 触发买入（按昨日综合分序；持仓数上限 + 单日买入笔数上限 + 现金缩股）
-        const equity0 = cash + [...positions.values()].reduce((a, pos) => {
-          const px = execPriceOf(pos.code, day) ?? lastClose.get(pos.code) ?? pos.entryPrice;
-          return a + pos.shares * px;
-        }, 0);
+        // b. 触发买入（按昨日综合分序；持仓数上限 + 单日买入笔数上限 + 现金缩股 + 最小建仓仓位）
+        const equity0 = account.equity((code) => execPriceOf(code, day));
         const targetMv = (equity0 * p.idealPositionPct) / 100 * (exposure / 100);
+        const minMv = (equity0 * p.minPositionPct) / 100;
         let buysToday = 0;
         for (const code of pendingBuys) {
           if (buysToday >= MAX_DAILY_BUYS) break;
-          if (positions.size >= p.maxPositions) break;
-          if (positions.has(code)) continue;
+          if (account.size() >= p.maxPositions) break;
+          if (account.positionOf(code)) continue;
           const price = execPriceOf(code, day);
           const q = quoteOf(code, day);
           if (price === undefined || !q) continue; // 停牌
           if (price >= q.preClose * LIMIT_UP_RATIO) continue; // 涨停
           let shares = Math.floor(targetMv / (price * (1 + p.feeRate)) / LOT_SIZE) * LOT_SIZE;
-          const affordable = Math.floor(cash / (price * (1 + p.feeRate)) / LOT_SIZE) * LOT_SIZE;
+          const affordable = account.affordableShares(price);
           if (shares > affordable) shares = affordable;
-          if (!Number.isFinite(shares) || shares < LOT_SIZE) continue;
-          buy(code, shares, price, day, i, '触发建仓');
+          if (!Number.isFinite(shares) || shares < LOT_SIZE || shares * price < minMv) continue; // 低于最小建仓仓位顺延下一候选（与模型 Ⅰ 同口径）
+          account.buy(code, shares, price, day, i, '触发建仓');
           buysToday++;
         }
         pendingBuys = [];
 
         // c. 仓位偏离带再平衡：总仓位偏离目标超带宽才动作（择时目标仓位即目标总仓位）
-        {
-          const targetRatioPct = totalTargetPct * (exposure / 100);
-          const equityNow = cash + [...positions.values()].reduce((a, pos) => {
-            const px = execPriceOf(pos.code, day) ?? lastClose.get(pos.code) ?? pos.entryPrice;
-            return a + pos.shares * px;
-          }, 0);
-          const invested = equityNow - cash;
-          const ratioPct = equityNow > 0 ? (invested / equityNow) * 100 : 0;
-          if (equityNow > 0 && Math.abs(ratioPct - targetRatioPct) > band) {
-            const targetMvAll = (equityNow * targetRatioPct) / 100;
-            if (targetMvAll < invested) {
-              const need = invested - targetMvAll;
-              const unlocked = [...positions.values()].filter((pos) => pos.buyDayIdx < i);
-              const unlockMv = unlocked.reduce((a, pos) => {
-                const px = execPriceOf(pos.code, day);
-                return a + (px !== undefined ? pos.shares * px : 0);
-              }, 0);
-              for (const pos of unlocked) {
-                const price = execPriceOf(pos.code, day);
-                const q = quoteOf(pos.code, day);
-                if (price === undefined || !q) continue;
-                if (price <= q.preClose * LIMIT_DOWN_RATIO) continue;
-                const mv = pos.shares * price;
-                let shares = Math.floor(((mv / (unlockMv || 1)) * need) / price / LOT_SIZE) * LOT_SIZE;
-                if (shares > pos.shares) shares = pos.shares;
-                shares = Math.floor(shares / LOT_SIZE) * LOT_SIZE;
-                if (shares < LOT_SIZE) continue;
-                sell(pos, shares, price, day, '偏离带减仓');
-              }
-            } else if (cash > 0 && invested > 0) {
-              const add = Math.min(targetMvAll - invested, cash / (1 + p.feeRate));
-              for (const pos of [...positions.values()]) {
-                const price = execPriceOf(pos.code, day);
-                const q = quoteOf(pos.code, day);
-                if (price === undefined || !q) continue;
-                if (price >= q.preClose * LIMIT_UP_RATIO) continue;
-                const mv = pos.shares * price;
-                let shares = Math.floor(((mv / invested) * add) / price / LOT_SIZE) * LOT_SIZE;
-                const affordable = Math.floor(cash / (price * (1 + p.feeRate)) / LOT_SIZE) * LOT_SIZE;
-                if (shares > affordable) shares = affordable;
-                if (Number.isFinite(shares) && shares >= LOT_SIZE) buy(pos.code, shares, price, day, i, '偏离带加仓');
-              }
-            }
-          }
-        }
+        account.rebalanceToTotal(
+          totalTargetPct * (exposure / 100),
+          band,
+          day,
+          i,
+          { trim: '偏离带减仓', add: '偏离带加仓' },
+          {
+            priceOf: (code) => execPriceOf(code, day),
+            canSell: (code, price) => {
+              const q = quoteOf(code, day);
+              return !!q && price > q.preClose * LIMIT_DOWN_RATIO;
+            },
+            canBuy: (code, price) => {
+              const q = quoteOf(code, day);
+              return !!q && price < q.preClose * LIMIT_UP_RATIO;
+            },
+          },
+        );
       }
 
       // ── 结算阶段 ──
-      let marketValue = 0;
-      for (const pos of positions.values()) {
-        const close = quoteOf(pos.code, day)?.close ?? lastClose.get(pos.code);
-        if (close !== undefined) {
-          lastClose.set(pos.code, close);
-          pos.peakClose = Math.max(pos.peakClose, close);
-          marketValue += pos.shares * close;
-        } else {
-          marketValue += pos.shares * (lastClose.get(pos.code) ?? pos.entryPrice);
-        }
-      }
-      equities.push(cash + marketValue);
-      turnoverByDay.push(dayTurnover);
+      equities.push(account.settle((code) => quoteOf(code, day)?.close));
+      turnoverByDay.push(account.takeDayTurnover());
 
       // 换手失控保护（累计单边成交 / 初始资金）
       const totalTurnover = turnoverByDay.reduce((a, t) => a + t, 0);
@@ -393,12 +364,13 @@ export class TriggerBacktestServiceImpl extends TriggerBacktestService {
       }
 
       // ── 信号阶段（D 日收盘后，D+1 执行）──
-      if (p.sellRules.length && positions.size) {
-        for (const pos of positions.values()) {
+      if (p.sellRules.length && account.size() > 0) {
+        for (const pos of account.allPositions()) {
           if (pos.buyDayIdx >= i) continue;
-          const close = quoteOf(pos.code, day)?.close ?? lastClose.get(pos.code);
+          if (keepRules.length && matchKeepRule(pos, day, keepRules, keepFieldSeries, staticKeepRefs)) continue; // 不卖条件：跳过本轮卖出检查
+          const close = quoteOf(pos.code, day)?.close ?? account.lastCloseOf(pos.code);
           if (close === undefined) continue;
-          const reason = this.matchSellRule(pos, close, i, p.sellRules);
+          const reason = matchSellRule(pos, close, i, day, p.sellRules, NO_SELL_FIELD_SERIES, NO_STATIC_SELL_REFS);
           if (reason) pendingSells.set(pos.code, reason);
         }
       }
@@ -406,14 +378,25 @@ export class TriggerBacktestServiceImpl extends TriggerBacktestService {
       if (i < tradeDates.length - 1) {
         const date = String(day);
         const sections = await Promise.all(
-          entryRefs.map((key) => {
+          factorRefs.map((key) => {
             const [table, field] = key.split('.');
             return this.factorData.readFactorSection(table, field, date, p.securityIds);
           }),
         );
-        const sectionMaps = entryRefs.map((key, idx) => new Map(sections[idx].map((r) => [r.securityId, r.value])));
-        const pool = applyEntryFilters(p.securityIds ?? [], p.entryFilters, sectionMaps);
-        const ranked = rankUniverse(sortFactors, sectionMaps, pool);
+        const byName = new Map<string, Map<string, number>>();
+        factorRefs.forEach((key, idx) => {
+          byName.set(key, new Map(sections[idx].map((r) => [r.securityId, r.value])));
+        });
+        // 过滤/排序按列名各取各的截面：截面清单是过滤∪排序的并集，按下标会错位；
+        // 大盘条件从预载序列取当日值，以哨兵键广播成全池统一值（缺值弃权）
+        const filterSections = p.entryFilters.map((f): Map<string, number> => {
+          if (!isIndexFilterRule(f)) return byName.get(`${f.table}.${f.field}`)!;
+          const v = indexSeriesByKey.get(`${f.table}.${f.field}#${indexFilterCode(f)}`)?.get(day);
+          return new Map(v === undefined ? [] : [[INDEX_VALUE_KEY, v]]);
+        });
+        const rankSections = sortFactors.map((f) => byName.get(`${f.table}.${f.field}`)!);
+        const pool = applyEntryFilters(p.securityIds ?? [], p.entryFilters, filterSections);
+        const ranked = rankUniverse(sortFactors, rankSections, pool);
         const triggered = ranked.map((r) => r.code);
         if (triggered.length) {
           await loadQuotes(triggered); // 触发即装载该股行情（执行/结算需要）
@@ -429,51 +412,25 @@ export class TriggerBacktestServiceImpl extends TriggerBacktestService {
     }
 
     const finalEquity = equities[equities.length - 1] ?? p.initialCapital;
-    return { cash, positions, trades, equities, turnoverByDay, finalEquity, lastClose };
-  }
-
-  /** 触发模式的卖出规则检查：仅止盈/止损/回撤止盈/持有天数（field/rank_out 已在校验层拒绝） */
-  private matchSellRule(pos: Position, close: number, dayIdx: number, rules: StrategySellRule[]): string | null {
-    for (const rule of rules) {
-      switch (rule.kind) {
-        case 'stop_profit':
-          if (pos.entryPrice > 0 && close / pos.entryPrice - 1 >= rule.pct / 100) return `止盈+${rule.pct}%`;
-          break;
-        case 'stop_loss':
-          if (pos.entryPrice > 0 && close / pos.entryPrice - 1 <= -rule.pct / 100) return `止损-${rule.pct}%`;
-          break;
-        case 'max_drawdown_from_entry':
-          if (pos.peakClose > 0 && (pos.peakClose - close) / pos.peakClose >= rule.pct / 100) return `回撤止盈${rule.pct}%`;
-          break;
-        case 'max_hold_days':
-          if (dayIdx - pos.buyDayIdx >= rule.days) return `持有满${rule.days}个交易日`;
-          break;
-        default:
-          break;
-      }
-    }
-    return null;
-  }
-
-  private collectTimingRefsOf(overlay: StrategyTimingOverlay) {
-    return overlay.rules.map((r) => ({ table: r.table, field: r.field }));
-  }
-
-  /** 字典白名单（与模型 Ⅰ 同口径） */
-  private assertWhitelist(refs: { table: string; field: string }[]): void {
-    for (const ref of refs) {
-      const fields = loadTableFields(ref.table);
-      if (fields === undefined) {
-        throw new ApiException(
-          'INVALID_ARGUMENT',
-          400,
-          `表不在字段字典中（SQL/tables.md）: ${ref.table}。可用表: ${listKnownTables().join(', ') || '（无）'}`,
-        );
-      }
-      if (!fields.has(ref.field)) {
-        throw new ApiException('INVALID_ARGUMENT', 400, `表 ${ref.table} 无此因子字段（见 SQL/${ref.table}.md）: ${ref.field}`);
-      }
-    }
+    // 每期持仓明细：重放交易流水（触发模式无调仓日，按 5 交易日切期，与历史持仓详情面板同口径）
+    const periodAgg = buildPeriodHoldings(
+      account.trades(),
+      tradeDates,
+      tradeDates.map((_, i) => i).filter((i) => i % 5 === 0),
+      (code, day) => quoteOf(code, day)?.close ?? account.lastCloseOf(code),
+    );
+    return {
+      cash: account.cash(),
+      positions: account.positionsMap(),
+      trades: account.trades(),
+      equities,
+      turnoverByDay,
+      finalEquity,
+      lastClose: account.lastCloseMap(),
+      periodHoldings: periodAgg.periodHoldings,
+      latestOrders: periodAgg.latestOrders,
+      recentSold: periodAgg.recentSold,
+    };
   }
 
   /* ----- 卡片与摘要 ----- */
@@ -487,7 +444,7 @@ export class TriggerBacktestServiceImpl extends TriggerBacktestService {
     sortFactors: StrategySortFactor[],
     periodRows: ReturnType<typeof aggregatePeriodRows>,
     timingStats: { positionDist: { label: string; days: number }[]; holdingDaysPct: number; missedRallies: { date: number; pct: number; exposure: number }[] } | null,
-  ) {
+  ): BacktestCard {
     const timing = p.timingOverlay ?? null;
     const feePct = (p.feeRate * 100).toFixed(2);
     const sortExpr = sortFactors.map((f) => `${f.field}${f.direction === -1 ? '(小值优)' : ''}`).join(' + ');
@@ -510,6 +467,15 @@ export class TriggerBacktestServiceImpl extends TriggerBacktestService {
         { label: '仓位偏离带', value: `±${p.positionDeviatePct}%`, hint: `目标总仓位 ${Math.min(100, p.maxPositions * p.idealPositionPct)}%，偏离超带宽即再平衡` },
         { label: '持仓上限', value: `≤${p.maxPositions} 只 · 每只 ${p.idealPositionPct}%`, hint: '单日买入笔数与总换手有护栏' },
         { label: '卖出规则', value: describeSellRules(p.sellRules), hint: '逐日收盘后检查，命中次日执行' },
+        ...(p.keepRules.length
+          ? [
+              {
+                label: '不卖条件',
+                value: describeKeepRules(p.keepRules),
+                hint: '命中的持仓继续持有：优先级高于全部卖出规则；择时的仓位调整不受保护',
+              },
+            ]
+          : []),
         ...(timing
           ? [
               {
@@ -538,6 +504,7 @@ export class TriggerBacktestServiceImpl extends TriggerBacktestService {
         entryFilters: p.entryFilters,
         sortFactors: p.sortFactors,
         sellRules: p.sellRules,
+        ...(p.keepRules.length ? { keepRules: p.keepRules } : {}),
         benchmark: p.benchmark,
         ...(timing ? { timingOverlay: timing } : {}),
       },
@@ -576,6 +543,7 @@ export class TriggerBacktestServiceImpl extends TriggerBacktestService {
       偏离带宽: `±${p.positionDeviatePct}%`,
       区间: `${p.startDate}~${p.endDate}`,
       卖出规则: describeSellRules(p.sellRules),
+      ...(p.keepRules.length ? { 不卖条件: describeKeepRules(p.keepRules) } : {}),
       成交时点: p.executionTiming === 0 ? '开盘价' : '收盘价',
       初始资金: p.initialCapital,
       期末权益: +loop.finalEquity.toFixed(0),

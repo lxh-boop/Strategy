@@ -4,7 +4,7 @@ import { AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage } from
 import { RunnableConfig } from '@langchain/core/runnables';
 import { Annotation, Command, END, GraphInterrupt, interrupt, MemorySaver, START, StateGraph } from '@langchain/langgraph';
 import { ChatOpenAI } from '@langchain/openai';
-import { AgentCard, AgentProgressSink, AgentReply, ChatMessage, Conversation } from '../../types';
+import { AgentCard, AgentProgressSink, AgentReply, ChatMessage, Conversation, CorrelationCard, RankAnalysisCard, ScreenCard } from '../../types';
 import { ApiException } from '../../common/api.exception';
 import { appendConversationLog } from '../../common/conversation-log';
 import {
@@ -13,13 +13,17 @@ import {
   ClarificationSignal,
   collectAllRefs,
   collectFactorRefs,
+  DailyScreenInput,
+  describeExcludeRanges,
   describeFilters,
+  describeKeepRules,
   describeSellRules,
   describeSortFactors,
   effectiveSortFactors,
   StrategyBacktestInput,
   StrategyBacktestService,
 } from '../../core/strategy-backtest.service';
+import { assertAnalysisParams, FactorAnalysisService, FactorCorrelationInput, RankAnalysisInput } from '../../core/factor-analysis.service';
 import { describeTimingOverlay } from '../../core/timing';
 import { FactorDataService } from '../../core/factor-data.service';
 import {
@@ -38,6 +42,9 @@ const TOOL_STAGE: Record<string, string> = {
   list_factor_fields: '查看因子字段',
   read_factor_data: '读取因子数据',
   run_strategy_backtest: '策略回测计算',
+  run_rank_analysis: '排名分析计算',
+  run_factor_correlation: '因子相关性计算',
+  run_daily_screen: '每日选股查询',
 };
 
 /* ==========================================================
@@ -215,6 +222,7 @@ export class LangGraphAgentService extends AgentService {
     config: ConfigService,
     private readonly factorData: FactorDataService,
     private readonly backtest: StrategyBacktestService,
+    private readonly factorAnalysis: FactorAnalysisService,
   ) {
     super();
     // 漂移检查（启动一次）：tables.md 已登记但 <表名>.md 字典缺失/无字段行的表，提醒补齐
@@ -335,10 +343,11 @@ export class LangGraphAgentService extends AgentService {
       .addConditionalEdges('agent', (state: StrategyGraphStateType) => {
         const last = state.messages[state.messages.length - 1] as AIMessage;
         if (!last.tool_calls?.length) return END;
-        // 有未获授权（未委托且未逐组确认）的回测调用 → 先走确认门；其余直接执行
+        // 有未获授权（未委托且未逐组确认）的回测/分析调用 → 先走确认门；其余直接执行
+        const CONFIRMABLE = new Set(['run_strategy_backtest', 'run_rank_analysis', 'run_factor_correlation']);
         const needsConfirm = last.tool_calls.some(
           (c) =>
-            c.name === 'run_strategy_backtest' &&
+            CONFIRMABLE.has(c.name) &&
             state.backtestDelegated !== true &&
             !state.confirmedCalls.includes(c.id ?? ''),
         );
@@ -481,14 +490,16 @@ export class LangGraphAgentService extends AgentService {
   /** invoke 结果收尾：中断 → 记挂起映射、返回参数确认文案；正常 → 卡片择优出回复并清挂起映射 */
   private collectReply(state: StrategyGraphStateType, conversationId: string, threadId: string): AgentReply {
     const interrupted = (
-      state as { __interrupt__?: Array<{ value: { params?: Record<string, string> } }> }
+      state as { __interrupt__?: Array<{ value: { type?: string; params?: Record<string, string> } }> }
     ).__interrupt__;
     if (interrupted?.length) {
       this.pendingConfirms.set(conversationId, threadId);
-      const params = interrupted[0]?.value?.params ?? {};
-      this.logger.log(`回测参数确认挂起 会话=${conversationId} thread=${threadId} 参数=${toLogPreview(params)}`);
-      appendConversationLog(conversationId, `回测参数确认挂起: ${toLogPreview(params)}`);
-      return { text: formatConfirmText(params) };
+      const value = interrupted[0]?.value ?? {};
+      const params = value.params ?? {};
+      const kind = value.type === 'confirm_analysis' ? 'analysis' : 'backtest';
+      this.logger.log(`确认挂起(${kind}) 会话=${conversationId} thread=${threadId} 参数=${toLogPreview(params)}`);
+      appendConversationLog(conversationId, `确认挂起(${kind}): ${toLogPreview(params)}`);
+      return { text: formatConfirmText(params, kind) };
     }
     this.pendingConfirms.delete(conversationId);
     const last = state.messages[state.messages.length - 1] as AIMessage;
@@ -530,6 +541,10 @@ export class LangGraphAgentService extends AgentService {
     list_factor_fields: async (args) => ({ result: this.execListFields(args as ListFactorFieldsArgs) }),
     read_factor_data: async (args) => ({ result: await this.execReadData(args as ReadFactorDataArgs) }),
     run_strategy_backtest: async (args, ctx) => this.execRunBacktest(args as StrategyBacktestInput, ctx),
+    run_rank_analysis: async (args) => this.execRunRankAnalysis(args as Record<string, unknown>),
+    run_factor_correlation: async (args) => this.execRunFactorCorrelation(args as Record<string, unknown>),
+    // 每日选股：只读零副作用，不进 CONFIRMABLE（免确认，即查即得）
+    run_daily_screen: async (args) => this.execRunDailyScreen(args as DailyScreenInput),
   };
 
   /** 统一兜底：澄清信号 → 指引模型向用户提问；ApiException → 原因给模型自纠；其他 → 通用失败并记日志。
@@ -632,19 +647,26 @@ export class LangGraphAgentService extends AgentService {
     let delegated = state.backtestDelegated === true;
 
     for (const call of last.tool_calls ?? []) {
-      if (call.name !== 'run_strategy_backtest') continue;
+      const kind =
+        call.name === 'run_strategy_backtest' ? 'backtest'
+        : call.name === 'run_rank_analysis' ? 'rank'
+        : call.name === 'run_factor_correlation' ? 'corr'
+        : null;
+      if (!kind) continue;
       if (delegated || state.confirmedCalls.includes(call.id ?? '')) continue;
-      this.logger.log(`confirm节点 回测确认 ${call.id}: ${toLogPreview(call.args)}`);
+      this.logger.log(`confirm节点 ${call.name} 确认 ${call.id}: ${toLogPreview(call.args)}`);
       try {
-        const p = assertStrategyInput(call.args as StrategyBacktestInput);
-        // 白名单 + 区间快检都在 interrupt 之前：字段不存在/区间超界的提案先打回模型自纠，
-        // 不让用户确认一个注定失败的提案（区间报错带可用范围，模型改参重发只需用户确认一次）
-        this.backtest.preflight(collectAllRefs(p));
-        await this.backtest.checkRange(p);
-        const sort = effectiveSortFactors(p.sortFactors);
-        const decision = interrupt({
-          type: 'confirm_backtest',
-          params: {
+        let confirmType: string;
+        let params: Record<string, string | number>;
+        if (kind === 'backtest') {
+          const p = assertStrategyInput(call.args as StrategyBacktestInput);
+          // 白名单 + 区间快检都在 interrupt 之前：字段不存在/区间超界的提案先打回模型自纠，
+          // 不让用户确认一个注定失败的提案（区间报错带可用范围，模型改参重发只需用户确认一次）
+          this.backtest.preflight(collectAllRefs(p));
+          await this.backtest.checkRange(p);
+          const sort = effectiveSortFactors(p.sortFactors);
+          confirmType = 'confirm_backtest';
+          params = {
             回测区间: `${p.startDate}~${p.endDate}`,
             股票池: p.securityIds ? `${p.securityIds.length} 只` : '全市场',
             调仓间隔: `每 ${p.rebalanceIntervalDays} 个交易日`,
@@ -652,13 +674,44 @@ export class LangGraphAgentService extends AgentService {
             排序因子: describeSortFactors(sort.factors) + (sort.usedDefault ? '【默认追加】' : ''),
             过滤因子: describeFilters(p.entryFilters),
             卖出规则: describeSellRules(p.sellRules),
+            ...(p.keepRules.length ? { 不卖条件: describeKeepRules(p.keepRules) } : {}),
+            ...(p.excludeRanges.length ? { 排除时间段: describeExcludeRanges(p.excludeRanges) } : {}),
             ...(p.timingOverlay ? { 择时规则: describeTimingOverlay(p.timingOverlay) } : {}),
             ...(p.rebalanceIntervalDays === 0
               ? { 交易模型: `条件触发（模型 Ⅱ）· 偏离带 ±${p.positionDeviatePct}%` }
               : {}),
             '初始资金/费用': `${p.initialCapital} 元 · 单边 ${(p.feeRate * 100).toFixed(2)}%${isUserSet(call.args?.feeRate) ? '' : '（默认）'}`,
             业绩基准: `${BENCHMARKS[p.benchmark].name}${isUserSet(call.args?.benchmark) ? '' : '（默认）'}`,
-          },
+          };
+        } else if (kind === 'rank') {
+          const a = this.parseRankAnalysisArgs(call.args as Record<string, unknown>);
+          // 白名单与分段/间隔快检：因子列不存在或参数越界的提案先打回（区间越界由分析实现层抛）
+          this.backtest.preflight([{ table: a.sortFactor.table, field: a.sortFactor.field }]);
+          assertAnalysisParams(a.segmentCount, a.intervalDays);
+          confirmType = 'confirm_analysis';
+          params = {
+            分析类型: '排名分析（因子分段有效性评估）',
+            分析区间: `${a.startDate}~${a.endDate}`,
+            股票池: a.securityIds ? `${a.securityIds.length} 只` : '全市场（截面有值股票）',
+            分析因子: describeSortFactors([a.sortFactor]),
+            分段数: `${a.segmentCount} 段${isUserSet((call.args as Record<string, unknown>)?.segmentCount) ? '' : '（默认）'}`,
+            分析间隔: `每 ${a.intervalDays} 个交易日`,
+          };
+        } else {
+          const a = this.parseFactorCorrelationArgs(call.args as Record<string, unknown>);
+          this.backtest.preflight(a.refs.map((r) => ({ table: r.table, field: r.field })));
+          confirmType = 'confirm_analysis';
+          params = {
+            分析类型: '因子相关性矩阵（截面秩相关）',
+            分析区间: `${a.startDate}~${a.endDate}`,
+            股票池: a.securityIds ? `${a.securityIds.length} 只` : '全市场（截面有值股票）',
+            分析因子: a.refs.map((r) => `${r.table}.${r.field}`).join('；'),
+            采样间隔: `每 ${a.intervalDays} 个交易日`,
+          };
+        }
+        const decision = interrupt({
+          type: confirmType,
+          params,
         }) as
           | { action: 'approve' }
           | { action: 'delegate' }
@@ -674,7 +727,7 @@ export class LangGraphAgentService extends AgentService {
         }
         if (decision.action === 'delegate') {
           delegated = true; // 本批后续 + 本轮（本次图执行）后续全放行
-          this.logger.log('用户授权调优：本批后续与本轮后续回测免确认');
+          this.logger.log('用户授权调优：本批后续与本轮后续回测/分析免确认');
           continue;
         }
         confirmed.push(call.id ?? '');
@@ -736,6 +789,150 @@ export class LangGraphAgentService extends AgentService {
     };
   }
 
+  /** 排名分析入参归一化：字符串归一 + 方向/股票池整理；分段/间隔数值护栏在 confirm 与实现层 */
+  private parseRankAnalysisArgs(args: Record<string, unknown>): RankAnalysisInput {
+    const f = (args.factor ?? {}) as Record<string, unknown>;
+    const table = String(f.table ?? '').trim();
+    const field = String(f.field ?? '').trim();
+    if (!table || !field) {
+      throw new ApiException('INVALID_ARGUMENT', 400, 'factor.table/field 必填（表名来自表目录、字段来自 list_factor_fields）');
+    }
+    const direction: 1 | -1 = Number(f.direction) === -1 ? -1 : 1;
+    const securityIds = Array.isArray(args.securityIds)
+      ? (args.securityIds as unknown[]).map((s) => String(s).trim()).filter(Boolean)
+      : null;
+    return {
+      sortFactor: { table, field, direction },
+      securityIds: securityIds && securityIds.length ? securityIds : null,
+      segmentCount: Number(args.segmentCount ?? 5),
+      intervalDays: Number(args.intervalDays),
+      startDate: String(args.startDate ?? '').trim(),
+      endDate: String(args.endDate ?? '').trim(),
+    };
+  }
+
+  /** 相关性入参归一化：因子清单逐项校验 table/field */
+  private parseFactorCorrelationArgs(args: Record<string, unknown>): FactorCorrelationInput {
+    const rawFactors = Array.isArray(args.factors) ? (args.factors as Record<string, unknown>[]) : [];
+    const refs = rawFactors.map((f) => {
+      const table = String(f.table ?? '').trim();
+      const field = String(f.field ?? '').trim();
+      if (!table || !field) {
+        throw new ApiException('INVALID_ARGUMENT', 400, 'factors 每项都需要 table 与 field（来自表目录与 list_factor_fields）');
+      }
+      return { table, field, direction: (Number(f.direction) === -1 ? -1 : 1) as 1 | -1 };
+    });
+    const securityIds = Array.isArray(args.securityIds)
+      ? (args.securityIds as unknown[]).map((s) => String(s).trim()).filter(Boolean)
+      : null;
+    return {
+      refs,
+      securityIds: securityIds && securityIds.length ? securityIds : null,
+      intervalDays: Number(args.intervalDays),
+      startDate: String(args.startDate ?? '').trim(),
+      endDate: String(args.endDate ?? '').trim(),
+    };
+  }
+
+  /** 排名分析执行：白名单快检（confirm 节点已过一次，幂等）→ 分析 → 卡片；
+   *  回执只给统计量，IC 序列等曲线数据走卡片给前端，不灌给模型 */
+  private async execRunRankAnalysis(args: Record<string, unknown>): Promise<ToolOutcome> {
+    const input = this.parseRankAnalysisArgs(args);
+    this.backtest.preflight([{ table: input.sortFactor.table, field: input.sortFactor.field }]);
+    const out = await this.factorAnalysis.runRankAnalysis(input);
+    const card: RankAnalysisCard = {
+      type: 'rank_analysis',
+      title: `排名分析 ${input.sortFactor.field}`,
+      tag: 'rank_analysis',
+      factor: input.sortFactor,
+      segmentCount: input.segmentCount,
+      intervalDays: input.intervalDays,
+      periodCount: out.periodCount,
+      icMean: out.icMean,
+      icPositiveProb: out.icPositiveProb,
+      icIR: out.icIR,
+      monotonicityR2: out.monotonicityR2,
+      longShortSpreadPct: out.longShortSpreadPct,
+      icSeries: out.icSeries,
+      segmentMeanReturnPct: out.segmentMeanReturnPct,
+      segmentCumulativePct: out.segmentCumulativePct,
+      segmentPeriodReturnsPct: out.segmentPeriodReturnsPct,
+      longShortSeries: out.longShortSeries,
+      icDecay: out.icDecay,
+    };
+    return {
+      result: {
+        因子: `${input.sortFactor.table}.${input.sortFactor.field}（${input.sortFactor.direction === 1 ? '值大优' : '值小优'}）`,
+        分析期数: out.periodCount,
+        IC均值: out.icMean,
+        IC为正概率: `${out.icPositiveProb}%`,
+        ...(out.icIR !== undefined ? { 因子IR: out.icIR } : {}),
+        排列单调性: out.monotonicityR2,
+        各段平均单期收益: out.segmentMeanReturnPct.join(' / '),
+        多空价差: `${out.longShortSpreadPct}%`,
+        解读: '段 1 为因子最优先段；段收益单调递减且 IC 稳定为正 → 因子有效；请只引用以上数字下结论',
+      },
+      card,
+    };
+  }
+
+  /** 相关性执行：白名单快检 → 矩阵 → 卡片；回执给两两系数清单（≤45 对） */
+  private async execRunFactorCorrelation(args: Record<string, unknown>): Promise<ToolOutcome> {
+    const input = this.parseFactorCorrelationArgs(args);
+    this.backtest.preflight(input.refs.map((r) => ({ table: r.table, field: r.field })));
+    const out = await this.factorAnalysis.runFactorCorrelation(input);
+    const card: CorrelationCard = {
+      type: 'correlation',
+      title: '因子相关性矩阵',
+      tag: 'correlation',
+      factors: out.factors,
+      matrix: out.matrix,
+      periodCount: out.periodCount,
+    };
+    const pairs = out.factors
+      .flatMap((_, i) => out.factors.map((_, j) => [i, j] as const))
+      .filter(([i, j]) => i < j && out.matrix[i][j] !== null)
+      .map(([i, j]) => `${out.factors[i]} × ${out.factors[j]} = ${out.matrix[i][j]}`);
+    return {
+      result: {
+        采样期数: out.periodCount,
+        相关系数: pairs,
+        解读: '|相关系数|>0.7 视为高相关（冗余），组合时建议二选一；请只引用以上数字下结论',
+      },
+      card,
+    };
+  }
+
+  /** 每日选股执行：只读查询（白名单与日历校验在引擎 runDailyScreen 内），清单卡 + 回执 */
+  private async execRunDailyScreen(args: DailyScreenInput): Promise<ToolOutcome> {
+    const out = await this.backtest.runDailyScreen(args);
+    const card: ScreenCard = {
+      type: 'screen',
+      title: `每日选股 ${out.date}`,
+      tag: '每日选股',
+      note: `过滤前 ${out.rawPoolSize} 只 → 条件存活 ${out.survivedCount} 只，按综合分取前 ${out.stocks.length} 只`,
+      date: out.date,
+      stocks: out.stocks,
+      sortFactors: out.sortFactors.map((f) => ({ table: f.table, field: f.field, direction: f.direction })),
+      usedDefaultSort: out.usedDefaultSort,
+      entryFilters: out.entryFilters,
+      rawPoolSize: out.rawPoolSize,
+      survivedCount: out.survivedCount,
+    };
+    return {
+      result: {
+        查询日: out.date,
+        过滤条件: describeFilters(out.entryFilters),
+        排序因子: describeSortFactors(out.sortFactors) + (out.usedDefaultSort ? '【默认追加】' : ''),
+        过滤前候选: out.rawPoolSize,
+        存活: out.survivedCount,
+        入选清单: out.stocks.map((s) => `${s.code}（综合分 ${s.score}）`),
+        提示: '清单已生成卡片随回复展示；请用不超过 90 字概括（只引用返回的代码与数字，不要编造），并提醒结果为历史数据回放，不构成投资建议',
+      },
+      card,
+    };
+  }
+
   /** 工具回执的日志形态：read_factor_data 不落原始数据，只报结果形状；其余工具原样截断预览 */
   private toolResultPreview(toolName: string, result: unknown): string {
     if (toolName !== 'read_factor_data') return toLogPreview(result);
@@ -753,9 +950,12 @@ export class LangGraphAgentService extends AgentService {
     if (name === 'read_factor_data' && Array.isArray(r.数据)) {
       return r.数据.length ? `返回 ${r.数据.length} 行` : '无数据行';
     }
-    if (name === 'run_equal_weight_backtest') {
+    if (name === 'run_strategy_backtest') {
       return `${r.年化收益 ?? ''}，回撤 ${r.最大回撤 ?? ''}，换手 ${r.年化换手单边 ?? ''}`;
     }
+    if (name === 'run_rank_analysis') return `IC均值 ${r.IC均值}，单调性 ${r.排列单调性}`;
+    if (name === 'run_factor_correlation') return `${(r.相关系数 as unknown[])?.length ?? 0} 对因子相关`;
+    if (name === 'run_daily_screen' && Array.isArray(r.入选清单)) return `${r.查询日} 入选 ${r.入选清单.length} 只`;
     if (name === 'list_factor_tables' && Array.isArray(r.tables)) return `${r.tables.length} 张表`;
     if (name === 'list_factor_fields' && Array.isArray(r.tables)) return `${r.tables.length} 张表的字段明细`;
     return '完成';
@@ -806,9 +1006,29 @@ export class LangGraphAgentService extends AgentService {
         '指数没说默认上证、阈值票数没说默认全部、熊市仓位没说默认空仓（提案中注明"默认"）；' +
         '字典暂无均线/金叉类字段，用户提出时如实告知暂不支持，引导改用点位/涨跌幅/量能条件；' +
         '择时只影响总仓位，选股条件照常生效；',
+      '- 过滤条件进阶：比较符支持 >/</eq/bw（bw 传 [下限, 上限] 闭区间）；' +
+        'entryFilters 可引用大盘字段（table=mkt_idxd，如 CLOSE_INDEX，可加 indexCode 指定指数、缺省上证）——' +
+        '这是"股票池开关"（大盘不好就换一类股票继续持有），与择时的"仓位开关"互补：' +
+        '用户表达"大盘 XX 时买防御股/换一池"用大盘条件，表达"大盘 XX 时减仓/空仓"用 timingOverlay，两者可同用；',
+      '- 不卖条件（keepRules）：用户说"满足 XX 就不卖""强势股别被调出"时传入，结构同 entryFilters 元素（暂不支持指数表字段）；' +
+        '命中的持仓不会被卖出规则与调仓卖出，但择时减仓照常生效（提案中注明这一边界）；',
+      '- 排除时间段（excludeRanges）：用户要"剔除某段行情（如股灾）再回测"时传入 [{start,end}]（≤5 段）；' +
+        '段内不交易、净值走平，指标按全序列计算——如实向用户说明这一口径；',
+      '- 每日选股（run_daily_screen）：用户问"今天/某个历史日这套条件选出哪些股票"时使用；' +
+        'entryFilters/sortFactors 结构同回测，date 缺省=最近交易日；只读免确认、零副作用，不产生可保存的策略；' +
+        '清单已出卡片，回复只做不超过 90 字的概括；',
       '- 触发模式（模型 Ⅱ）：用户说"不按月调仓，满足条件就买""偏离 X% 再平衡"时传 rebalanceIntervalDays=0，' +
         '必须同时传 positionDeviatePct（偏离带宽 %，没说默认 20，需注明"默认"）且预声明触发域 securityIds；' +
-        '触发模式的卖出规则不支持字段条件与排名跌出，如实告知；',
+        '触发模式的卖出规则不支持字段条件与排名跌出，如实告知；' +
+        '调仓模式下 positionDeviatePct 语义不同：可选的择时拉回阈值 %（默认 1），' +
+        '用户表达"偏离目标仓位超 X% 就拉回"时才传，没提不要主动传；',
+      '- 排名分析（run_rank_analysis）：用户问"这个因子有没有效/因子分段测试/排名 IC"时使用；' +
+        'factor 结构同 sortFactors 元素（table/field/direction），intervalDays=分析间隔（必填无默认，没说先问），' +
+        'segmentCount 默认 5（提案注明）；结果解读只能引用回执数字：IC 稳定为正且段收益单调 → 因子有效，' +
+        '严禁编造 IC 或排名结论；排名分析只评估因子本身，不产生可保存的策略；',
+      '- 因子相关性（run_factor_correlation）：用户问"这几个因子相关性高不高/有没有重复"时使用；' +
+        'factors 传 2~10 个因子（结构同上），intervalDays=采样间隔（必填无默认，没说先问）；' +
+        '|相关系数|>0.7 视为高相关（冗余），组合时建议二选一；',
       '- run_strategy_backtest 执行前系统会请用户确认参数：收到"已取消"回执时，' +
         '结合用户反馈调整参数后重新发起（会再次请用户确认），或放弃回测直接回应用户，' +
         '不要声称回测已开始或编造回测结果；',
@@ -849,9 +1069,19 @@ function todayLine(): string {
     `用户用相对时间（如"最近两年""今年"）表达区间时，据此换算为具体 YYYYMMDD 起止，不要反问。`;
 }
 
-/** 确认挂起 → 用户文案：逐项列出将执行的参数（与卡片 params 同源），请求确认或改参 */
-function formatConfirmText(params: Record<string, string>): string {
+/** 确认挂起 → 用户文案：逐项列出将执行的参数（与卡片 params 同源），请求确认或改参。
+ *  kind=backtest 为回测（文案原样）；analysis 为排名分析/因子相关性（首行与行动话术随类型） */
+function formatConfirmText(params: Record<string, string>, kind: 'backtest' | 'analysis' = 'backtest'): string {
   const lines = Object.entries(params).map(([k, v]) => `- ${k}：${v}`);
+  if (kind === 'analysis') {
+    return [
+      `将按以下参数执行${String(params['分析类型'] ?? '因子分析')}：`,
+      ...lines,
+      '',
+      '回复"确认"开始分析；如需调整，直接回复要改的参数（如"改成每10个交易日"、"分段改成3段"、"区间用近一年"）；',
+      '如需 AI 连续多次分析自动调优，回复"授权调优"（本轮内免确认；连续计算多组，整体耗时会明显长于单次）。',
+    ].join('\n');
+  }
   return [
     '将按以下参数执行策略回测：',
     ...lines,

@@ -1,18 +1,20 @@
 import { useEffect, useRef, useState } from "react";
+import type { CSSProperties } from "react";
 import type { AgentCard, BacktestCard, ChatMessage, Conversation, MetricItem } from "../types";
 import { CHAT_SUGGESTIONS } from "../data/mock";
 import { fmtConvDate } from "../utils/format";
-import { PerfChart } from "../components/charts";
+import { IcChart, PerfChart, Sparkline } from "../components/charts";
 import { ConfirmModal, Modal, ParamsBlock } from "../components/ui";
 import { MiniMarkdown } from "../components/markdown";
 import { IconClose, IconLogo, IconPlus, IconSend, IconStop } from "../components/icons";
 
 /* ----- 确认门文案解析：格式由后端 formatConfirmText 生成（稳定契约）。
-   首行为"将按以下参数执行(策略|等权)回测："，其后每行"- 标签：值"；
-   命中 = 当前智能体在等用户确认回测参数，前端以弹窗呈现结构化参数与操作按钮。
-   标签清单由后端决定（新引擎含排序因子方向/权重、过滤/卖出规则），前端通用渲染 ----- */
+   首行为"将按以下参数执行<类型>："（策略回测/等权回测/排名分析/因子相关性等），
+   其后每行"- 标签：值"；
+   命中 = 当前智能体在等用户确认参数，前端以弹窗呈现结构化参数与操作按钮。
+   标签清单由后端决定，前端通用渲染 ----- */
 function parseConfirmGate(bubble: string): { label: string; value: string }[] | null {
-  if (!/^将按以下参数执行(策略|等权)回测：/.test(bubble)) return null;
+  if (!/^将按以下参数执行[^：]+：/.test(bubble)) return null;
   const rows = bubble
     .split("\n")
     .filter(l => l.startsWith("- "))
@@ -45,6 +47,13 @@ function MetricGrid({ metrics }: { metrics: MetricItem[] }) {
   );
 }
 
+/* 收益视图切换按钮（分段累计 / 多空净值）的内联样式 */
+const viewBtnStyle = (active: boolean): CSSProperties => ({
+  fontSize: 11, padding: "1px 8px", marginRight: 4, cursor: "pointer", borderRadius: 6,
+  border: "1px solid var(--tile-border)", background: active ? "var(--tile-border)" : "transparent",
+  color: "var(--text-2)",
+});
+
 function AgentCardView({ card, saved, onSaveBacktest, onAskOptimize, onGotoStrategies }: {
   card: AgentCard;
   saved: string[];
@@ -54,6 +63,8 @@ function AgentCardView({ card, saved, onSaveBacktest, onAskOptimize, onGotoStrat
 }) {
   const isSaved = card.id != null && saved.includes(card.id);
   const [savingBacktest, setSavingBacktest] = useState(false);
+  /* 排名分析收益视图：false=分段累计表（默认，兼容旧卡）/ true=多空虚拟净值曲线 */
+  const [lsView, setLsView] = useState(false);
 
   let actions;
   if (card.type === "backtest") {
@@ -77,6 +88,10 @@ function AgentCardView({ card, saved, onSaveBacktest, onAskOptimize, onGotoStrat
      全量下线：产出方删除、类型定义删除、库中零存量（32 张卡 100% backtest） */
   let body;
   if (card.type === "backtest") {
+    /* 卡片只保留最近一期调仓（最新一期期末持仓 + 调仓指令）；全部周期与逐笔明细不上屏 */
+    const latestPeriod = card.periodHoldings && card.periodHoldings.length > 0
+      ? card.periodHoldings[card.periodHoldings.length - 1]
+      : undefined;
     body = (
       <>
         <PerfChart curve={card.curve} benchCurve={card.benchCurve} benchName={card.benchName} dates={card.dates} />
@@ -117,73 +132,221 @@ function AgentCardView({ card, saved, onSaveBacktest, onAskOptimize, onGotoStrat
             </div>
           </div>
         )}
-        {/* 历史持仓详情：按调仓期聚合（对标果仁同名面板） */}
-        {card.periods && card.periods.length > 0 && (
+        {/* 历史持仓详情（全部周期表）按产品决定下线，数据仍由后端产出只是不上屏 */}
+        {/* 最近一期调仓：最新一期期末持仓（对标果仁「每日选股」的最新期） */}
+        {latestPeriod && (
           <div style={{ marginTop: 12 }}>
-            <div className="btp-title">历史持仓详情</div>
+            <div className="btp-title">
+              最近一期持仓（第 {latestPeriod.seq} 期 · {String(latestPeriod.startDate).replace(/^(\d{4})(\d{2})(\d{2})$/, "$1-$2-$3")} ~ {String(latestPeriod.endDate).replace(/^(\d{4})(\d{2})(\d{2})$/, "$1-$2-$3")}）
+            </div>
             <div className="trade-scroll">
               <table className="mini-table">
                 <thead>
                   <tr>
-                    <th>期次</th><th>开始</th><th>结束</th>
-                    <th className="num">仓位%</th><th className="num">只数</th>
-                    <th className="num">买入</th><th className="num">卖出</th>
-                    <th className="num">换手%</th><th className="num">本期%</th>
-                    <th className="num">基准%</th><th className="num">超额%</th><th className="num">千元净值</th>
+                    <th>证券</th><th className="num">股数</th><th className="num">期末收盘</th>
+                    <th className="num">进入基准</th><th className="num">期间收益%</th><th className="num">权重%</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {card.periods.map(p => (
-                    <tr key={p.seq}>
-                      <td>{p.seq}</td>
-                      <td>{String(p.startDate).replace(/^(\d{4})(\d{2})(\d{2})$/, "$1-$2-$3")}</td>
-                      <td>{String(p.endDate).replace(/^(\d{4})(\d{2})(\d{2})$/, "$1-$2-$3")}</td>
-                      <td className="num">{p.positionPct}%</td>
-                      <td className="num">{p.stockCount}</td>
-                      <td className="num">{p.buyCount}</td>
-                      <td className="num">{p.sellCount}</td>
-                      <td className="num">{p.turnoverPct}%</td>
-                      <td className={`num ${p.periodReturnPct >= 0 ? "up" : "down"}`}>{p.periodReturnPct > 0 ? "+" : ""}{p.periodReturnPct}%</td>
-                      <td className={`num ${p.benchReturnPct >= 0 ? "up" : "down"}`}>{p.benchReturnPct > 0 ? "+" : ""}{p.benchReturnPct}%</td>
-                      <td className={`num ${p.excessPct >= 0 ? "up" : "down"}`}>{p.excessPct > 0 ? "+" : ""}{p.excessPct}%</td>
-                      <td className="num">{p.cumulativeValue}</td>
+                  {latestPeriod.holdings.map(h => (
+                    <tr key={h.code}>
+                      <td>{h.code}</td>
+                      <td className="num">{h.shares.toLocaleString("zh-CN")}</td>
+                      <td className="num">{h.closePrice}</td>
+                      <td className="num">{h.entryPrice}</td>
+                      <td className={`num ${h.periodReturnPct >= 0 ? "up" : "down"}`}>{h.periodReturnPct > 0 ? "+" : ""}{h.periodReturnPct}%</td>
+                      <td className="num">{h.weightPct}%</td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             </div>
+            {card.latestOrders && card.latestOrders.length > 0 && (
+              <div style={{ marginTop: 6 }}>
+                <div className="btp-title">最新调仓指令（最后一期全部成交）</div>
+                <div className="trade-scroll">
+                  <table className="mini-table">
+                    <thead>
+                      <tr><th>日期</th><th>证券</th><th>方向</th><th className="num">数量</th><th>原因</th></tr>
+                    </thead>
+                    <tbody>
+                      {card.latestOrders.map((t, i) => (
+                        <tr key={i}>
+                          <td>{String(t.date).replace(/^(\d{4})(\d{2})(\d{2})$/, "$1-$2-$3")}</td>
+                          <td>{t.code}</td>
+                          <td className={t.direction === "buy" ? "up" : "down"}>{t.direction === "buy" ? "买入" : "卖出"}</td>
+                          <td className="num">{t.shares.toLocaleString("zh-CN")}</td>
+                          <td>{t.reason}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                {card.recentSold && card.recentSold.length > 0 && (
+                  <div className="agent-card-text" style={{ marginTop: 6 }}>最近卖出：{card.recentSold.join("、")}</div>
+                )}
+              </div>
+            )}
           </div>
         )}
-        {card.trades && card.trades.length > 0 && (
+        {/* 交易明细（最近 N 笔）按产品决定下线，数据仍由后端产出只是不上屏 */}
+      </>
+    );
+  }
+
+  if (card.type === "rank_analysis") {
+    const dirText = card.factor.direction === 1 ? "值大优" : "值小优";
+    body = (
+      <>
+        <div className="agent-card-text">
+          {card.factor.table}.{card.factor.field}（{dirText}）· 分 {card.segmentCount} 段 ·
+          每 {card.intervalDays} 个交易日 · {card.periodCount} 期
+        </div>
+        <MetricGrid metrics={[
+          { label: "IC 均值", value: card.icMean !== undefined ? String(card.icMean) : "—" },
+          { label: "IC 为正概率", value: card.icPositiveProb !== undefined ? `${card.icPositiveProb}%` : "—" },
+          { label: "因子 IR", value: card.icIR !== undefined ? String(card.icIR) : "—" },
+          { label: "排列单调性 r²", value: String(card.monotonicityR2) },
+        ]} />
+        {card.icSeries.length > 0 && (
           <div style={{ marginTop: 12 }}>
-            <div className="btp-title">交易明细（最近 {card.trades.length} 笔）</div>
-            <div className="trade-scroll">
-              <table className="mini-table">
-                <thead>
-                  <tr>
-                    <th>日期</th><th>证券</th><th>方向</th>
-                    <th className="num">价格</th><th className="num">股数</th>
-                    <th className="num">金额</th><th className="num">费用</th><th>原因</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {card.trades.map((t, i) => (
-                    <tr key={i}>
-                      <td>{String(t.date).replace(/^(\d{4})(\d{2})(\d{2})$/, "$1-$2-$3")}</td>
-                      <td>{t.code}</td>
-                      <td className={t.direction === "buy" ? "up" : "down"}>{t.direction === "buy" ? "买入" : "卖出"}</td>
-                      <td className="num">{t.price}</td>
-                      <td className="num">{t.shares.toLocaleString("zh-CN")}</td>
-                      <td className="num">{Math.round(t.amount).toLocaleString("zh-CN")}</td>
-                      <td className="num">{Math.round(t.fee).toLocaleString("zh-CN")}</td>
-                      <td>{t.reason}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+            <div className="btp-title">IC 序列</div>
+            <IcChart series={card.icSeries} />
+          </div>
+        )}
+        {card.icDecay && card.icDecay.length > 0 && (
+          <div style={{ marginTop: 12 }}>
+            <div className="btp-title">IC 衰减（按持有期，交易日）</div>
+            <div className="monthly-strip">
+              {card.icDecay.map(d => (
+                <span key={d.lag} className={`monthly-chip ${d.ic >= 0 ? "up" : "down"}`} title={`持有 ${d.lag} 个交易日的平均 IC`}>
+                  {d.lag}日 {d.ic > 0 ? "+" : ""}{d.ic}
+                </span>
+              ))}
             </div>
           </div>
         )}
+        {card.segmentMeanReturnPct.length > 0 && (
+          <div style={{ marginTop: 12 }}>
+            <div className="btp-title">
+              收益视图（段 1 = 因子最优先段）
+              {card.longShortSeries && card.longShortSeries.length > 1 && (
+                <span style={{ marginLeft: 8 }}>
+                  <button aria-pressed={!lsView} style={viewBtnStyle(!lsView)} onClick={() => setLsView(false)}>分段累计</button>
+                  <button aria-pressed={lsView} style={viewBtnStyle(lsView)} onClick={() => setLsView(true)}>多空净值</button>
+                </span>
+              )}
+            </div>
+            {lsView && card.longShortSeries ? (
+              <>
+                <Sparkline data={card.longShortSeries.map(s => s.nav)} width={640} height={110} />
+                <div className="agent-card-text">
+                  多空虚拟净值（段 1 做多 − 末段做空，起点 100，无费用）：期末{" "}
+                  {card.longShortSeries[card.longShortSeries.length - 1].nav}
+                </div>
+              </>
+            ) : (
+              <div className="trade-scroll">
+                <table className="mini-table">
+                  <thead>
+                    <tr><th>段</th><th className="num">平均单期收益%</th><th className="num">区间累计收益%</th></tr>
+                  </thead>
+                  <tbody>
+                    {card.segmentMeanReturnPct.map((mean, i) => (
+                      <tr key={i}>
+                        <td>段 {i + 1}{i === 0 ? "（最优先）" : i === card.segmentMeanReturnPct.length - 1 ? "（最末段）" : ""}</td>
+                        <td className={`num ${mean >= 0 ? "up" : "down"}`}>{mean > 0 ? "+" : ""}{mean}%</td>
+                        <td className={`num ${card.segmentCumulativePct[i] >= 0 ? "up" : "down"}`}>
+                          {card.segmentCumulativePct[i] > 0 ? "+" : ""}{card.segmentCumulativePct[i]}%
+                        </td>
+                      </tr>
+                    ))}
+                    <tr>
+                      <td>多空价差（段1−末段）</td>
+                      <td className={`num ${card.longShortSpreadPct >= 0 ? "up" : "down"}`} colSpan={2}>
+                        {card.longShortSpreadPct > 0 ? "+" : ""}{card.longShortSpreadPct}%
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        )}
+      </>
+    );
+  }
+
+  if (card.type === "correlation") {
+    /* 色阶：正相关红、负相关蓝，|r| 越大底色越深；null（样本不足）灰字 */
+    const cellStyle = (v: number | null): CSSProperties => {
+      if (v === null) return { color: "var(--text-3)" };
+      const pct = Math.round(Math.min(1, Math.abs(v)) * 62);
+      return { background: `color-mix(in srgb, ${v >= 0 ? "var(--up)" : "var(--down)"} ${pct}%, transparent)` };
+    };
+    const shortName = (f: string) => f.split(".")[1] ?? f;
+    body = (
+      <>
+        <div className="agent-card-text">采样 {card.periodCount} 期 · 单元格 = 两因子截面秩相关均值（逐期公共股票）</div>
+        <div className="trade-scroll">
+          <table className="mini-table corr-matrix">
+            <thead>
+              <tr><th />
+                {card.factors.map(f => <th key={f}>{shortName(f)}</th>)}
+              </tr>
+            </thead>
+            <tbody>
+              {card.factors.map((rowF, i) => (
+                <tr key={rowF}>
+                  <td>{shortName(rowF)}</td>
+                  {card.matrix[i].map((v, j) => (
+                    <td key={j} className="num" style={cellStyle(v)}>{v === null ? "—" : v.toFixed(2)}</td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <div className="agent-card-text">|相关系数| ≥ 0.7 视为高相关（冗余），组合时建议二选一</div>
+      </>
+    );
+  }
+
+  if (card.type === "screen") {
+    body = (
+      <>
+        <div className="agent-card-text">
+          {String(card.date).replace(/^(\d{4})(\d{2})(\d{2})$/, "$1-$2-$3")} · 过滤前 {card.rawPoolSize} 只 →
+          条件存活 {card.survivedCount} 只 · 入选前 {card.stocks.length} 只
+          {card.usedDefaultSort ? " · 排序缺省（默认 20 日动量，值大优）" : ""}
+        </div>
+        <div className="trade-scroll">
+          <table className="mini-table">
+            <thead>
+              <tr>
+                <th>#</th><th>证券</th><th className="num">综合分</th>
+                {card.sortFactors.map(f => (
+                  <th key={`${f.table}.${f.field}`} className="num">
+                    {f.field}{f.direction === -1 ? "(小值优)" : ""}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {card.stocks.map((s, i) => (
+                <tr key={s.code}>
+                  <td>{i + 1}</td>
+                  <td>{s.code}</td>
+                  <td className="num">{s.score}</td>
+                  {s.factorValues.map((v, j) => (
+                    <td key={j} className="num">{v === null ? "—" : v}</td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <div className="agent-card-text">入选口径与回测信号一致（过滤→排序→前 N）；历史数据回放，不构成投资建议</div>
       </>
     );
   }
@@ -513,13 +676,13 @@ export function ChatPage(props: {
       </div>
 
       {gateVisible && gateParams && (
-        <Modal onClose={closeGate} ariaLabel="回测参数确认">
+        <Modal onClose={closeGate} ariaLabel="参数确认">
           <div className="modal-head">
-            <div className="modal-title">回测参数确认</div>
+            <div className="modal-title">参数确认</div>
             <button className="icon-btn" aria-label="关闭" onClick={closeGate}><IconClose /></button>
           </div>
           <div className="modal-body">
-            <div className="agent-card-text" style={{ margin: "0 0 12px" }}>智能体已就绪，将按以下参数执行策略回测：</div>
+            <div className="agent-card-text" style={{ margin: "0 0 12px" }}>智能体已就绪，将按以下参数执行：</div>
             <div className="gate-params">
               {gateParams.map(p => (
                 <div className="gate-param" key={p.label}>
@@ -529,8 +692,8 @@ export function ChatPage(props: {
               ))}
             </div>
             <div className="gate-hint">
-              「确认执行」立即开始回测；「授权调优」由智能体按建议连续多组自动对比择优。
-              如需调整参数或暂不回测，在下方直接输入。
+              「确认执行」立即开始；「授权调优」由智能体按建议连续多组自动对比择优。
+              如需调整参数或暂不执行，在下方直接输入。
             </div>
             <div className="gate-alt">
               <input className="gate-alt-input" value={gateText} aria-label="输入其他要求"

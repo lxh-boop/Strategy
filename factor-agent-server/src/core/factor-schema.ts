@@ -1,6 +1,7 @@
 import { readFileSync } from 'fs';
 import * as path from 'path';
 import { Logger } from '@nestjs/common';
+import { ApiException } from '../common/api.exception';
 import { IDENT_RE } from './factor-data.service';
 
 /* ==========================================================
@@ -58,6 +59,24 @@ export function loadTableFields(table: string): Set<string> | undefined {
     logger.warn(`表 ${table} 的字段字典缺失（SQL/${table}.md）: ${(error as Error).message.slice(0, 120)}`);
   }
   return fields;
+}
+
+/** 字典白名单校验：每个引用的表必须在 SQL/tables.md，字段必须在该表 SQL/<表名>.md。
+ *  确认门与两引擎共用此唯一实现（原模型 Ⅰ/Ⅱ 各有一份逐字副本）。 */
+export function assertWhitelist(refs: { table: string; field: string }[]): void {
+  for (const ref of refs) {
+    const fields = loadTableFields(ref.table);
+    if (fields === undefined) {
+      throw new ApiException(
+        'INVALID_ARGUMENT',
+        400,
+        `表不在字段字典中（SQL/tables.md）: ${ref.table}。可用表: ${listKnownTables().join(', ') || '（无）'}`,
+      );
+    }
+    if (!fields.has(ref.field)) {
+      throw new ApiException('INVALID_ARGUMENT', 400, `表 ${ref.table} 无此因子字段（见 SQL/${ref.table}.md）: ${ref.field}`);
+    }
+  }
 }
 
 /* ----- 供智能体工具使用的富信息加载（同源解析，多带中文名/描述等） ----- */
