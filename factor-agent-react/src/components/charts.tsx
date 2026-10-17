@@ -1,4 +1,4 @@
-import { useId } from "react";
+import { useId, useState } from "react";
 import { fmtPct, totalReturnPct, upDownCls } from "../utils/format";
 
 /* 迷你收益曲线（策略卡片） */
@@ -28,16 +28,20 @@ export function Sparkline({ data, width = 320, height = 56 }: { data: number[]; 
 }
 
 /* 回测净值曲线（组合 vs 基准）。
-   x 轴刻度优先用逐点真实交易日（dates，YYYYMMDD）；未提供时按"末点=当前月"的月频口径推算。 */
-export function BacktestChart({ p, bench, dates, width = 640, height = 190 }: {
-  p: number[]; bench: number[]; dates?: number[]; width?: number; height?: number;
+   x 轴刻度优先用逐点真实交易日（dates，YYYYMMDD）；未提供时按"末点=当前月"的月频口径推算。
+   logScale=true 时纵轴切对数（净值恒正才生效，有非正值自动回落线性）。 */
+export function BacktestChart({ p, bench, dates, logScale = false, width = 640, height = 190 }: {
+  p: number[]; bench: number[]; dates?: number[]; logScale?: boolean; width?: number; height?: number;
 }) {
   const gid = "bt" + useId().replace(/[^a-zA-Z0-9]/g, "");
+  const useLog = logScale && p.every(v => v > 0) && bench.every(v => v > 0);
+  const tf = (v: number) => (useLog ? Math.log10(Math.max(v, 1e-9)) : v);
+  const inv = (v: number) => (useLog ? 10 ** v : v);
   const padL = 46, padR = 12, padT = 14, padB = 26;
-  const lo = Math.floor((Math.min(...p, ...bench) - 2) / 5) * 5;
-  const hi = Math.ceil((Math.max(...p, ...bench) + 2) / 5) * 5;
+  const lo = Math.floor((Math.min(...p.map(tf), ...bench.map(tf)) - 2) / 5) * 5;
+  const hi = Math.ceil((Math.max(...p.map(tf), ...bench.map(tf)) + 2) / 5) * 5;
   const x = (i: number) => padL + (i / (p.length - 1)) * (width - padL - padR);
-  const y = (v: number) => padT + (1 - (v - lo) / (hi - lo || 1)) * (height - padT - padB);
+  const y = (v: number) => padT + (1 - (tf(v) - lo) / (hi - lo || 1)) * (height - padT - padB);
   const pts = (arr: number[]) => arr.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
   const n = p.length;
   const hasDates = !!dates && dates.length === n;
@@ -54,7 +58,7 @@ export function BacktestChart({ p, bench, dates, width = 640, height = 190 }: {
   const tickIdx = (n >= 8 ? [0, 1 / 3, 2 / 3, 1] : [0, 1]).map(f => Math.round(f * (n - 1)));
   const xLabels = tickIdx.map((idx, k) => ({ idx, text: tickLabel(idx), key: k }));
   /* 净值口径起点 100：区间覆盖 100 时画出基准参考线 */
-  const showBase = lo < 100 && hi > 100;
+  const showBase = lo < tf(100) && hi > tf(100);
   return (
     <svg viewBox={`0 0 ${width} ${height}`}>
       <defs>
@@ -65,11 +69,11 @@ export function BacktestChart({ p, bench, dates, width = 640, height = 190 }: {
       </defs>
       {[0, 1, 2, 3].map(i => {
         const v = lo + ((hi - lo) * i) / 3;
-        const yy = y(v).toFixed(1);
+        const yy = y(inv(v)).toFixed(1);
         return (
           <g key={i}>
             <line x1={padL} y1={yy} x2={width - padR} y2={yy} stroke="var(--tile-border)" strokeWidth="1" />
-            <text x={padL - 8} y={+yy + 4} textAnchor="end" fontSize="11" fill="var(--text-3)">{Math.round(v)}</text>
+            <text x={padL - 8} y={+yy + 4} textAnchor="end" fontSize="11" fill="var(--text-3)">{Math.round(inv(v))}</text>
           </g>
         );
       })}
@@ -98,6 +102,47 @@ export function BacktestChart({ p, bench, dates, width = 640, height = 190 }: {
   );
 }
 
+/* IC 序列图（排名分析）：IC ∈ [-1,1]，零轴虚线；点色正红负绿（A股惯例） */
+export function IcChart({ series, width = 640, height = 150 }: { series: { date: number; ic: number }[]; width?: number; height?: number }) {
+  if (!series || series.length === 0) return null;
+  const padL = 36, padR = 12, padT = 10, padB = 22;
+  const lo = Math.min(-1, ...series.map(s => s.ic));
+  const hi = Math.max(1, ...series.map(s => s.ic));
+  const x = (i: number) => (series.length === 1
+    ? padL + (width - padL - padR) / 2
+    : padL + (i / (series.length - 1)) * (width - padL - padR));
+  const y = (v: number) => padT + (1 - (v - lo) / (hi - lo || 1)) * (height - padT - padB);
+  const pts = series.map((s, i) => `${x(i).toFixed(1)},${y(s.ic).toFixed(1)}`).join(" ");
+  const tickIdx = [...new Set([0, Math.floor((series.length - 1) / 2), series.length - 1])];
+  return (
+    <svg viewBox={`0 0 ${width} ${height}`}>
+      {[-1, 0, 1].map(v => (
+        <g key={v}>
+          <line x1={padL} y1={y(v).toFixed(1)} x2={width - padR} y2={y(v).toFixed(1)}
+            stroke={v === 0 ? "var(--bench-line)" : "var(--tile-border)"} strokeWidth="1"
+            strokeDasharray={v === 0 ? "4 3" : undefined} />
+          <text x={padL - 6} y={+y(v).toFixed(1) + 4} textAnchor="end" fontSize="11" fill="var(--text-3)">{v}</text>
+        </g>
+      ))}
+      <polyline points={pts} fill="none" stroke="var(--warn)" strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
+      {series.map((s, i) => (
+        <circle key={i} cx={x(i).toFixed(1)} cy={y(s.ic).toFixed(1)} r="2.6"
+          fill={s.ic >= 0 ? "var(--up)" : "var(--down)"} />
+      ))}
+      {tickIdx.map((idx, k) => {
+        const d = String(series[idx]?.date ?? "");
+        return (
+          <text key={k} x={x(idx).toFixed(1)} y={height - 6}
+            textAnchor={k === 0 ? "start" : k === tickIdx.length - 1 ? "end" : "middle"}
+            fontSize="11" fill="var(--text-3)">
+            {`${d.slice(0, 4)}-${d.slice(4, 6)}`}
+          </text>
+        );
+      })}
+    </svg>
+  );
+}
+
 /* 区间收益高亮条 */
 export function ReturnStrip({ curve, benchCurve }: { curve: number[]; benchCurve: number[] }) {
   const pr = totalReturnPct(curve);
@@ -119,18 +164,30 @@ export function ReturnStrip({ curve, benchCurve }: { curve: number[]; benchCurve
   );
 }
 
-/* 图表 + 区间收益的组合块 */
+/* 图表 + 区间收益的组合块；对数轴开关（净值跨越数量级时读曲线形态更诚实） */
 export function PerfChart({ curve, benchCurve, benchName, dates }: {
   curve?: number[]; benchCurve?: number[]; benchName?: string; dates?: number[];
 }) {
+  const [logScale, setLogScale] = useState(false);
   if (!curve || !benchCurve) return null;
   return (
     <div className="bt-chart">
-      <div className="bt-legend">
+      <div className="bt-legend" style={{ display: "flex", alignItems: "center" }}>
         <span><i className="lg-line" />策略组合</span>
         <span><i className="lg-line lg-bench" />业绩基准（{benchName || "业绩基准"}）</span>
+        <button
+          aria-pressed={logScale}
+          title="切换净值曲线纵轴：线性 / 对数"
+          style={{
+            marginLeft: "auto", fontSize: 11, cursor: "pointer", padding: "1px 8px", borderRadius: 6,
+            border: "1px solid var(--tile-border)", background: logScale ? "var(--tile-border)" : "transparent",
+            color: "var(--text-2)",
+          }}
+          onClick={() => setLogScale(s => !s)}>
+          对数轴{logScale ? "开" : "关"}
+        </button>
       </div>
-      <BacktestChart p={curve} bench={benchCurve} dates={dates} />
+      <BacktestChart p={curve} bench={benchCurve} dates={dates} logScale={logScale} />
       <ReturnStrip curve={curve} benchCurve={benchCurve} />
     </div>
   );

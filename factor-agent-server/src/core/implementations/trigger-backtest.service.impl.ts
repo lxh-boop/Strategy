@@ -8,23 +8,29 @@ import {
   BENCHMARKS,
   buildPeriodHoldings,
   describeFilters,
+  describeKeepRules,
   describeSellRules,
   describeSortFactors,
   effectiveSortFactors,
   formatPct,
+  INDEX_VALUE_KEY,
+  indexFilterCode,
+  isIndexFilterRule,
   LIMIT_DOWN_RATIO,
   LIMIT_UP_RATIO,
   LOT_SIZE,
   NormalizedStrategyInput,
   rankUniverse,
   StrategyBacktestOutput,
+  StrategyFilterRule,
+  StrategyKeepRule,
   StrategySortFactor,
   toDashDate,
   toStrategyMetricItems,
 } from '../strategy-backtest.service';
 import { FactorDataService } from '../factor-data.service';
 import { TriggerBacktestService } from '../trigger-backtest.service';
-import { assertWhitelist } from '../factor-schema';
+import { assertWhitelist, loadTableFields } from '../factor-schema';
 import {
   collectTimingRefs,
   describeTimingOverlay,
@@ -34,7 +40,7 @@ import {
   precomputeExposureSeries,
   type StrategyTimingOverlay,
 } from '../timing';
-import { Account, matchSellRule, type Position, type Quote, type SellFieldData } from '../account';
+import { Account, matchKeepRule, matchSellRule, type Position, type Quote, type SellFieldData } from '../account';
 import { AgentProgressSink, BacktestCard } from '../../types';
 import { TRIGGER_UNIVERSE_MAX, MAX_DAILY_BUYS, MAX_TRADES, MAX_TOTAL_TURNOVER_PCT } from '../trigger-backtest.service';
 
@@ -85,13 +91,19 @@ export class TriggerBacktestServiceImpl extends TriggerBacktestService {
         '触发模式 v1 的卖出规则不支持 field（字段条件）与 rank_out（排名跌出）——请使用止盈/止损/回撤止盈/持有天数',
       );
     }
+    // 排除时间段第一批只做日历引擎（模型 Ⅰ）；触发引擎显式拒绝，不做静默忽略
+    if (p.excludeRanges.length) {
+      throw new ApiException('INVALID_ARGUMENT', 400, '触发模式暂不支持排除时间段（excludeRanges）——请去掉该参数或改用定期调仓模式');
+    }
     const sortFactors = effectiveSortFactors(p.sortFactors);
     const sortUsed = sortFactors.factors.map((f) => `${f.table}.${f.field}`);
 
-    // 白名单：触发条件 + 排序因子 + 择时引用
+    // 白名单：触发条件（大盘条件除外，走指数通道）+ 排序因子 + 不卖条件 + 择时引用
     const refs = [
-      ...p.entryFilters.map((f) => ({ table: f.table, field: f.field })),
+      ...p.entryFilters.filter((f) => !isIndexFilterRule(f)).map((f) => ({ table: f.table, field: f.field })),
+      ...p.entryFilters.filter(isIndexFilterRule).map((f) => ({ table: f.table, field: f.field })),
       ...sortUsed.map((k) => ({ table: k.split('.')[0], field: k.split('.')[1] })),
+      ...p.keepRules.map((r) => ({ table: r.table, field: r.field })),
       ...(p.timingOverlay ? collectTimingRefs(p.timingOverlay) : []),
     ];
     assertWhitelist(refs);
@@ -134,8 +146,48 @@ export class TriggerBacktestServiceImpl extends TriggerBacktestService {
       exposureByDay = tradeDates.map(() => 100);
     }
 
+    // ③′ 大盘条件序列预载 + 不卖条件取数（与模型 Ⅰ 同通道：日期表按日、静态表单值）
+    const indexSeriesByKey = new Map<string, Map<number, number>>();
+    for (const rule of p.entryFilters.filter(isIndexFilterRule)) {
+      const key = `${rule.table}.${rule.field}#${indexFilterCode(rule)}`;
+      if (indexSeriesByKey.has(key)) continue;
+      const rows = await this.factorData.readIndexFieldSeries(
+        rule.table,
+        rule.field,
+        BENCHMARKS[indexFilterCode(rule)].ticker,
+        p.startDate,
+        p.endDate,
+      );
+      indexSeriesByKey.set(key, new Map(rows.map((r) => [Number(r.tradeDate.replaceAll('-', '')), r.value])));
+    }
+    const staticKeepRefs = new Set(
+      p.keepRules.map((r) => `${r.table}.${r.field}`).filter((key) => !(loadTableFields(key.split('.')[0])?.has('TRADE_DATE') ?? false)),
+    );
+    const keepFieldSeries: SellFieldData = new Map();
+    for (const rule of p.keepRules) {
+      const key = `${rule.table}.${rule.field}`;
+      if (keepFieldSeries.has(key)) continue;
+      const rows = await this.factorData.readFactorRange(rule.table, rule.field, p.securityIds!, p.startDate, p.endDate);
+      if (staticKeepRefs.has(key)) {
+        const byCode = new Map<string, number>();
+        for (const row of rows) byCode.set(row.securityId, row.value);
+        keepFieldSeries.set(key, byCode);
+      } else {
+        const byCode = new Map<string, Map<number, number>>();
+        for (const row of rows) {
+          let byDate = byCode.get(row.securityId);
+          if (!byDate) {
+            byDate = new Map<number, number>();
+            byCode.set(row.securityId, byDate);
+          }
+          byDate.set(Number(row.tradeDate.replaceAll('-', '')), row.value);
+        }
+        keepFieldSeries.set(key, byCode);
+      }
+    }
+
     // ④ 主循环（单遍逐日：执行 → 结算 → 信号），行情懒加载、截面逐日取
-    const loop = await this.runMainLoop(p, tradeDates, sortFactors.factors, benchReturns, exposureByDay, onProgress);
+    const loop = await this.runMainLoop(p, tradeDates, sortFactors.factors, benchReturns, exposureByDay, indexSeriesByKey, keepFieldSeries, staticKeepRefs, onProgress);
 
     // ⑤ 聚合 → 卡片 + 摘要（按周切期：每 5 个交易日一期）
     const aggregate = aggregateNav(loop.equities, benchReturns, tradeDates);
@@ -177,11 +229,15 @@ export class TriggerBacktestServiceImpl extends TriggerBacktestService {
     sortFactors: StrategySortFactor[],
     benchReturns: number[],
     exposureByDay: number[],
+    indexSeriesByKey: Map<string, Map<number, number>>,
+    keepFieldSeries: SellFieldData,
+    staticKeepRefs: Set<string>,
     onProgress?: AgentProgressSink,
   ) {
+    const keepRules: StrategyKeepRule[] = p.keepRules;
     const factorRefs = [
       ...new Set([
-        ...p.entryFilters.map((f) => `${f.table}.${f.field}`),
+        ...p.entryFilters.filter((f) => !isIndexFilterRule(f)).map((f) => `${f.table}.${f.field}`),
         ...sortFactors.map((f) => `${f.table}.${f.field}`),
       ]),
     ];
@@ -311,6 +367,7 @@ export class TriggerBacktestServiceImpl extends TriggerBacktestService {
       if (p.sellRules.length && account.size() > 0) {
         for (const pos of account.allPositions()) {
           if (pos.buyDayIdx >= i) continue;
+          if (keepRules.length && matchKeepRule(pos, day, keepRules, keepFieldSeries, staticKeepRefs)) continue; // 不卖条件：跳过本轮卖出检查
           const close = quoteOf(pos.code, day)?.close ?? account.lastCloseOf(pos.code);
           if (close === undefined) continue;
           const reason = matchSellRule(pos, close, i, day, p.sellRules, NO_SELL_FIELD_SERIES, NO_STATIC_SELL_REFS);
@@ -330,8 +387,13 @@ export class TriggerBacktestServiceImpl extends TriggerBacktestService {
         factorRefs.forEach((key, idx) => {
           byName.set(key, new Map(sections[idx].map((r) => [r.securityId, r.value])));
         });
-        // 过滤/排序按列名各取各的截面：截面清单是过滤∪排序的并集，按下标会错位
-        const filterSections = p.entryFilters.map((f) => byName.get(`${f.table}.${f.field}`)!);
+        // 过滤/排序按列名各取各的截面：截面清单是过滤∪排序的并集，按下标会错位；
+        // 大盘条件从预载序列取当日值，以哨兵键广播成全池统一值（缺值弃权）
+        const filterSections = p.entryFilters.map((f): Map<string, number> => {
+          if (!isIndexFilterRule(f)) return byName.get(`${f.table}.${f.field}`)!;
+          const v = indexSeriesByKey.get(`${f.table}.${f.field}#${indexFilterCode(f)}`)?.get(day);
+          return new Map(v === undefined ? [] : [[INDEX_VALUE_KEY, v]]);
+        });
         const rankSections = sortFactors.map((f) => byName.get(`${f.table}.${f.field}`)!);
         const pool = applyEntryFilters(p.securityIds ?? [], p.entryFilters, filterSections);
         const ranked = rankUniverse(sortFactors, rankSections, pool);
@@ -405,6 +467,15 @@ export class TriggerBacktestServiceImpl extends TriggerBacktestService {
         { label: '仓位偏离带', value: `±${p.positionDeviatePct}%`, hint: `目标总仓位 ${Math.min(100, p.maxPositions * p.idealPositionPct)}%，偏离超带宽即再平衡` },
         { label: '持仓上限', value: `≤${p.maxPositions} 只 · 每只 ${p.idealPositionPct}%`, hint: '单日买入笔数与总换手有护栏' },
         { label: '卖出规则', value: describeSellRules(p.sellRules), hint: '逐日收盘后检查，命中次日执行' },
+        ...(p.keepRules.length
+          ? [
+              {
+                label: '不卖条件',
+                value: describeKeepRules(p.keepRules),
+                hint: '命中的持仓继续持有：优先级高于全部卖出规则；择时的仓位调整不受保护',
+              },
+            ]
+          : []),
         ...(timing
           ? [
               {
@@ -433,6 +504,7 @@ export class TriggerBacktestServiceImpl extends TriggerBacktestService {
         entryFilters: p.entryFilters,
         sortFactors: p.sortFactors,
         sellRules: p.sellRules,
+        ...(p.keepRules.length ? { keepRules: p.keepRules } : {}),
         benchmark: p.benchmark,
         ...(timing ? { timingOverlay: timing } : {}),
       },
@@ -471,6 +543,7 @@ export class TriggerBacktestServiceImpl extends TriggerBacktestService {
       偏离带宽: `±${p.positionDeviatePct}%`,
       区间: `${p.startDate}~${p.endDate}`,
       卖出规则: describeSellRules(p.sellRules),
+      ...(p.keepRules.length ? { 不卖条件: describeKeepRules(p.keepRules) } : {}),
       成交时点: p.executionTiming === 0 ? '开盘价' : '收盘价',
       初始资金: p.initialCapital,
       期末权益: +loop.finalEquity.toFixed(0),

@@ -17,6 +17,9 @@ import {
  * 因子分析实现：复用引擎同款取数（截面/前复权日线/日历），计算在内存。
  * 口径见契约头注释（个股级 IC、段收益=等权收盘均值无费用）。
  */
+/** IC 衰减的持有期档（交易日）：果仁「因子IC/IR衰减」按持有期口径，1~5 日起步 */
+const IC_DECAY_MAX_LAG = 5;
+
 @Injectable()
 export class FactorAnalysisServiceImpl extends FactorAnalysisService {
   constructor(@Inject(FactorDataService) private readonly factorData: FactorDataService) {
@@ -84,10 +87,11 @@ export class FactorAnalysisServiceImpl extends FactorAnalysisService {
     }
     const closeOf = (code: string, day: number): number | undefined => closeByCode.get(code)?.get(day);
 
-    // ④ 期对：个股收益（期末收盘/期初收盘-1）→ 个股级 IC + 段等权收益
+    // ④ 期对：个股收益（期末收盘/期初收盘-1）→ 个股级 IC + 段等权收益 + 逐期段收益序列
     const segCum = Array.from({ length: input.segmentCount }, () => 1);
     const segSum = new Array<number>(input.segmentCount).fill(0);
     const segPeriods = new Array<number>(input.segmentCount).fill(0);
+    const segPeriodReturns: (number | null)[][] = Array.from({ length: input.segmentCount }, () => []);
     const icSeries: { date: number; ic: number }[] = [];
     for (let k = 0; k + 1 < periods.length; k++) {
       const cur = periods[k];
@@ -102,14 +106,51 @@ export class FactorAnalysisServiceImpl extends FactorAnalysisService {
       if (ic !== undefined) icSeries.push({ date: cur.date, ic: +ic.toFixed(4) });
       cur.segments.forEach((members, seg) => {
         const rs = members.map((c) => returns.get(c)).filter((r): r is number => r !== undefined);
-        if (!rs.length) return;
-        segSum[seg] += rs.reduce((a, b) => a + b, 0) / rs.length;
-        segCum[seg] *= 1 + rs.reduce((a, b) => a + b, 0) / rs.length;
+        if (!rs.length) {
+          segPeriodReturns[seg].push(null); // 期对齐：该期段内无成员
+          return;
+        }
+        const segRet = rs.reduce((a, b) => a + b, 0) / rs.length;
+        segSum[seg] += segRet;
+        segCum[seg] *= 1 + segRet;
         segPeriods[seg]++;
+        segPeriodReturns[seg].push(+(segRet * 100).toFixed(4));
       });
     }
     if (!icSeries.length) {
       throw new ApiException('INVALID_ARGUMENT', 400, '有效分析期数为 0（截面/行情缺失导致全部期对无效），请调整区间或因子');
+    }
+
+    // ④′ 多空虚拟净值（段 1 − 末段 逐期收益差复合，起点 100；任一侧缺成员的期跳过）
+    const longShortSeries: { date: number; nav: number }[] = [];
+    let lsNav = 100;
+    for (let k = 0; k + 1 < periods.length; k++) {
+      const r1 = segPeriodReturns[0][k];
+      const rN = segPeriodReturns[input.segmentCount - 1][k];
+      if (r1 === null || rN === null) continue;
+      lsNav *= 1 + (r1 - rN) / 100;
+      longShortSeries.push({ date: periods[k].date, nav: +lsNav.toFixed(2) });
+    }
+
+    // ④″ IC 衰减：持有期 1~5 日（交易日）的平均 IC——因子信号随持有期拉长的衰减速度
+    const dateIdxOf = new Map(tradeDates.map((d, i) => [d, i] as const));
+    const icDecay: { lag: number; ic: number }[] = [];
+    for (let lag = 1; lag <= IC_DECAY_MAX_LAG; lag++) {
+      const ics: number[] = [];
+      for (const cur of periods) {
+        const curIdx = dateIdxOf.get(cur.date);
+        const fwd = curIdx !== undefined ? tradeDates[curIdx + lag] : undefined;
+        if (fwd === undefined) continue;
+        const fwdReturns = new Map<string, number>();
+        for (const [code] of cur.values) {
+          const c0 = closeOf(code, cur.date);
+          const c1 = closeOf(code, fwd);
+          if (c0 !== undefined && c1 !== undefined && c0 > 0) fwdReturns.set(code, c1 / c0 - 1);
+        }
+        const ic = spearmanOnCrossSection(cur.values, fwdReturns);
+        if (ic !== undefined) ics.push(ic);
+      }
+      if (ics.length) icDecay.push({ lag, ic: +(ics.reduce((a, b) => a + b, 0) / ics.length).toFixed(4) });
     }
 
     // ⑤ 聚合：IC 统计 + 段收益 + 单调性 + 多空
@@ -125,6 +166,9 @@ export class FactorAnalysisServiceImpl extends FactorAnalysisService {
       icIR: ics.length > 1 && std > 0 ? +(icMean / std).toFixed(4) : undefined,
       segmentMeanReturnPct,
       segmentCumulativePct: segCum.map((c) => +((c - 1) * 100).toFixed(2)),
+      segmentPeriodReturnsPct: segPeriodReturns,
+      longShortSeries,
+      icDecay,
       monotonicityR2: monotonicityR2(segmentMeanReturnPct),
       longShortSpreadPct:
         segmentMeanReturnPct.length >= 2

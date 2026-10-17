@@ -68,6 +68,8 @@ function triggerInput(overrides: Partial<NormalizedStrategyInput> = {}): Normali
     entryFilters: [{ table: 'equ_factor_obos', field: 'RSI', op: '<', value: 30 }],
     sortFactors: [],
     sellRules: [],
+    keepRules: [],
+    excludeRanges: [],
     benchmark: 'hs300',
     strategyType: 'equal_weight',
     ...overrides,

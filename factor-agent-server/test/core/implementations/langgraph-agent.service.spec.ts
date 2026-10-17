@@ -8,6 +8,7 @@ import {
   LangGraphAgentService,
 } from '../../../src/agent/implementations/langgraph-agent.service';
 import { FactorDataService } from '../../../src/core/factor-data.service';
+import { FactorAnalysisService } from '../../../src/core/factor-analysis.service';
 import { StrategyBacktestService } from '../../../src/core/strategy-backtest.service';
 
 /* ==========================================================
@@ -21,7 +22,7 @@ import { StrategyBacktestService } from '../../../src/core/strategy-backtest.ser
 /** 无 Key 配置：get 恒 undefined → 开发模式分支，不创建 LLM 与图 */
 function newService(): LangGraphAgentService {
   const config = { get: () => undefined } as unknown as ConfigService;
-  return new LangGraphAgentService(config, {} as FactorDataService, {} as StrategyBacktestService);
+  return new LangGraphAgentService(config, {} as FactorDataService, {} as StrategyBacktestService, {} as FactorAnalysisService);
 }
 
 function conv(id: string): Conversation {
@@ -146,14 +147,19 @@ function buildTestGraph() {
     checkRange: jest.fn().mockResolvedValue({ dates: [20240101, 20241231], min: 20200101, max: 20261231 }),
     runStrategyBacktest: jest.fn().mockResolvedValue(FAKE_OUTPUT),
   };
+  const factorAnalysis = {
+    runRankAnalysis: jest.fn(),
+    runFactorCorrelation: jest.fn(),
+  };
   const service = new LangGraphAgentService(
     { get: () => undefined } as unknown as ConfigService,
     {} as FactorDataService,
     backtest as unknown as StrategyBacktestService,
+    factorAnalysis as unknown as FactorAnalysisService,
   );
   const agent = { invoke: jest.fn() };
   const app = (service as unknown as { buildGraph(a: unknown): { invoke(input: object, config?: object): Promise<Record<string, unknown>> } }).buildGraph(agent);
-  return { app, agent, backtest };
+  return { app, agent, backtest, factorAnalysis };
 }
 
 /** 图入口：模拟 runGraph 的入口协议——userText 精确为"授权调优"时以已授权状态启动
@@ -171,7 +177,12 @@ function start(app: ReturnType<typeof buildTestGraph>['app'], threadId: string, 
 }
 
 function withCalls(text: string, calls: { id: string; args: object }[]): AIMessage {
-  return new AIMessage({ content: text, tool_calls: calls.map((c) => ({ name: 'run_strategy_backtest', args: c.args, id: c.id, type: 'tool_call' as const })) });
+  return withToolCalls('run_strategy_backtest', text, calls);
+}
+
+/** 泛化版：指定工具名的 tool_calls 消息（排名分析/相关性用例用） */
+function withToolCalls(name: string, text: string, calls: { id: string; args: object }[]): AIMessage {
+  return new AIMessage({ content: text, tool_calls: calls.map((c) => ({ name, args: c.args, id: c.id, type: 'tool_call' as const })) });
 }
 
 function finalText(text: string): AIMessage {
@@ -207,6 +218,41 @@ describe('确认门真图（confirm 节点 interrupt/resume）', () => {
     // checkpoint 序列化后消息是新实例，验证内容而非引用：最后一条是 agent 的最终回复
     const lastMsg = (done.messages as BaseMessage[]).at(-1) as AIMessage;
     expect(lastMsg.content).toBe('回测完成');
+  });
+
+  it('排名分析：confirm 挂起（分析参数）→ 确认 → 分析执行并出排名卡', async () => {
+    const { app, agent, factorAnalysis } = buildTestGraph();
+    agent.invoke
+      .mockResolvedValueOnce(
+        withToolCalls('run_rank_analysis', '跑排名', [
+          {
+            id: 'ra_1',
+            args: {
+              factor: { table: 'equ_factor_obos', field: 'REVS20', direction: 1 },
+              intervalDays: 5, startDate: '20240101', endDate: '20241231',
+            },
+          },
+        ]),
+      )
+      .mockResolvedValueOnce(finalText('分析完成'));
+    factorAnalysis.runRankAnalysis.mockResolvedValue({
+      icSeries: [{ date: 20240102, ic: 0.42 }],
+      icMean: 0.42, icPositiveProb: 100, icIR: undefined,
+      segmentMeanReturnPct: [3, -1], segmentCumulativePct: [12, -4],
+      monotonicityR2: 0.98, longShortSpreadPct: 4, periodCount: 3,
+    });
+
+    const pending = await start(app, 't-rank');
+    expect(factorAnalysis.runRankAnalysis).not.toHaveBeenCalled(); // 挂起时不进分析
+    expect(interruptParams(pending)['分析类型']).toContain('排名分析');
+    expect(interruptParams(pending)['分段数']).toBe('5 段（默认）');
+    expect(interruptParams(pending)['分析间隔']).toBe('每 5 个交易日');
+
+    const done = await app.invoke(new Command({ resume: { action: 'approve' } }), {
+      configurable: { thread_id: 't-rank' }, recursionLimit: 25,
+    });
+    expect(factorAnalysis.runRankAnalysis).toHaveBeenCalledTimes(1);
+    expect((done as { card?: { type: string } }).card?.type).toBe('rank_analysis');
   });
 
   it('同批两组逐组确认：每组各 interrupt 一次，引擎共执行两次（不重跑已确认组）', async () => {

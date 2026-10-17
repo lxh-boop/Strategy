@@ -62,8 +62,19 @@ export interface BacktestRunConfig {
 export interface StrategyFilterRule {
   table: string;
   field: string;
-  op: '>' | '<';
-  value: number;
+  /** '>'/'<'/'eq'/'bw'；bw 为 [下限, 上限] 闭区间 */
+  op: '>' | '<' | 'eq' | 'bw';
+  value: number | [number, number];
+  /** 大盘条件（table=mkt_idxd）的挂靠指数，缺省 sse；个股条件不可传 */
+  indexCode?: 'hs300' | 'csi500' | 'sse';
+}
+
+/** 不卖条件（结构与 entryFilters 元素同构；命中的持仓跳过全部卖出检查与调仓换出） */
+export interface StrategyKeepRule {
+  table: string;
+  field: string;
+  op: '>' | '<' | 'eq' | 'bw';
+  value: number | [number, number];
 }
 
 export interface StrategySortFactor {
@@ -102,6 +113,10 @@ export interface StrategyRunConfig {
   entryFilters?: StrategyFilterRule[];
   sortFactors?: StrategySortFactor[];
   sellRules?: StrategySellRule[];
+  /** 不卖条件（可选，ADR-0003 保护矩阵） */
+  keepRules?: StrategyKeepRule[];
+  /** 排除时间段（可选，≤5 段；段内只结算不交易、冻结估值） */
+  excludeRanges?: { start: number; end: number }[];
   benchmark?: 'hs300' | 'csi500' | 'sse';
   /** 大盘择时叠加（结构同 core/timing.ts StrategyTimingOverlay） */
   timingOverlay?: StrategyTimingOverlay;
@@ -156,7 +171,64 @@ export interface BacktestCard extends CardBase {
   recentSold?: string[];
 }
 
-export type AgentCard = BacktestCard; // report/stocks 卡（演示时代）2026-10-13 已下线，库中零存量
+export type AgentCard = BacktestCard | RankAnalysisCard | CorrelationCard | ScreenCard;
+
+/** 每日选股清单卡（run_daily_screen 产出：单日截面 → 过滤 → 排序 → 入选清单） */
+export interface ScreenCard extends CardBase {
+  type: 'screen';
+  /** 实际查询交易日（YYYYMMDD；非交易日自动回落到前一交易日） */
+  date: number;
+  /** 入选清单（综合分降序）；factorValues 与 sortFactors 一一对应（缺值 null） */
+  stocks: { code: string; score: number; factorValues: (number | null)[] }[];
+  /** 有效排序因子（usedDefaultSort 时含默认动量） */
+  sortFactors: { table: string; field: string; direction: 1 | -1 }[];
+  usedDefaultSort: boolean;
+  entryFilters: StrategyFilterRule[];
+  /** 过滤前候选池 */
+  rawPoolSize: number;
+  /** 过滤后存活数 */
+  survivedCount: number;
+}
+
+/** 排名分析卡（果仁「排名分析」对标：因子分段有效性评估，个股级 IC 口径） */
+export interface RankAnalysisCard extends CardBase {
+  type: 'rank_analysis';
+  /** 分析因子（table/field/direction） */
+  factor: { table: string; field: string; direction: 1 | -1 };
+  /** 分段数 2~10 */
+  segmentCount: number;
+  /** 分析间隔（交易日） */
+  intervalDays: number;
+  /** 有效分析期数（期对数） */
+  periodCount: number;
+  icMean?: number;
+  icPositiveProb?: number;
+  icIR?: number;
+  monotonicityR2: number;
+  longShortSpreadPct: number;
+  /** IC 序列（前端画曲线） */
+  icSeries: { date: number; ic: number }[];
+  /** 各段平均单期收益 %（段 1 = 最优先段） */
+  segmentMeanReturnPct: number[];
+  /** 各段区间累计收益 % */
+  segmentCumulativePct: number[];
+  /** 逐期段收益 %（段×期；某期段内无成员为 null）。旧存量卡无此字段 */
+  segmentPeriodReturnsPct?: (number | null)[][];
+  /** 多空虚拟净值（段1−末段逐期复合，起点 100）。旧存量卡无此字段 */
+  longShortSeries?: { date: number; nav: number }[];
+  /** IC 衰减（持有期 1~5 日平均 IC）。旧存量卡无此字段 */
+  icDecay?: { lag: number; ic: number }[];
+}
+
+/** 因子相关性矩阵卡（对称矩阵 + 色阶） */
+export interface CorrelationCard extends CardBase {
+  type: 'correlation';
+  /** 因子标识顺序（"table.field"），与矩阵行列一致 */
+  factors: string[];
+  /** 对称相关矩阵：对角线 1；样本不足的配对 null */
+  matrix: (number | null)[][];
+  periodCount: number;
+} // report/stocks 卡（演示时代）2026-10-13 已下线，库中零存量
 
 export interface AgentReply {
   text: string;

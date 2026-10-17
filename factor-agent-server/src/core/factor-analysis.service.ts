@@ -45,6 +45,12 @@ export interface RankAnalysisOutput {
   segmentMeanReturnPct: number[];
   /** 各段区间累计收益 %（各期段收益连乘-1×100） */
   segmentCumulativePct: number[];
+  /** 逐期段收益 %（段×期，期序 = 采样期对顺序；某期段内无成员为 null）。旧存量卡无此字段 */
+  segmentPeriodReturnsPct?: (number | null)[][];
+  /** 多空虚拟净值（段 1 做多 − 末段做空，逐期收益差复合，起点 100）。旧存量卡无此字段 */
+  longShortSeries?: { date: number; nav: number }[];
+  /** IC 衰减：持有期 1~5 日的平均 IC（该档无有效期对则缺档）。旧存量卡无此字段 */
+  icDecay?: { lag: number; ic: number }[];
   /** 排列单调性 r²（0~1） */
   monotonicityR2: number;
   /** 多空价差 %：第 1 段 − 末段 的平均单期收益差 */

@@ -143,14 +143,26 @@ export const RUN_STRATEGY_BACKTEST_SPEC = {
         entryFilters: {
           type: 'array',
           maxItems: 10,
-          description: '过滤因子：全部满足才入选（不满足即剔除，因子值缺失视为不满足）',
+          description:
+            '过滤因子：全部满足才入选（个股字段缺失视为不满足）。' +
+            '可引用大盘字段（table=mkt_idxd，如 CLOSE_INDEX）做"股票池开关"——指数当日值对全市场取同一个数参与比较，' +
+            '与择时（总仓位开关）互补：用户说"大盘在 XX 上方时买 A 类股票"用大盘条件，说"大盘不好就减仓"用 timingOverlay',
           items: {
             type: 'object',
             properties: {
               table: { type: 'string', description: '数据表名，来自系统提示中的表目录' },
               field: { type: 'string', description: '字段名，来自 list_factor_fields 的返回' },
-              op: { type: 'string', enum: ['>', '<'], description: '比较符：大于 / 小于' },
-              value: { type: 'number', description: '阈值' },
+              op: { type: 'string', enum: ['>', '<', 'eq', 'bw'], description: '比较符：大于 / 小于 / 等于 / 区间（bw 时 value 传 [下限, 上限]）' },
+              value: {
+                description: '阈值；op=bw 时传二元区间数组如 [10, 30]（闭区间）',
+                type: ['number', 'array'],
+                items: { type: 'number' },
+              },
+              indexCode: {
+                type: 'string',
+                enum: ['hs300', 'csi500', 'sse'],
+                description: '仅大盘条件（table=mkt_idxd）可传：挂靠指数，缺省 sse（上证）',
+              },
             },
             required: ['table', 'field', 'op', 'value'],
           },
@@ -200,6 +212,39 @@ export const RUN_STRATEGY_BACKTEST_SPEC = {
             required: ['kind'],
           },
         },
+        keepRules: {
+          type: 'array',
+          maxItems: 10,
+          description:
+            '不卖条件（可选）：命中的持仓继续持有，优先级高于全部卖出规则与调仓换出（跌出排名也不卖）；' +
+            '大盘择时的仓位调整不受其保护。结构同 entryFilters 元素（个股字段条件，暂不支持指数表字段）。' +
+            '用户说"满足 XX 就不卖""强势股不要被调出"时传入',
+          items: {
+            type: 'object',
+            properties: {
+              table: { type: 'string', description: '数据表名，来自系统提示中的表目录' },
+              field: { type: 'string', description: '字段名，来自 list_factor_fields 的返回' },
+              op: { type: 'string', enum: ['>', '<', 'eq', 'bw'], description: '比较符；bw 时 value 传 [下限, 上限]' },
+              value: { description: '阈值；op=bw 时传二元区间数组', type: ['number', 'array'], items: { type: 'number' } },
+            },
+            required: ['table', 'field', 'op', 'value'],
+          },
+        },
+        excludeRanges: {
+          type: 'array',
+          maxItems: 5,
+          description:
+            '排除时间段（可选）：回测剔除这些区间——段内不交易不调仓，持仓按冻结时点价估值（净值走平，行情涨跌不计入收益），' +
+            '指标按全序列计算。用户说"剔除股灾那段""排除 XX 年上半年再回测"时传入',
+          items: {
+            type: 'object',
+            properties: {
+              start: { type: 'string', description: '排除段开始日，纯数字 YYYYMMDD' },
+              end: { type: 'string', description: '排除段结束日，纯数字 YYYYMMDD' },
+            },
+            required: ['start', 'end'],
+          },
+        },
         benchmark: {
           type: 'string',
           enum: ['hs300', 'csi500', 'sse'],
@@ -222,12 +267,157 @@ export const RUN_STRATEGY_BACKTEST_SPEC = {
   },
 };
 
+/** 排名分析工具：因子分段有效性评估（果仁「排名分析」对标，个股级 IC 口径） */
+const RUN_RANK_ANALYSIS_SPEC = {
+  type: 'function' as const,
+  function: {
+    name: 'run_rank_analysis',
+    description:
+      '排名分析（因子有效性评估）：把股票池按排序因子的值分成 N 段，逐段对比下期收益，' +
+      '并计算个股级 IC（因子值与下期收益的秩相关）均值/正概率/IR 与排列单调性——' +
+      '判断一个排序因子有没有选股能力。用户问"这个因子有没有效/因子分段测试/排名 IC"时使用',
+    parameters: {
+      type: 'object',
+      properties: {
+        factor: {
+          type: 'object',
+          description: '分析因子（单个）：结构同 sortFactors 的元素',
+          properties: {
+            table: { type: 'string', description: '数据表名，来自系统提示中的表目录' },
+            field: { type: 'string', description: '字段名，来自 list_factor_fields 的返回' },
+            direction: { type: 'integer', enum: [1, -1], description: '排序方向：1=值大优（默认）/ -1=值小优' },
+          },
+          required: ['table', 'field', 'direction'],
+        },
+        securityIds: {
+          type: 'array',
+          items: { type: 'string' },
+          description: '股票池（000001.XSHE 形态）；不传 = 全市场截面有值股票',
+        },
+        segmentCount: {
+          type: 'integer',
+          description: '分段数，默认 5（2~10）。用户没说时按默认传并在提案中注明',
+        },
+        intervalDays: {
+          type: 'integer',
+          description: '分析间隔（必填，无默认值）：每 N 个交易日取一次截面并调仓段组合，如 5≈每周、21≈每月',
+        },
+        startDate: { type: 'string', description: '分析开始日，纯数字 YYYYMMDD。约束同回测：用户说过照传，相对时间按今天换算' },
+        endDate: { type: 'string', description: '分析结束日，纯数字 YYYYMMDD。约束同 startDate' },
+      },
+      required: ['factor', 'intervalDays', 'startDate', 'endDate'],
+    },
+  },
+} as const;
+
+/** 因子相关性工具：2~10 个因子两两截面秩相关矩阵（多因子组合前判断冗余） */
+const RUN_FACTOR_CORRELATION_SPEC = {
+  type: 'function' as const,
+  function: {
+    name: 'run_factor_correlation',
+    description:
+      '因子相关性矩阵：一批因子两两计算截面秩相关（逐采样期取均值，对称矩阵）——' +
+      '多因子组合前判断冗余。用户问"这几个因子相关性高不高/有没有重复"时使用',
+    parameters: {
+      type: 'object',
+      properties: {
+        factors: {
+          type: 'array',
+          minItems: 2,
+          maxItems: 10,
+          description: '2~10 个因子（table/field/direction，结构同 sortFactors 元素）',
+          items: {
+            type: 'object',
+            properties: {
+              table: { type: 'string', description: '数据表名' },
+              field: { type: 'string', description: '字段名' },
+              direction: { type: 'integer', enum: [1, -1], description: '1=值大优（默认）/ -1=值小优' },
+            },
+            required: ['table', 'field', 'direction'],
+          },
+        },
+        securityIds: {
+          type: 'array',
+          items: { type: 'string' },
+          description: '股票池（000001.XSHE 形态）；不传 = 全市场截面有值股票',
+        },
+        intervalDays: {
+          type: 'integer',
+          description: '采样间隔（必填，无默认值）：每 N 个交易日取一次截面，如 5≈每周、21≈每月',
+        },
+        startDate: { type: 'string', description: '分析开始日，纯数字 YYYYMMDD' },
+        endDate: { type: 'string', description: '分析结束日，纯数字 YYYYMMDD' },
+      },
+      required: ['factors', 'intervalDays', 'startDate', 'endDate'],
+    },
+  },
+} as const;
+
+/** 每日选股工具：不跑回测，按条件输出单个交易日的入选清单（果仁「每日选股」对标，即查即得免确认） */
+const RUN_DAILY_SCREEN_SPEC = {
+  type: 'function' as const,
+  function: {
+    name: 'run_daily_screen',
+    description:
+      '每日选股：不跑回测，直接回答"今天/某个历史日，这套条件选出哪些股票"——' +
+      '按 过滤(entryFilters)+排序(sortFactors) 取综合分最高的前 maxPositions 只，口径与回测信号完全一致。' +
+      '即查即得、零副作用，无需用户确认；用户问"现在选出来是什么/那天选了哪些股"时使用；' +
+      'date 缺省 = 最近交易日（非交易日自动回落到前一交易日，回执会注明实际查询日）',
+    parameters: {
+      type: 'object',
+      properties: {
+        entryFilters: {
+          type: 'array',
+          maxItems: 10,
+          description: '过滤条件：结构同 run_strategy_backtest 的 entryFilters（支持大盘条件与 eq/bw）',
+          items: {
+            type: 'object',
+            properties: {
+              table: { type: 'string', description: '数据表名' },
+              field: { type: 'string', description: '字段名' },
+              op: { type: 'string', enum: ['>', '<', 'eq', 'bw'], description: '比较符；bw 时 value 传 [下限, 上限]' },
+              value: { description: '阈值；op=bw 时传二元区间数组', type: ['number', 'array'], items: { type: 'number' } },
+              indexCode: { type: 'string', enum: ['hs300', 'csi500', 'sse'], description: '仅大盘条件（table=mkt_idxd）可传，缺省 sse' },
+            },
+            required: ['table', 'field', 'op', 'value'],
+          },
+        },
+        sortFactors: {
+          type: 'array',
+          maxItems: 10,
+          description: '排序因子：结构同 run_strategy_backtest 的 sortFactors；缺省 = 默认 20 日动量（值大优）',
+          items: {
+            type: 'object',
+            properties: {
+              table: { type: 'string', description: '数据表名' },
+              field: { type: 'string', description: '字段名' },
+              direction: { type: 'integer', enum: [1, -1], description: '1=值大优（默认）/ -1=值小优' },
+              weight: { type: 'number', description: '权重；全部因子都传才生效（缺省等权 1/N）' },
+            },
+            required: ['table', 'field', 'direction'],
+          },
+        },
+        securityIds: {
+          type: 'array',
+          items: { type: 'string' },
+          description: '股票池（000002.XSHE 形态）；缺省 = 全市场',
+        },
+        maxPositions: { type: 'integer', description: '入选只数，默认 10，上限 100' },
+        date: { type: 'string', description: '查询日，纯数字 YYYYMMDD；缺省 = 最近交易日' },
+      },
+    },
+  },
+} as const;
+
 /** 全部工具 schema：bindTools 一次绑定，顺序即 prompt 里的工具编号 */
 export const AGENT_TOOL_SPECS = [
   LIST_FACTOR_TABLES_SPEC,
   LIST_FACTOR_FIELDS_SPEC,
   READ_FACTOR_DATA_SPEC,
   RUN_STRATEGY_BACKTEST_SPEC,
+  RUN_RANK_ANALYSIS_SPEC,
+  RUN_FACTOR_CORRELATION_SPEC,
+  RUN_DAILY_SCREEN_SPEC,
 ] as const;
 
 /* ----- 工具入参形态（LLM 传入，字段均为未知形态，服务端归一化校验） ----- */

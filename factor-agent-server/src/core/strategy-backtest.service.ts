@@ -40,12 +40,61 @@ export const BENCHMARKS: Record<BenchmarkKey, { ticker: string; name: string }> 
 
 /* ----- 因子参数（过滤 / 排序 / 卖出，全部是 table.field 取数规格 + 数字） ----- */
 
-/** 过滤规则：当日截面值不满足条件即剔除（缺失值视为不满足） */
+/** 过滤/不卖条件比较符白名单：bw 的 value 为 [下限, 上限] 闭区间二元组（判定语义与择时条件一致） */
+export const FILTER_OPS = ['>', '<', 'eq', 'bw'] as const;
+export type FilterOp = (typeof FILTER_OPS)[number];
+
+/** 指数日行情表（SQL/mkt_idxd.md）：基准曲线数据源 + 大盘条件的引用域 */
+export const INDEX_TABLE = 'mkt_idxd';
+
+/** 大盘条件广播截面里的哨兵键：指数当日值对全池个股取同一个数，存进截面 Map 的这个键下 */
+export const INDEX_VALUE_KEY = '__index_broadcast__';
+
+/** 过滤规则：当日截面值不满足条件即剔除（个股字段缺失视为不满足；
+ *  大盘条件=引用指数表的字段，全池同值，缺值弃权——数据缺口不清空股票池） */
 export interface StrategyFilterRule {
   table: string;
   field: string;
-  op: '>' | '<';
-  value: number;
+  op: FilterOp;
+  /** op='>'/'<'/'eq' 的比较值；op='bw' 的 [下限, 上限] 闭区间 */
+  value: number | [number, number];
+  /** 大盘条件（table=INDEX_TABLE）的挂靠指数，缺省 sse；个股条件不可传 */
+  indexCode?: BenchmarkKey;
+}
+
+/** 大盘条件：引用指数域表字段的过滤规则（股票池开关，与大盘择时的仓位开关互补） */
+export function isIndexFilterRule(rule: StrategyFilterRule): boolean {
+  return rule.table === INDEX_TABLE;
+}
+
+/** 大盘条件的指数键（缺省 sse，与择时 TimingIndexDefault 同源） */
+export function indexFilterCode(rule: StrategyFilterRule): BenchmarkKey {
+  return rule.indexCode ?? 'sse';
+}
+
+/** 不卖条件（ADR-0003）：持仓个股满足任一条即继续持有，优先级高于全部卖出规则与调仓换出；
+ *  择时减仓不受保护。结构与 field 类卖出规则相同（个股字段条件），不支持指数表字段 */
+export interface StrategyKeepRule {
+  table: string;
+  field: string;
+  op: FilterOp;
+  value: number | [number, number];
+}
+
+/** 单条件判定（过滤/不卖共用）：v 已确保非缺失 */
+export function evalRuleCond(v: number, op: FilterOp, value: number | [number, number]): boolean {
+  if (op === '>') return v > (value as number);
+  if (op === '<') return v < (value as number);
+  if (op === 'eq') return v === (value as number);
+  const [lo, hi] = value as [number, number];
+  return v >= lo && v <= hi;
+}
+
+/** 条件 → 展示串（describeFilters/describeKeepRules 共用） */
+export function formatRuleCond(r: { table: string; field: string; op: FilterOp; value: number | [number, number] }): string {
+  return r.op === 'bw'
+    ? `${r.table}.${r.field} ∈ [${(r.value as [number, number])[0]}, ${(r.value as [number, number])[1]}]`
+    : `${r.table}.${r.field} ${r.op} ${r.value}`;
 }
 
 /** 排序因子：direction 1=值大优（降序）/ -1=值小优（升序）。
@@ -90,12 +139,17 @@ export interface StrategyBacktestInput {
   idealPositionPct?: unknown;
   /** 最小建仓仓位 %（低于则放弃该候选），默认 1 */
   minPositionPct?: unknown;
-  /** 过滤因子（全部满足才入选） */
+  /** 过滤因子（全部满足才入选；可引用指数表字段做大盘条件） */
   entryFilters?: unknown;
   /** 排序因子（缺省 = 默认 20 日动量·值大优，弹窗如实展示） */
   sortFactors?: unknown;
   /** 卖出规则（持仓期每日检查） */
   sellRules?: unknown;
+  /** 不卖条件（可选）：命中的持仓跳过全部卖出检查（含调仓换出）；择时减仓不受保护 */
+  keepRules?: unknown;
+  /** 排除时间段（可选，≤5 段）：段内只结算不交易——持仓按冻结时点价估值（净值走平），
+   *  信号停算、挂起指令丢弃、解冻不补调仓；指标按全序列计算 */
+  excludeRanges?: unknown;
   benchmark?: unknown;
   /** 大盘择时叠加（可选）：字段条件投票状态机 + 分级熊市仓位，见 timing.ts */
   timingOverlay?: unknown;
@@ -121,6 +175,10 @@ export interface NormalizedStrategyInput {
   entryFilters: StrategyFilterRule[];
   sortFactors: StrategySortFactor[];
   sellRules: StrategySellRule[];
+  /** 不卖条件（空数组 = 无） */
+  keepRules: StrategyKeepRule[];
+  /** 排除时间段（空数组 = 无；已排序合并重叠、裁剪到回测区间） */
+  excludeRanges: ExcludeRange[];
   benchmark: BenchmarkKey;
   /** 大盘择时叠加（未传 = 不择时，全程满仓） */
   timingOverlay?: StrategyTimingOverlay;
@@ -139,6 +197,8 @@ export const MAX_POSITIONS_DEFAULT = 10;
 export const MAX_POSITIONS_MAX = 100;
 export const MIN_POSITION_PCT_DEFAULT = 1;
 export const MAX_RULES = 10;
+/** 排除时间段段数上限 */
+export const MAX_EXCLUDE_RANGES = 5;
 /** 股票池清单长度上限 */
 export const SECURITY_IDS_MAX = 5000;
 /** 候选并集（预取行情/卖出因子的股票全集）上限：超过说明频率×持仓×区间组合的数据量不可控 */
@@ -178,9 +238,29 @@ export function describeSortFactors(factors: StrategySortFactor[], sep = '；'):
     .join(sep);
 }
 
-/** 过滤规则 → 展示串 */
+/** 排除时间段（归一化形态：纯数字 YYYYMMDD，start ≤ end） */
+export interface ExcludeRange {
+  start: number;
+  end: number;
+}
+
+/** 排除时间段 → 展示串 */
+export function describeExcludeRanges(ranges: ExcludeRange[]): string {
+  return ranges.map((r) => `${r.start}~${r.end}`).join('；');
+}
+
+/** 不卖条件 → 展示串 */
+export function describeKeepRules(rules: StrategyKeepRule[], sep = '；'): string {
+  return rules.length ? rules.map((r) => formatRuleCond(r)).join(sep) : '无';
+}
+
+/** 过滤规则 → 展示串（大盘条件附挂靠指数名） */
 export function describeFilters(filters: StrategyFilterRule[], sep = '；'): string {
-  return filters.length ? filters.map((f) => `${f.table}.${f.field} ${f.op} ${f.value}`).join(sep) : '无';
+  return filters.length
+    ? filters
+        .map((f) => (isIndexFilterRule(f) ? `${formatRuleCond(f)}（${BENCHMARKS[indexFilterCode(f)].name}）` : formatRuleCond(f)))
+        .join(sep)
+    : '无';
 }
 
 /** 卖出规则 → 展示串 */
@@ -361,6 +441,8 @@ export function assertStrategyInput(raw: StrategyBacktestInput): NormalizedStrat
     entryFilters: assertFilters(raw.entryFilters),
     sortFactors: assertSortFactors(raw.sortFactors),
     sellRules: assertSellRules(raw.sellRules),
+    keepRules: assertKeepRules(raw.keepRules),
+    excludeRanges: assertExcludeRanges(raw.excludeRanges, startDate, endDate),
     benchmark: assertBenchmark(raw.benchmark),
     timingOverlay: assertTimingOverlay(raw.timingOverlay),
     strategyType: raw.strategyType === undefined || raw.strategyType === null || raw.strategyType === ''
@@ -372,7 +454,7 @@ export function assertStrategyInput(raw: StrategyBacktestInput): NormalizedStrat
 function assertFilters(rawFilters: unknown): StrategyFilterRule[] {
   if (rawFilters === undefined || rawFilters === null || rawFilters === '') return [];
   if (!Array.isArray(rawFilters)) {
-    throw new ApiException('INVALID_ARGUMENT', 400, 'entryFilters 必须是数组，每项 {table, field, op, value}');
+    throw new ApiException('INVALID_ARGUMENT', 400, 'entryFilters 必须是数组，每项 {table, field, op, value, indexCode?}');
   }
   if (rawFilters.length > MAX_RULES) {
     throw new ApiException('INVALID_ARGUMENT', 400, `entryFilters 过多（${rawFilters.length} 条，最多 ${MAX_RULES} 条）`);
@@ -381,19 +463,128 @@ function assertFilters(rawFilters: unknown): StrategyFilterRule[] {
     const o = (item ?? {}) as Record<string, unknown>;
     const table = String(o.table ?? '').trim();
     const field = String(o.field ?? '').trim();
-    const op = String(o.op ?? '').trim();
-    const value = Number(o.value);
+    const op = String(o.op ?? '').trim() as FilterOp;
     if (!table || !field) {
       throw new ApiException('INVALID_ARGUMENT', 400, `entryFilters 每项都需要 table 与 field: ${JSON.stringify(item)}`);
     }
-    if (op !== '>' && op !== '<') {
-      throw new ApiException('INVALID_ARGUMENT', 400, `entryFilters[].op 只允许 '>' 或 '<': ${op}`);
+    if (!(FILTER_OPS as readonly string[]).includes(op)) {
+      throw new ApiException('INVALID_ARGUMENT', 400, `entryFilters[].op 只允许 ${FILTER_OPS.join(' / ')}（bw 传 [下限, 上限] 区间）: ${op}`);
     }
-    if (!Number.isFinite(value)) {
-      throw new ApiException('INVALID_ARGUMENT', 400, `entryFilters[].value 须为有限数字: ${JSON.stringify(item)}`);
+    let value: number | [number, number];
+    if (op === 'bw') {
+      if (!Array.isArray(o.value) || o.value.length !== 2) {
+        throw new ApiException('INVALID_ARGUMENT', 400, `entryFilters bw 的 value 须为 [下限, 上限] 二元组: ${JSON.stringify(item)}`);
+      }
+      const lo = Number(o.value[0]);
+      const hi = Number(o.value[1]);
+      if (!Number.isFinite(lo) || !Number.isFinite(hi) || lo > hi) {
+        throw new ApiException('INVALID_ARGUMENT', 400, `entryFilters bw 区间须为有限数字且 下限 ≤ 上限: ${JSON.stringify(item)}`);
+      }
+      value = [lo, hi];
+    } else {
+      const v = Number(o.value);
+      if (!Number.isFinite(v)) {
+        throw new ApiException('INVALID_ARGUMENT', 400, `entryFilters[].value 须为有限数字: ${JSON.stringify(item)}`);
+      }
+      value = v;
+    }
+    // 大盘条件：指数域字段全池广播，挂靠指数可选（缺省上证）；个股条件不可带指数
+    if (table === INDEX_TABLE) {
+      const indexCode = (o.indexCode === undefined || o.indexCode === null || o.indexCode === '' ? 'sse' : String(o.indexCode)) as BenchmarkKey;
+      if (!(indexCode in BENCHMARKS)) {
+        throw new ApiException('INVALID_ARGUMENT', 400, `entryFilters 大盘条件的 indexCode 只允许 hs300（沪深300）/ csi500（中证500）/ sse（上证指数）: ${String(o.indexCode)}`);
+      }
+      return { table, field, op, value, indexCode };
+    }
+    if (o.indexCode !== undefined && o.indexCode !== null && o.indexCode !== '') {
+      throw new ApiException('INVALID_ARGUMENT', 400, `entryFilters[].indexCode 仅大盘条件（table=${INDEX_TABLE}）可传: ${JSON.stringify(item)}`);
     }
     return { table, field, op, value };
   });
+}
+
+function assertKeepRules(rawRules: unknown): StrategyKeepRule[] {
+  if (rawRules === undefined || rawRules === null || rawRules === '') return [];
+  if (!Array.isArray(rawRules)) {
+    throw new ApiException('INVALID_ARGUMENT', 400, 'keepRules 必须是数组，每项 {table, field, op, value}（个股字段条件，结构同 entryFilters 元素）');
+  }
+  if (rawRules.length > MAX_RULES) {
+    throw new ApiException('INVALID_ARGUMENT', 400, `keepRules 过多（${rawRules.length} 条，最多 ${MAX_RULES} 条）`);
+  }
+  return rawRules.map((item) => {
+    const o = (item ?? {}) as Record<string, unknown>;
+    const table = String(o.table ?? '').trim();
+    const field = String(o.field ?? '').trim();
+    const op = String(o.op ?? '').trim() as FilterOp;
+    if (!table || !field) {
+      throw new ApiException('INVALID_ARGUMENT', 400, `keepRules 每项都需要 table 与 field: ${JSON.stringify(item)}`);
+    }
+    if (table === INDEX_TABLE) {
+      throw new ApiException('INVALID_ARGUMENT', 400, `keepRules 暂不支持指数表字段（仅个股字段条件）: ${JSON.stringify(item)}`);
+    }
+    if (!(FILTER_OPS as readonly string[]).includes(op)) {
+      throw new ApiException('INVALID_ARGUMENT', 400, `keepRules[].op 只允许 ${FILTER_OPS.join(' / ')}（bw 传 [下限, 上限] 区间）: ${op}`);
+    }
+    let value: number | [number, number];
+    if (op === 'bw') {
+      if (!Array.isArray(o.value) || o.value.length !== 2) {
+        throw new ApiException('INVALID_ARGUMENT', 400, `keepRules bw 的 value 须为 [下限, 上限] 二元组: ${JSON.stringify(item)}`);
+      }
+      const lo = Number(o.value[0]);
+      const hi = Number(o.value[1]);
+      if (!Number.isFinite(lo) || !Number.isFinite(hi) || lo > hi) {
+        throw new ApiException('INVALID_ARGUMENT', 400, `keepRules bw 区间须为有限数字且 下限 ≤ 上限: ${JSON.stringify(item)}`);
+      }
+      value = [lo, hi];
+    } else {
+      const v = Number(o.value);
+      if (!Number.isFinite(v)) {
+        throw new ApiException('INVALID_ARGUMENT', 400, `keepRules[].value 须为有限数字: ${JSON.stringify(item)}`);
+      }
+      value = v;
+    }
+    return { table, field, op, value };
+  });
+}
+
+/** 排除时间段：排序 → 合并重叠 → 裁剪到回测区间；倒挂/非法格式报错，超段数报错 */
+function assertExcludeRanges(raw: unknown, startDate: string, endDate: string): ExcludeRange[] {
+  if (raw === undefined || raw === null || raw === '') return [];
+  if (!Array.isArray(raw)) {
+    throw new ApiException('INVALID_ARGUMENT', 400, 'excludeRanges 必须是数组，每项 {start, end}（纯数字 YYYYMMDD）');
+  }
+  if (raw.length > MAX_EXCLUDE_RANGES) {
+    throw new ApiException('INVALID_ARGUMENT', 400, `excludeRanges 过多（${raw.length} 段，最多 ${MAX_EXCLUDE_RANGES} 段）`);
+  }
+  const parsed: ExcludeRange[] = raw.map((item) => {
+    const o = (item ?? {}) as Record<string, unknown>;
+    const start = Number(String(o.start ?? '').trim());
+    const end = Number(String(o.end ?? '').trim());
+    if (!/^\d{8}$/.test(String(start)) || !/^\d{8}$/.test(String(end))) {
+      throw new ApiException('INVALID_ARGUMENT', 400, `excludeRanges 每项的 start/end 须为纯数字 YYYYMMDD: ${JSON.stringify(item)}`);
+    }
+    if (start > end) {
+      throw new ApiException('INVALID_ARGUMENT', 400, `excludeRanges 区间倒挂（start 须早于 end）: ${JSON.stringify(item)}`);
+    }
+    return { start, end };
+  });
+  parsed.sort((a, b) => a.start - b.start);
+  // 合并重叠段（下一段起点落在上一段内）
+  const merged: ExcludeRange[] = [];
+  for (const r of parsed) {
+    const last = merged[merged.length - 1];
+    if (last && r.start <= last.end) {
+      last.end = Math.max(last.end, r.end);
+    } else {
+      merged.push({ ...r });
+    }
+  }
+  // 裁剪到回测区间，越界段丢弃
+  const lo = Number(startDate);
+  const hi = Number(endDate);
+  return merged
+    .map((r) => ({ start: Math.max(r.start, lo), end: Math.min(r.end, hi) }))
+    .filter((r) => r.start <= r.end);
 }
 
 function assertSortFactors(rawFactors: unknown): StrategySortFactor[] {
@@ -521,10 +712,13 @@ export interface FactorRef {
   field: string;
 }
 
-/** 归一化入参引用的全部 (table, field)：entryFilters + 有效排序因子 + field 类卖出规则，去重保序。
- *  注意：不含择时引用——择时字段按挂靠指数走 readIndexFieldSeries 通道（键形态不同，
- *  混进截面预取会对无 SECURITY_ID 列的指数表报错）；白名单/日历用 collectTimingRefs 单独取 */
-export function collectFactorRefs(p: NormalizedStrategyInput): FactorRef[] {
+/** 归一化入参引用的全部 (table, field)：entryFilters（大盘条件除外）+ 有效排序因子 +
+ *  field 类卖出规则 + 不卖条件，去重保序。
+ *  注意：不含择时引用与大盘条件——两者都按挂靠指数走 readIndexFieldSeries 通道（键形态不同，
+ *  混进截面预取会对无 SECURITY_ID 列的指数表报错）；白名单/日历用 collectAllRefs 单独取 */
+export function collectFactorRefs(
+  p: Pick<NormalizedStrategyInput, 'entryFilters' | 'sortFactors' | 'sellRules' | 'keepRules'>,
+): FactorRef[] {
   const refs: FactorRef[] = [];
   const seen = new Set<string>();
   const push = (table: string, field: string) => {
@@ -534,20 +728,26 @@ export function collectFactorRefs(p: NormalizedStrategyInput): FactorRef[] {
       refs.push({ table, field });
     }
   };
-  for (const f of p.entryFilters) push(f.table, f.field);
+  for (const f of p.entryFilters) if (!isIndexFilterRule(f)) push(f.table, f.field);
   for (const f of effectiveSortFactors(p.sortFactors).factors) push(f.table, f.field);
   for (const r of p.sellRules) if (r.kind === 'field') push(r.table, r.field);
+  for (const r of p.keepRules) push(r.table, r.field);
   return refs;
 }
 
-/** 全部引用 = 因子引用 + 择时引用（白名单校验/日历推导用；截面预取只能用 collectFactorRefs） */
+/** 全部引用 = 因子引用 + 大盘条件引用 + 择时引用（白名单校验/日历推导用；截面预取只能用 collectFactorRefs） */
 export function collectAllRefs(p: NormalizedStrategyInput): FactorRef[] {
   const refs = collectFactorRefs(p);
   const seen = new Set(refs.map((r) => `${r.table}.${r.field}`));
-  if (p.timingOverlay) {
-    for (const r of collectTimingRefs(p.timingOverlay)) {
-      if (!seen.has(`${r.table}.${r.field}`)) refs.push(r);
+  const push = (table: string, field: string) => {
+    if (!seen.has(`${table}.${field}`)) {
+      seen.add(`${table}.${field}`);
+      refs.push({ table, field });
     }
+  };
+  for (const f of p.entryFilters) if (isIndexFilterRule(f)) push(f.table, f.field);
+  if (p.timingOverlay) {
+    for (const r of collectTimingRefs(p.timingOverlay)) push(r.table, r.field);
   }
   return refs;
 }
@@ -555,9 +755,11 @@ export function collectAllRefs(p: NormalizedStrategyInput): FactorRef[] {
 /* ----- 调仓信号纯函数：过滤 → 分位数合成排序 ----- */
 
 /**
- * 过滤：pool 内逐股检查全部过滤规则的当日截面值，全部满足才存活；任一缺失视为不满足。
+ * 过滤：pool 内逐股检查全部过滤规则的当日截面值，全部满足才存活。
+ * 个股字段缺失视为不满足；大盘条件（INDEX_VALUE_KEY 哨兵键广播截面）缺值弃权——
+ * 指数数据缺口不清空整个股票池。
  * @param filters   过滤规则列表
- * @param sections  与 filters 一一对应的当日截面（code → 值）
+ * @param sections  与 filters 一一对应的当日截面（code → 值；大盘条件放 INDEX_VALUE_KEY 单键）
  */
 export function applyEntryFilters(
   pool: string[],
@@ -566,8 +768,14 @@ export function applyEntryFilters(
 ): string[] {
   return pool.filter((code) =>
     filters.every((rule, i) => {
-      const v = sections[i]?.get(code);
-      return v !== undefined && (rule.op === '>' ? v > rule.value : v < rule.value);
+      const section = sections[i];
+      if (!section) return false;
+      if (isIndexFilterRule(rule)) {
+        const idxValue = section.get(INDEX_VALUE_KEY);
+        return idxValue === undefined ? true : evalRuleCond(idxValue, rule.op, rule.value);
+      }
+      const v = section.get(code);
+      return v !== undefined && evalRuleCond(v, rule.op, rule.value);
     }),
   );
 }
@@ -1033,6 +1241,92 @@ export interface StrategyBacktestOutput {
   metrics: RawMetrics;
 }
 
+/* ----- 每日选股（果仁「每日选股」面板对标）：不跑回测，单日截面 → 过滤 → 排序 → 清单 ----- */
+
+export interface DailyScreenInput {
+  /** 股票池：缺省/空 = 全市场（格式校验同回测） */
+  securityIds?: unknown;
+  /** 过滤条件（结构同回测 entryFilters，支持大盘条件） */
+  entryFilters?: unknown;
+  /** 排序因子（缺省 = 默认 20 日动量） */
+  sortFactors?: unknown;
+  /** 入选只数，默认 10 */
+  maxPositions?: unknown;
+  /** 查询日（纯数字 YYYYMMDD）；缺省 = 数据表内最近交易日 */
+  date?: unknown;
+}
+
+export interface DailyScreenNormalized {
+  securityIds: string[] | null;
+  entryFilters: StrategyFilterRule[];
+  /** 有效排序因子（空清单已兜底默认动量） */
+  sortFactors: StrategySortFactor[];
+  usedDefaultSort: boolean;
+  maxPositions: number;
+  /** YYYYMMDD 纯数字；未传为 null（由实现层解析最近交易日） */
+  date: string | null;
+}
+
+/** 每日选股结果 */
+export interface DailyScreenOutput {
+  /** 实际查询交易日 YYYYMMDD */
+  date: number;
+  /** 入选清单（综合分降序，≤ maxPositions）；factorValues 与 sortFactors 一一对应（缺值 null） */
+  stocks: { code: string; score: number; factorValues: (number | null)[] }[];
+  /** 有效排序因子（确认卡/卡片展示同源） */
+  sortFactors: StrategySortFactor[];
+  usedDefaultSort: boolean;
+  /** 过滤条件（展示同源） */
+  entryFilters: StrategyFilterRule[];
+  /** 过滤前候选池（截面有值股票或传入股票池） */
+  rawPoolSize: number;
+  /** 过滤后存活数 */
+  survivedCount: number;
+}
+
+/** 每日选股入参归一化：复用回测同款过滤/排序/股票池校验；date 只做格式校验（越界/非交易日由实现层对照日历报） */
+export function assertDailyScreenInput(raw: DailyScreenInput): DailyScreenNormalized {
+  let securityIds: string[] | null = null;
+  if (raw.securityIds !== undefined && raw.securityIds !== null && raw.securityIds !== '') {
+    if (!Array.isArray(raw.securityIds)) {
+      throw new ApiException('INVALID_ARGUMENT', 400, 'securityIds 必须是证券代码数组（如 ["000002.XSHE"]），缺省表示全市场');
+    }
+    const list = (raw.securityIds as unknown[]).map((c) => String(c ?? '').trim()).filter(Boolean);
+    for (const code of list) {
+      if (!/^\d{6}\.[A-Za-z]{2,8}$/.test(code)) {
+        throw new ApiException('INVALID_ARGUMENT', 400, `securityIds 中的证券代码格式须为 000002.XSHE: ${code}`);
+      }
+    }
+    if (list.length > SECURITY_IDS_MAX) {
+      throw new ApiException('INVALID_ARGUMENT', 400, `securityIds 过多（${list.length} 个，上限 ${SECURITY_IDS_MAX}）`);
+    }
+    securityIds = list.length ? [...new Set(list)] : null;
+  }
+  const entryFilters = assertFilters(raw.entryFilters);
+  const effective = effectiveSortFactors(assertSortFactors(raw.sortFactors));
+  const maxPositions = raw.maxPositions === undefined || raw.maxPositions === null || raw.maxPositions === ''
+    ? MAX_POSITIONS_DEFAULT
+    : Number(raw.maxPositions);
+  if (!Number.isInteger(maxPositions) || maxPositions < 1 || maxPositions > MAX_POSITIONS_MAX) {
+    throw new ApiException('INVALID_ARGUMENT', 400, `maxPositions 必须是 1~${MAX_POSITIONS_MAX} 的整数: ${raw.maxPositions}`);
+  }
+  let date: string | null = null;
+  if (raw.date !== undefined && raw.date !== null && raw.date !== '') {
+    date = String(raw.date).trim();
+    if (!/^\d{8}$/.test(date)) {
+      throw new ApiException('INVALID_ARGUMENT', 400, `date 须为纯数字 YYYYMMDD（缺省 = 最近交易日）: ${raw.date}`);
+    }
+  }
+  return {
+    securityIds,
+    entryFilters,
+    sortFactors: effective.factors,
+    usedDefaultSort: effective.usedDefault,
+    maxPositions,
+    date,
+  };
+}
+
 /* ----- 契约 ----- */
 
 /**
@@ -1055,6 +1349,9 @@ export abstract class StrategyBacktestService {
    *  否则用户确认后引擎才报错、模型改参重发又要再确认一轮；
    *  引擎主流程调用它拿交易日历。两次调用命中取数缓存，确认门预热后引擎同区间读取零打库 */
   abstract checkRange(input: StrategyBacktestInput): Promise<TradeDateCoverage>;
+
+  /** 每日选股：单日截面 → 过滤 → 排序 → 入选清单（不进入回测主循环，零交易零副作用） */
+  abstract runDailyScreen(input: DailyScreenInput): Promise<DailyScreenOutput>;
 }
 
 /** 指标数组组装（供实现层拼卡片 metrics：四项绩效 + 年化换手） */

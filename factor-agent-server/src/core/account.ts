@@ -1,8 +1,10 @@
 import { ApiException } from '../common/api.exception';
 import {
+  evalRuleCond,
   LIMIT_DOWN_RATIO,
   LIMIT_UP_RATIO,
   LOT_SIZE,
+  type StrategyKeepRule,
   type StrategySellRule,
   type StrategyTrade,
 } from './strategy-backtest.service';
@@ -256,6 +258,29 @@ export function matchSellRule(
       }
       case 'rank_out':
         break; // 仅调仓日在调仓信号中处理（排名跌出 → 调仓卖出）
+    }
+  }
+  return null;
+}
+
+/** 不卖条件判定（ADR-0003 保护矩阵）：命中任一条 = 该持仓跳过本轮全部卖出检查
+ *  （字段类卖出规则、调仓换出/排名跌出都受保护；择时减仓不查本函数，天然不受保护）。
+ *  取数通道与 field 类卖出规则同构：日期表按日、静态表单值，缺值 = 条件不成立 */
+export function matchKeepRule(
+  pos: Position,
+  day: number,
+  rules: StrategyKeepRule[],
+  keepFieldSeries: SellFieldData,
+  staticKeepRefs: Set<string>,
+): string | null {
+  for (const rule of rules) {
+    const key = `${rule.table}.${rule.field}`;
+    const series = keepFieldSeries.get(key);
+    const value = staticKeepRefs.has(key)
+      ? (series as Map<string, number>).get(pos.code)
+      : (series as Map<string, Map<number, number>>).get(pos.code)?.get(day);
+    if (value !== undefined && evalRuleCond(value, rule.op, rule.value)) {
+      return `${rule.field}满足不卖`;
     }
   }
   return null;

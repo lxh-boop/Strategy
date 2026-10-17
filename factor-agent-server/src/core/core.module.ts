@@ -40,6 +40,6 @@ import { AccountBacktestExecutionService } from './implementations/account-backt
     { provide: BacktestExecutionService, useClass: AccountBacktestExecutionService },
     { provide: FactorAnalysisService, useClass: FactorAnalysisServiceImpl },
   ],
-  exports: [UserStoreService, FactorDataService, StrategyBacktestService, BacktestExecutionService],
+  exports: [UserStoreService, FactorDataService, StrategyBacktestService, BacktestExecutionService, FactorAnalysisService],
 })
 export class CoreModule {}
