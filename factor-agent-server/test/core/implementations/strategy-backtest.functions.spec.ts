@@ -2,63 +2,11 @@ import { ApiException } from '../../../src/common/api.exception';
 import { ClarificationSignal } from '../../../src/core/strategy-backtest.service';
 import { FactorDataService, QuoteRow } from '../../../src/core/factor-data.service';
 import { StrategyBacktestServiceImpl } from '../../../src/core/implementations/strategy-backtest.service.impl';
+import { CODE_A, CODE_B, defaultQuotes, makeStrategyService } from '../test-utils';
 
 /* ==========================================================
    权重/仓位函数 全流程 stub 测试：内化等价性对拍 + ic_weight/factor_position 挂载
    ========================================================== */
-
-const TRADE_DATES = [20240102, 20240103, 20240104, 20240105];
-const CODE_A = '000001.XSHE';
-const CODE_B = '000002.XSHE';
-
-function quoteRow(ticker: string, date: number, q: { o: number; c: number; pc: number }): QuoteRow {
-  const s = String(date);
-  return {
-    ticker,
-    exchange: 'XSHE',
-    tradeDate: `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}`,
-    open: q.o,
-    close: q.c,
-    preClose: q.pc,
-  };
-}
-
-/** 行情面板（温和波动，避开 ±10% 涨跌停判定） */
-function defaultQuotes(): QuoteRow[] {
-  return [
-    quoteRow('000001', 20240102, { o: 10, c: 10, pc: 10 }),
-    quoteRow('000001', 20240103, { o: 10.5, c: 11, pc: 10 }),
-    quoteRow('000001', 20240104, { o: 11, c: 11, pc: 11 }),
-    quoteRow('000001', 20240105, { o: 9.9, c: 9.9, pc: 11 }),
-    quoteRow('000002', 20240102, { o: 20, c: 20, pc: 20 }),
-    quoteRow('000002', 20240103, { o: 20, c: 21, pc: 20 }),
-    quoteRow('000002', 20240104, { o: 21, c: 21, pc: 21 }),
-    quoteRow('000002', 20240105, { o: 21.5, c: 21.5, pc: 21 }),
-  ];
-}
-
-interface Fixture {
-  momentum: Record<number, Record<string, number>>;
-  panels?: Record<string, Record<number, Record<string, number>>>;
-  quotes: QuoteRow[];
-}
-
-function makeService(fixture: Fixture): StrategyBacktestServiceImpl {
-  const factorData = {
-    readTable: async () => [],
-    readTradeDates: async () => ({ dates: TRADE_DATES, min: 20200101, max: 20241231 }),
-    readFactorSection: async (table: string, field: string, date: string) => {
-      const panel = fixture.panels?.[`${table}.${field}`] ?? fixture.momentum;
-      const section = panel[Number(date)] ?? {};
-      return Object.entries(section).map(([securityId, value]) => ({ securityId, value }));
-    },
-    readFactorRange: async () => [],
-    readQuoteSeries: async () => fixture.quotes,
-    readIndexDaily: async () => [],
-    readIndexFieldSeries: async () => [],
-  } as unknown as FactorDataService;
-  return new StrategyBacktestServiceImpl(factorData);
-}
 
 const baseArgs = {
   securityIds: [CODE_A, CODE_B],
@@ -89,7 +37,7 @@ describe('权重/仓位函数（全流程 stub，不触库）', () => {
       { table: 'equ_factor_obos', field: 'RSI', direction: -1 as const },
     ];
     const run = (weights: [number, number]) =>
-      makeService({ momentum: {}, panels: twoFactorPanels, quotes: defaultQuotes() }).runStrategyBacktest({
+      makeStrategyService({ momentum: {}, panels: twoFactorPanels, quotes: defaultQuotes() }).runStrategyBacktest({
         ...baseArgs,
         sortFactors,
         weightFn: { name: 'constant_weights', params: { weights } },
@@ -104,10 +52,10 @@ describe('权重/仓位函数（全流程 stub，不触库）', () => {
 
   it('未知函数名 → 400 附名录；参数不合法 → 澄清信号', async () => {
     await expect(
-      makeService({ momentum: {}, quotes: defaultQuotes() }).runStrategyBacktest({ ...baseArgs, weightFn: { name: 'nope' } }),
+      makeStrategyService({ momentum: {}, quotes: defaultQuotes() }).runStrategyBacktest({ ...baseArgs, weightFn: { name: 'nope' } }),
     ).rejects.toThrow(/可用名录/);
     await expect(
-      makeService({ momentum: {}, quotes: defaultQuotes() }).runStrategyBacktest({
+      makeStrategyService({ momentum: {}, quotes: defaultQuotes() }).runStrategyBacktest({
         ...baseArgs,
         weightFn: { name: 'ic_weight', params: { icWindow: 1 } },
       }),
@@ -115,7 +63,7 @@ describe('权重/仓位函数（全流程 stub，不触库）', () => {
   });
 
   it('factor_position：定权因子 ≤0 的候选不买（金额 0），>0 独占资金', async () => {
-    const out = await makeService({
+    const out = await makeStrategyService({
       momentum: {
         20240102: { [CODE_A]: 10, [CODE_B]: 20 },
         20240104: { [CODE_A]: 30, [CODE_B]: 5 },
@@ -133,9 +81,8 @@ describe('权重/仓位函数（全流程 stub，不触库）', () => {
       positionFn: { name: 'factor_position', params: { factor: { table: 'equ_factor_obos', field: 'BIAS20' } } },
     });
     // 0103 建仓只有 A（B 金额 0 跳过）：A 独占目标市值（10 万 × 50% 理想仓位 = 5 万 → T+1 开盘 10.5 → 4700 股）
-    const trades = out.card.trades ?? [];
-    expect(trades.filter((t) => t.code === CODE_B)).toEqual([]);
-    expect(trades[0]).toMatchObject({
+    expect((out.card.trades ?? []).filter((t) => t.code === CODE_B)).toEqual([]);
+    expect((out.card.trades ?? [])[0]).toMatchObject({
       date: 20240103,
       code: CODE_A,
       direction: 'buy',
@@ -148,7 +95,7 @@ describe('权重/仓位函数（全流程 stub，不触库）', () => {
   });
 
   it('ic_weight：全流程可跑（IC 上下文按窗口预取，不触未来）', async () => {
-    const out = await makeService({
+    const out = await makeStrategyService({
       momentum: {
         20240102: { [CODE_A]: 10, [CODE_B]: 20 },
         20240103: { [CODE_A]: 12, [CODE_B]: 19 },
@@ -165,7 +112,7 @@ describe('权重/仓位函数（全流程 stub，不触库）', () => {
 
   it('触发模式 + 函数 → 400（二期再议）', async () => {
     await expect(
-      makeService({ momentum: {}, quotes: defaultQuotes() }).runStrategyBacktest({
+      makeStrategyService({ momentum: {}, quotes: defaultQuotes() }).runStrategyBacktest({
         ...baseArgs,
         rebalanceIntervalDays: 0,
         positionDeviatePct: 10,

@@ -8,7 +8,11 @@ import {
   validatePositionAmounts,
   WeightFn,
 } from '../weight-functions';
-import { industryClarificationGuide, resolveIndustrySecurities } from '../industry-engine';
+
+// [实验] 引擎 B 引用已禁用
+function industryEngine(): typeof import('../industry-engine') {
+  throw new Error('industry-engine disabled in experiment');
+}
 
 import { ApiException } from '../../common/api.exception';
 import {
@@ -149,21 +153,19 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
 
   async runStrategyBacktest(input: StrategyBacktestInput, onProgress?: AgentProgressSink): Promise<StrategyBacktestOutput> {
     const p = assertStrategyInput(input);
-    if (p.rebalanceIntervalDays === 0 && (p.weightFn || p.positionFn || (p.industries?.length ?? 0) > 0)) {
+    if (p.rebalanceIntervalDays === 0 && (p.weightFn || p.positionFn)) {
       throw new ApiException(
         'INVALID_ARGUMENT',
         400,
-        '触发模式（模型 Ⅱ）暂不支持权重/仓位函数与行业筛选，请改用定期调仓模式',
+        '触发模式（模型 Ⅱ）暂不支持权重/仓位函数，请改用定期调仓模式',
       );
     }
-    // 行业名校验：未知行业 → 澄清信号附名录（模型自纠后重发）
-    if (p.industries?.length) {
-      const { unknown } = await resolveIndustrySecurities(p.industries, Number(p.startDate));
-      if (unknown.length) throw new ClarificationSignal(await industryClarificationGuide(unknown));
-    }
+    // [实验] 行业名校验已禁用
+
     // 函数解析（边界上一次）：未知函数名 → 400 附名录；参数不合法 → ClarificationSignal 引导模型修正
     const weightBinding = p.weightFn ? resolveWeightFn(p.weightFn) : null;
     const positionBinding = p.positionFn ? resolvePositionFn(p.positionFn) : null;
+    console.error('[DEBUG bind]', 'weightFn:', JSON.stringify(p.weightFn ?? null), 'positionFn:', JSON.stringify(p.positionFn ?? null), 'binding fn:', typeof (positionBinding?.fn));
     const industries = p.industries ?? [];
     // 触发模式（rebalanceIntervalDays=0）路由到模型 Ⅱ 独立引擎
     if (p.rebalanceIntervalDays === 0) {
@@ -238,12 +240,7 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
               ).map((r) => [r.securityId, r.value]),
             )
           : undefined;
-        // 行业筛选（PIT）：决策日 D 的时点归属并集，与显式股票池取交集
-        const dayPool = industries.length
-          ? (await resolveIndustrySecurities(industries, day)).securities.filter(
-              (c) => !p.securityIds || p.securityIds.includes(c),
-            )
-          : p.securityIds;
+        const dayPool = p.securityIds;
         const sig = await this.crossSectionSignal({
           entryFilters: p.entryFilters,
           sortFactors: sortFactors.factors,
@@ -531,16 +528,7 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
     const icByFactor = weightBinding?.icWindow
       ? await this.computeRollingIC(p.sortFactors, queryDate, weightBinding.icWindow)
       : undefined;
-    // 行业筛选（PIT）：查询日的时点归属并集，与显式股票池取交集；未知行业 → 澄清附名录
-    if (industries.length) {
-      const { unknown } = await resolveIndustrySecurities(industries, queryDate);
-      if (unknown.length) throw new ClarificationSignal(await industryClarificationGuide(unknown));
-    }
-    const industryPool = industries.length
-      ? (await resolveIndustrySecurities(industries, queryDate)).securities.filter(
-          (c) => !p.securityIds || p.securityIds.includes(c),
-        )
-      : p.securityIds;
+    const industryPool = p.securityIds;
     const sig = await this.crossSectionSignal({
       entryFilters: p.entryFilters,
       sortFactors: p.sortFactors,
@@ -697,7 +685,9 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
               sizingTargets = new Map(Object.entries(fixed));
               for (const v of vs) sizingViolations.push(`D${day} ${v}`);
             }
-            const tvOf = (code: string): number => (sizingTargets ? sizingTargets.get(code) ?? 0 : targetMv);
+            // b2 新买：函数未分配金额的候选 = 不买（0）；b3 持仓调平：未分配成员回退等权目标，防误清仓
+            const tvOf = (code: string, isExisting: boolean): number =>
+              sizingTargets ? (sizingTargets.get(code) ?? (isExisting ? targetMv : 0)) : targetMv;
 
             // b1. 清出不在目标（或被 rank_out 强制卖出）的持仓；不卖条件命中 = 受保护，
             //     不被调出、按目标仓位同权调平（ADR-0003）
@@ -726,7 +716,7 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
               const q = quoteOf(code, day);
               if (price === undefined || !q) continue; // 停牌跳过
               if (price >= q.preClose * LIMIT_UP_RATIO) continue; // 涨停跳过
-              const tv = tvOf(code);
+              const tv = tvOf(code, false);
               if (tv <= 0) continue; // 仓位函数给了 0 金额 = 本期不买（如 MA 下方）
               let shares = Math.floor(tv / (price * (1 + p.feeRate)) / LOT_SIZE) * LOT_SIZE;
               const affordable = account.affordableShares(price);
@@ -744,7 +734,7 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
               const price = execPriceOf(code, day);
               if (price === undefined) continue;
               // 字典未覆盖的成员（如不卖条件保住的持仓）→ 回退等权目标，防误清仓
-              const tv = sizingTargets ? sizingTargets.get(code) ?? targetMv : targetMv;
+              const tv = tvOf(code, true);
               const diff = Math.floor(tv / price / LOT_SIZE) * LOT_SIZE - pos.shares;
               if (diff > 0) {
                 let shares = Math.floor(diff / LOT_SIZE) * LOT_SIZE;
