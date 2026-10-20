@@ -79,8 +79,7 @@ export interface StrategySortFactor {
   field: string;
   /** 1=值大优 / -1=值小优 */
   direction: 1 | -1;
-  /** 缺省 = 等权 1/N；加权模式必须全部因子都传 */
-  weight?: number;
+  /** 因子权重由 weightFn 函数每调仓求值（与后端 core/weight-functions.ts 同构），本结构不承载静态权重 */
 }
 
 export type StrategySellRule =

@@ -447,7 +447,7 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
     securityIds: string[] | null;
     indexSeriesByKey: Map<string, Map<number, number>>;
     day: number;
-    /** 权重函数（已绑定参数）：本次截面求值各因子权重；缺省 = 现状（weight 缺省 1/N） */
+    /** 权重函数（已绑定参数）：本次截面求值各因子权重；缺省 = 等权 */
     weightFn?: WeightFn;
     /** 滚动 Rank IC 均值（ic_weight 的引擎预计算上下文，键 = table.field） */
     icByFactor?: Record<string, number>;

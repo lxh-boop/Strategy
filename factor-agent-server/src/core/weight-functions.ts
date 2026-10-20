@@ -157,9 +157,8 @@ const FUNCTIONS: Record<string, FnDef> = {
       const r = intInRange(o.icWindow, 'icWindow', 5, 250, 20);
       return typeof r === 'string' ? r : null;
     },
-    fn: (ctx: FactorWeightCtx, params: unknown) => {
-      const o = (params ?? {}) as { icWindow?: number };
-      void o; // icWindow 由引擎消费（预计算 ctx.icByFactor），函数只做归一化
+    fn: (ctx: FactorWeightCtx) => {
+      // icWindow 由引擎消费（预计算 ctx.icByFactor），函数只做归一化
       const ic = ctx.icByFactor ?? {};
       const pos = ctx.factors.map((f) => Math.max(ic[factorKey(f)] ?? 0, 0));
       const sum = pos.reduce((a, b) => a + b, 0);

@@ -681,8 +681,7 @@ input[type="range"]::-webkit-slider-thumb {
 .gate-param-val { display: block; font-size: 14px; font-weight: 600; color: var(--text); margin-top: 2px; font-variant-numeric: tabular-nums; }
 .gate-hint { font-size: 12px; color: var(--text-3); margin-top: 12px; line-height: 1.6; }
 
-/* ===== 优化建议弹窗 / 确认门输入行 ===== */
-.optimize-actions { display: flex; gap: 8px; margin-bottom: 12px; }
+/* ===== 确认门输入行 ===== */
 .gate-alt { display: flex; gap: 8px; margin-top: 12px; align-items: center; }
 .gate-alt-input {
   flex: 1; border: 1px solid var(--border); border-radius: 8px;
@@ -702,12 +701,6 @@ input[type="range"]::-webkit-slider-thumb {
 .trade-scroll .mini-table th { position: sticky; top: 0; background: var(--card); z-index: 1; }
 .trade-scroll .mini-table td { white-space: normal; }
 
-/* 优化建议弹窗内的建议原文（避免"见上方消息"被遮罩模糊看不到） */
-.optimize-quote {
-  max-height: 220px; overflow: auto; white-space: pre-wrap;
-  background: var(--tile); border: 1px solid var(--tile-border); border-radius: 8px;
-  padding: 10px 12px; font-size: 13px; line-height: 1.7; color: var(--text-2);
-}
 
 /* ===== 智能体回复 Markdown（react-markdown 输出原生标签） ===== */
 .mini-md { display: flex; flex-direction: column; gap: 6px; font-size: 13.5px; }
