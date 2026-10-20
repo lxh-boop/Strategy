@@ -306,6 +306,12 @@ export interface Strategy {
   backtestConfig?: BacktestRunConfig | StrategyRunConfig;
   /** 曲线逐点交易日（YYYYMMDD，与 curve 等长）：仅等权真引擎产出，详情图按真实日期打刻度 */
   dates?: number[];
+  /** 回测实际参数口径（引擎产出，与对话卡片同源）；旧策略无此字段 */
+  params?: BtParamItem[];
+  /** 每期持仓明细（引擎产出）：详情页「最新一期持仓」与「历史持仓」数据源 */
+  periodHoldings?: PeriodHoldingsRow[];
+  /** 回测交易明细（引擎产出）：详情页「历史交易」数据源 */
+  trades?: BacktestTrade[];
 }
 
 /* ----- 个人中心 ----- */

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { Strategy } from "../types";
+import type { BtParamItem, Strategy } from "../types";
 import { useConfig } from "../config";
 import { fmtPct, upDownCls } from "../utils/format";
 import { PerfChart, Sparkline } from "../components/charts";
@@ -11,6 +11,41 @@ const STATUS: Record<Strategy["status"], { cls: string; text: string }> = {
   done: { cls: "status-done", text: "回测完成" },
   draft: { cls: "status-draft", text: "草稿" },
 };
+
+/* 交易日 YYYYMMDD → 展示 YYYY-MM-DD（引擎产出的明细日期口径） */
+const fmtYmd = (n: number) => String(n).replace(/^(\d{4})(\d{2})(\d{2})$/, "$1-$2-$3");
+
+/* 策略详情的回测参数口径：优先引擎产出的 params（与对话卡片同源）；
+   旧策略无 params 时从存储的 backtestConfig 推导基础项（完整排序/过滤/卖出口径以重新回测后为准） */
+function strategyParamItems(s: Strategy): BtParamItem[] {
+  if (s.params && s.params.length) return s.params;
+  const cfg = s.backtestConfig;
+  if (!cfg) return [];
+  if ("rebalanceIntervalDays" in cfg) {
+    const items: BtParamItem[] = [
+      { label: "回测区间", value: `${cfg.startDate} ~ ${cfg.endDate}`, hint: "引擎实际采用的起止交易日" },
+      { label: "调仓频率", value: cfg.rebalanceIntervalDays > 0 ? `每 ${cfg.rebalanceIntervalDays} 个交易日` : "触发模式", hint: "定期按因子得分重排持仓" },
+      { label: "持仓数量", value: `${cfg.maxPositions ?? 20} 只`, hint: "每次调仓最多持有的股票数" },
+      { label: "成交时点", value: cfg.executionTiming === 1 ? "收盘价" : "开盘价", hint: "调仓指令的成交价格口径" },
+      { label: "业绩基准", value: BENCH_LABELS[cfg.benchmark ?? "hs300"], hint: "超额收益的比较基准" },
+    ];
+    if (cfg.initialCapital) items.splice(1, 0, { label: "初始资金", value: `${cfg.initialCapital / 10000} 万元`, hint: "回测起始投入资金" });
+    if (cfg.sortFactors?.length) items.push({
+      label: "排序因子",
+      value: cfg.sortFactors.map(f => `${f.table}.${f.field}（${f.direction === 1 ? "值大优" : "值小优"}）`).join("；"),
+      hint: "综合得分的因子构成与方向",
+    });
+    return items;
+  }
+  const FREQ: Record<string, string> = { weekly: "每周", biweekly: "每两周", monthly: "每月", quarterly: "每季度", semiannual: "每半年", annual: "每年" };
+  return [
+    { label: "回测区间", value: `${cfg.startDate} ~ ${cfg.endDate}`, hint: "等权回测起止区间" },
+    { label: "调仓频率", value: cfg.frequency === "custom" ? `每 ${cfg.everyNTd} 个交易日` : (FREQ[cfg.frequency] ?? cfg.frequency), hint: "等权回测调仓节奏" },
+    { label: "Top K", value: `${cfg.topK} 只`, hint: "每次调仓取综合得分前 K 只" },
+    { label: "业绩基准", value: BENCH_LABELS[cfg.benchmark], hint: "超额收益的比较基准" },
+    { label: "手续费率", value: cfg.feeRate ? `双边 ${(cfg.feeRate * 100).toFixed(2)}%` : "不计费用", hint: "双边费率，调仓日计提" },
+  ];
+}
 
 /* ----- 策略卡片 ----- */
 
@@ -72,16 +107,106 @@ function StrategyCard({ s, onOpen, onBacktest, onDelete }: {
   );
 }
 
-/* ----- 策略详情弹窗（只读展示 + 重跑；创建/调参统一在对话完成） ----- */
+/* ----- 历史持仓 / 历史交易面板：真引擎产出的逐期/逐笔明细。
+     不用弹窗——与策略详情卡在滑入层内左右各半并排（策略卡左移、本面板自右滑入） ----- */
 
-function StrategyDetailModal({ s, onClose, onRebacktest, onDelete }: {
+function HistoryPanel({ kind, s, onClose }: {
+  kind: "holdings" | "trades";
   s: Strategy;
+  onClose: () => void;
+}) {
+  const periods = s.periodHoldings ?? [];
+  const trades = s.trades ?? [];
+  const title = kind === "holdings" ? "历史持仓（逐期明细）" : "历史交易（逐笔明细）";
+  return (
+    <div className="card sp-history-panel" aria-label={`${title}：${s.name}`}>
+      <div className="sp-history-head">
+        <div className="sp-history-title">{title} · {s.name}</div>
+        <button className="icon-btn" aria-label="关闭历史面板" onClick={onClose}><IconClose /></button>
+      </div>
+      {kind === "holdings" ? (
+        periods.length ? periods.map(p => (
+          <div key={p.seq} style={{ marginBottom: 12 }}>
+            <div className="agent-card-text">第 {p.seq} 期（{fmtYmd(p.startDate)} ~ {fmtYmd(p.endDate)}）</div>
+            <div className="trade-scroll">
+              <table className="mini-table">
+                <thead>
+                  <tr><th>证券</th><th className="num">股数</th><th className="num">期末收盘</th>
+                    <th className="num">进入价格</th><th className="num">期间收益%</th><th className="num">权重%</th></tr>
+                </thead>
+                <tbody>
+                  {p.holdings.map(h => (
+                    <tr key={h.code}>
+                      <td>{h.code}</td>
+                      <td className="num">{h.shares.toLocaleString("zh-CN")}</td>
+                      <td className="num">{h.closePrice}</td>
+                      <td className="num">{h.entryPrice}</td>
+                      <td className={`num ${h.periodReturnPct >= 0 ? "up" : "down"}`}>{h.periodReturnPct > 0 ? "+" : ""}{h.periodReturnPct}%</td>
+                      <td className="num">{h.weightPct}%</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )) : (
+          <div className="agent-card-text">暂无逐期持仓明细；点击「重新回测」按真引擎口径生成。</div>
+        )
+      ) : (
+        trades.length ? (
+          <>
+            <div className="agent-card-text" style={{ margin: "0 0 8px" }}>共 {trades.length} 笔</div>
+            <div className="trade-scroll">
+              <table className="mini-table">
+                <thead>
+                  <tr><th>日期</th><th>证券</th><th>方向</th><th className="num">价格</th><th className="num">股数</th>
+                    <th className="num">金额</th><th className="num">费用</th><th>原因</th></tr>
+                </thead>
+                <tbody>
+                  {trades.map((t, i) => (
+                    <tr key={i}>
+                      <td>{fmtYmd(t.date)}</td>
+                      <td>{t.code}</td>
+                      <td className={t.direction === "buy" ? "up" : "down"}>{t.direction === "buy" ? "买入" : "卖出"}</td>
+                      <td className="num">{t.price}</td>
+                      <td className="num">{t.shares.toLocaleString("zh-CN")}</td>
+                      <td className="num">{Math.round(t.amount).toLocaleString("zh-CN")}</td>
+                      <td className="num">{Math.round(t.fee).toLocaleString("zh-CN")}</td>
+                      <td>{t.reason}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </>
+        ) : (
+          <div className="agent-card-text">暂无交易明细；点击「重新回测」按真引擎口径生成。</div>
+        )
+      )}
+    </div>
+  );
+}
+
+/* ----- 策略详情卡（只读展示 + 重跑；创建/调参统一在对话完成）。
+     不用弹窗：由页面级滑入层承载——点详情时策略列表左移，本卡自右滑入 ----- */
+
+function StrategyDetailCard({ s, historyView, onShowHistory, onClose, onRebacktest, onDelete }: {
+  s: Strategy;
+  /** 当前打开的历史面板（与详情卡左右各半并排）；null = 未打开 */
+  historyView: "holdings" | "trades" | null;
+  /** 点击历史按钮：同键再点关闭 */
+  onShowHistory: (v: "holdings" | "trades") => void;
   onClose: () => void;
   onRebacktest: () => Promise<void>;
   onDelete: () => void;
 }) {
   const [busy, setBusy] = useState(false);
   const m = s.metrics;
+  /* 最新一期持仓 = periodHoldings 末期；旧数据无此字段时回退演示持仓 */
+  const latestPeriod = s.periodHoldings && s.periodHoldings.length > 0
+    ? s.periodHoldings[s.periodHoldings.length - 1]
+    : null;
+  const paramItems = strategyParamItems(s);
 
   /* 重新回测触发一次完整回测：await 期间按钮禁用，防重复提交 */
   const retest = async () => {
@@ -91,19 +216,23 @@ function StrategyDetailModal({ s, onClose, onRebacktest, onDelete }: {
   };
 
   return (
-    <Modal onClose={onClose} ariaLabel={`策略详情：${s.name}`}>
-      <div className="modal-head">
-        <div className="modal-title">
-          {s.name}
-          <span className={`status-badge ${STATUS[s.status].cls}`}>{STATUS[s.status].text}</span>
-        </div>
-        <div style={{ display: "flex", gap: 4 }}>
+    <div className="card sp-detail-card">
+        <div className="sc-head">
+          <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
+            <button className="btn btn-ghost btn-sm" style={{ flexShrink: 0 }} onClick={onClose}>← 返回列表</button>
+            <div style={{ minWidth: 0 }}>
+              <div className="sc-name">
+                {s.name}
+                <span className={`status-badge ${STATUS[s.status].cls}`} style={{ marginLeft: 8 }}>{STATUS[s.status].text}</span>
+              </div>
+              <div className="sc-universe">{s.universe} · {s.rebalance} · 基准 {s.benchmark}</div>
+            </div>
+          </div>
           <button className="icon-btn icon-btn-danger" title="删除策略" aria-label={`删除策略「${s.name}」`}
             disabled={busy} onClick={onDelete}><IconTrash /></button>
-          <button className="icon-btn" title="关闭" aria-label="关闭" onClick={onClose}><IconClose /></button>
         </div>
-      </div>
-      <div className="modal-body">
+
+        <div className="sp-detail-body">
         <div className="detail-section">
           <div className="detail-section-title">基础配置</div>
           <div className="detail-meta">
@@ -148,10 +277,47 @@ function StrategyDetailModal({ s, onClose, onRebacktest, onDelete }: {
         </div>
 
         <div className="detail-section">
-          <div className="detail-section-title">
-            {s.holdings.length ? `当前持仓（展示前 ${s.holdings.length} 只 / Top K = 50）` : "当前持仓"}
+          <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 8 }}>
+            <div className="detail-section-title" style={{ margin: 0 }}>
+              {latestPeriod
+                ? `最新一期持仓（第 ${latestPeriod.seq} 期 · ${fmtYmd(latestPeriod.startDate)} ~ ${fmtYmd(latestPeriod.endDate)}）`
+                : s.holdings.length ? `当前持仓（展示前 ${s.holdings.length} 只 / Top K = 50）` : "当前持仓"}
+            </div>
+            <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+              {s.backtestConfig && (
+                <>
+                  <button className={"btn btn-sm " + (historyView === "holdings" ? "btn-primary" : "btn-ghost")}
+                    title={s.periodHoldings?.length ? "查看逐期持仓明细" : "暂无明细数据，重新回测后生成"}
+                    onClick={() => onShowHistory("holdings")}>历史持仓</button>
+                  <button className={"btn btn-sm " + (historyView === "trades" ? "btn-primary" : "btn-ghost")}
+                    title={s.trades?.length ? "查看逐笔交易明细" : "暂无明细数据，重新回测后生成"}
+                    onClick={() => onShowHistory("trades")}>历史交易</button>
+                </>
+              )}
+            </div>
           </div>
-          {s.holdings.length ? (
+          {latestPeriod ? (
+            <div className="trade-scroll">
+              <table className="mini-table">
+                <thead>
+                  <tr><th>证券</th><th className="num">股数</th><th className="num">期末收盘</th>
+                    <th className="num">进入价格</th><th className="num">期间收益%</th><th className="num">权重%</th></tr>
+                </thead>
+                <tbody>
+                  {latestPeriod.holdings.map(h => (
+                    <tr key={h.code}>
+                      <td>{h.code}</td>
+                      <td className="num">{h.shares.toLocaleString("zh-CN")}</td>
+                      <td className="num">{h.closePrice}</td>
+                      <td className="num">{h.entryPrice}</td>
+                      <td className={`num ${h.periodReturnPct >= 0 ? "up" : "down"}`}>{h.periodReturnPct > 0 ? "+" : ""}{h.periodReturnPct}%</td>
+                      <td className="num">{h.weightPct}%</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : s.holdings.length ? (
             <table className="mini-table">
               <thead>
                 <tr><th>股票</th><th className="num">因子得分</th><th className="num">持仓权重</th><th className="num">今日涨跌</th></tr>
@@ -176,19 +342,26 @@ function StrategyDetailModal({ s, onClose, onRebacktest, onDelete }: {
 
         <div className="detail-section" style={{ marginBottom: 0 }}>
           <div className="detail-section-title">回测参数</div>
-          <ParamsBlock />
-          <div className="agent-card-text" style={{ margin: "8px 0 0" }}>
-            以上为本次回测采用的口径，悬停参数可查看说明。
-          </div>
+          {paramItems.length > 0 ? (
+            <>
+              <ParamsBlock items={paramItems} />
+              <div className="agent-card-text" style={{ margin: "8px 0 0" }}>
+                以上为本次回测采用的口径，悬停参数可查看说明。
+              </div>
+            </>
+          ) : (
+            <div className="agent-card-text">该策略无可展示的回测参数；点击「重新回测」后按真引擎口径生成。</div>
+          )}
+        </div>
+        </div>
+
+        <div className="sp-detail-foot">
+          {/* 破坏性的删除已移到标题栏；创建/调参统一在对话，页脚只保留重跑 */}
+          <button className="btn btn-ghost" disabled={busy} onClick={() => void retest()}>
+            {busy ? "回测中…" : "重新回测"}
+          </button>
         </div>
       </div>
-      <div className="modal-foot">
-        {/* 破坏性的删除已移到标题栏；创建/调参统一在对话，页脚只保留重跑 */}
-        <button className="btn btn-ghost" disabled={busy} onClick={() => void retest()}>
-          {busy ? "回测中…" : "重新回测"}
-        </button>
-      </div>
-    </Modal>
   );
 }
 
@@ -213,7 +386,10 @@ function BacktestReportModal({ s, onClose }: { s: Strategy; onClose: () => void 
           ...(m.turnover !== undefined ? [{ label: "年化换手(单边)", value: (m.turnover > 0 ? "+" : "") + m.turnover.toFixed(0) + "%" }] : []),
         ]} />
         <div className="detail-section-title" style={{ margin: "18px 0 10px" }}>回测参数</div>
-        <ParamsBlock />
+        <ParamsBlock items={strategyParamItems(s)} />
+        {strategyParamItems(s).length === 0 && (
+          <div className="agent-card-text">该策略无可展示的回测参数。</div>
+        )}
         <div className="agent-card-text" style={{ margin: "10px 0 0" }}>
           本报告按上方参数口径、基于当前因子权重与「{s.universe}」股票池模拟生成，收益已扣除手续费；历史业绩不代表未来表现。
         </div>
@@ -406,6 +582,8 @@ export function StrategiesPage({ strategies, loading, notify, onGoChat, onReback
   onDelete: (id: string) => Promise<void>;
 }) {
   const [detailId, setDetailId] = useState<string | null>(null);
+  /* 详情滑入层里并排打开的历史面板（与详情卡左右各半）；切详情/关闭时复位 */
+  const [historyView, setHistoryView] = useState<"holdings" | "trades" | null>(null);
   const [reportId, setReportId] = useState<string | null>(null);
   const [showNew, setShowNew] = useState(false);
   const [confirmDel, setConfirmDel] = useState<Strategy | null>(null);
@@ -455,53 +633,64 @@ export function StrategiesPage({ strategies, loading, notify, onGoChat, onReback
         <button className="btn btn-primary" onClick={() => setShowNew(true)}><IconPlus />新建策略</button>
       </header>
 
-      <div className="stat-row">
-        <div className="stat-card">
-          <div className="stat-label">策略总数</div>
-          <div className="stat-value">{strategies.length}<small>个</small></div>
-        </div>
-        <div className="stat-card">
-          <div className="stat-label">运行中</div>
-          <div className="stat-value">{running}<small>个</small></div>
-        </div>
-        <div className="stat-card">
-          <div className="stat-label">平均年化收益</div>
-          <div className={`stat-value ${hasStats ? upDownCls(avg("annual")) : ""}`}>
-            {hasStats ? fmtPct(avg("annual")) : "—"}
+      {/* 详情/历史全屏滑入层：背景压暗+模糊；历史面板打开时与详情卡左右各半 */}
+      <div className="sp-stage">
+        <div className="stat-row">
+          <div className="stat-card">
+            <div className="stat-label">策略总数</div>
+            <div className="stat-value">{strategies.length}<small>个</small></div>
+          </div>
+          <div className="stat-card">
+            <div className="stat-label">运行中</div>
+            <div className="stat-value">{running}<small>个</small></div>
+          </div>
+          <div className="stat-card">
+            <div className="stat-label">平均年化收益</div>
+            <div className={`stat-value ${hasStats ? upDownCls(avg("annual")) : ""}`}>
+              {hasStats ? fmtPct(avg("annual")) : "—"}
+            </div>
+          </div>
+          <div className="stat-card">
+            <div className="stat-label">平均夏普比率</div>
+            <div className="stat-value">{hasStats ? avg("sharpe").toFixed(2) : "—"}</div>
           </div>
         </div>
-        <div className="stat-card">
-          <div className="stat-label">平均夏普比率</div>
-          <div className="stat-value">{hasStats ? avg("sharpe").toFixed(2) : "—"}</div>
-        </div>
-      </div>
 
-      <div className="strategy-grid">
-        {loading ? (
-          <div className="empty-state">
-            <div className="empty-title">正在从后端加载策略…</div>
-          </div>
-        ) : strategies.length ? strategies.map(s => (
-          <StrategyCard key={s.id} s={s}
-            onOpen={() => setDetailId(s.id)}
-            onBacktest={() => handleRebacktest(s)}
-            onDelete={() => setConfirmDel(s)} />
-        )) : (
-          <div className="empty-state">
-            <div className="empty-icon"><IconLogo size={24} /></div>
-            <div className="empty-title">还没有策略</div>
-            <div className="empty-desc">点击「新建策略」选好参数，到对话里发送即可回测；回测卡片上「保存为我的策略」收进这里。</div>
-            <button className="btn btn-primary" onClick={() => setShowNew(true)}><IconPlus />新建策略</button>
+        <div className="strategy-grid">
+          {loading ? (
+            <div className="empty-state">
+              <div className="empty-title">正在从后端加载策略…</div>
+            </div>
+          ) : strategies.length ? strategies.map(s => (
+            <StrategyCard key={s.id} s={s}
+              onOpen={() => { setDetailId(s.id); setHistoryView(null); }}
+              onBacktest={() => handleRebacktest(s)}
+              onDelete={() => setConfirmDel(s)} />
+          )) : (
+            <div className="empty-state">
+              <div className="empty-icon"><IconLogo size={24} /></div>
+              <div className="empty-title">还没有策略</div>
+              <div className="empty-desc">点击「新建策略」选好参数，到对话里发送即可回测；回测卡片上「保存为我的策略」收进这里。</div>
+              <button className="btn btn-primary" onClick={() => setShowNew(true)}><IconPlus />新建策略</button>
+            </div>
+          )}
+        </div>
+
+        {detail && (
+          <div className={"sp-detail-layer" + (historyView ? " sp-split" : "")} key={detail.id}>
+            <StrategyDetailCard s={detail} historyView={historyView}
+              onShowHistory={v => setHistoryView(cur => (cur === v ? null : v))}
+              onClose={() => { setDetailId(null); setHistoryView(null); }}
+              onRebacktest={() => handleRebacktest(detail)}
+              onDelete={() => setConfirmDel(detail)} />
+            {historyView && (
+              <HistoryPanel key={historyView} kind={historyView} s={detail}
+                onClose={() => setHistoryView(null)} />
+            )}
           </div>
         )}
       </div>
 
-      {detail && (
-        <StrategyDetailModal key={detail.id} s={detail}
-          onClose={() => setDetailId(null)}
-          onRebacktest={() => handleRebacktest(detail)}
-          onDelete={() => setConfirmDel(detail)} />
-      )}
       {showNew && (
         <NewStrategyModal notify={notify}
           onClose={() => setShowNew(false)}

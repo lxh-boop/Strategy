@@ -746,3 +746,40 @@ input[type="range"]::-webkit-slider-thumb {
 }
 .mini-md td { padding: 7px 10px; border-top: 1px solid var(--divider); white-space: nowrap; }
 .mini-md tbody tr:hover td { background: var(--tile); }
+
+/* ===== 我的策略：详情/历史全屏滑入层（覆盖全屏；背景压暗+模糊同弹窗遮罩；详情与历史面板左右各半） ===== */
+.sp-detail-layer {
+  position: fixed; inset: 0; z-index: 90; overflow-y: auto;
+  display: flex; align-items: stretch; gap: 14px;
+  padding: 16px;
+  background: rgba(0, 0, 0, .55); backdrop-filter: blur(10px);
+  animation: sp-slide-in 0.32s ease;
+}
+@keyframes sp-slide-in {
+  from { transform: translateX(48%); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+.sp-detail-card {
+  flex: 0 0 100%; min-width: 0; padding: 18px 20px;
+  display: flex; flex-direction: column;
+  background: var(--card);
+  transition: flex-basis 0.32s ease;
+}
+.sp-detail-layer.sp-split .sp-detail-card { flex-basis: calc(50% - 7px); }
+.sp-detail-body { flex: 1; }
+.sp-detail-foot { display: flex; justify-content: flex-end; gap: 8px; padding-top: 14px; }
+.sp-history-panel {
+  flex: 1 1 0; min-width: 0; overflow-y: auto;
+  display: flex; flex-direction: column;
+  padding: 16px 18px;
+  background: var(--card);
+  animation: sp-history-in 0.32s ease;
+}
+/* 面板内的明细表不再走对话卡的 320px 限高：整表展开、随面板滚动，表头吸附面板顶 */
+.sp-history-panel .trade-scroll { max-height: none; overflow: visible; flex: 1; }
+@keyframes sp-history-in {
+  from { transform: translateX(56%); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+.sp-history-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 10px; }
+.sp-history-title { font-size: 15px; font-weight: 700; }

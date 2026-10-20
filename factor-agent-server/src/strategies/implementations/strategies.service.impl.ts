@@ -121,7 +121,11 @@ export class StrategiesServiceImpl extends StrategiesService {
       curve: out.card.curve,
       benchCurve: out.card.benchCurve,
       dates: out.card.dates,
-      holdings: [], // 策略回测引擎暂不产出持仓明细，详情页展示口径见前端
+      // 引擎产出的参数口径与逐期/逐笔明细：详情页「回测参数/最新一期持仓/历史持仓/历史交易」数据源
+      params: out.card.params ?? [],
+      periodHoldings: out.card.periodHoldings ?? [],
+      trades: out.card.trades ?? [],
+      holdings: [], // 旧版演示持仓字段，真引擎策略固定为空
       backtestConfig: config,
     };
     await this.users.saveStrategy(userId, strategy);
@@ -180,6 +184,9 @@ export class StrategiesServiceImpl extends StrategiesService {
     strategy.benchCurve = out.card.benchCurve;
     strategy.dates = out.card.dates;
     strategy.metrics = out.metrics;
+    strategy.params = out.card.params ?? [];
+    strategy.periodHoldings = out.card.periodHoldings ?? [];
+    strategy.trades = out.card.trades ?? [];
     if (strategy.status === 'draft') strategy.status = 'done';
     strategy.updatedAt = todayStr();
     await this.users.saveStrategy(userId, strategy);
