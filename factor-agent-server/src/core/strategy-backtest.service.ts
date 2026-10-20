@@ -22,7 +22,7 @@ import { assertTimingOverlay, collectTimingRefs, StrategyTimingOverlay } from '.
    - 因子即取数规格：无 FactorDef，全部按 entryFilters/sortFactors/sellRules 引用的
      table.field 从白名单数据表读截面，引擎不在线计算任何因子；
    - 过滤/排序分参：同一因子既过滤又排序时两处重复传入，引擎不合并；
-   - 排序：截面分位数标准化（0~100）→ 加权合成（weight 缺省等权 1/N）→
+   - 排序：截面分位数标准化（0~100）→ 加权合成（权重由 weightFn 每调仓求值，缺省等权 1/N）→
      综合分降序取前 maxPositions；sortFactors 为空时兜底追加 20 日动量（值大优）；
    - 职责边界：引擎只执行单次给定参数的回测，参数自动寻优是 GLM 编排层职责。
    ========================================================== */
@@ -98,12 +98,11 @@ export function formatRuleCond(r: { table: string; field: string; op: FilterOp; 
 }
 
 /** 排序因子：direction 1=值大优（降序）/ -1=值小优（升序）。
- *  weight 全省略 = 等权 1/N；加权模式下全部因子必须都传（引擎按总和归一化） */
+ *  因子权重由 weightFn 函数每调仓求值（见 weight-functions.ts），本结构不再承载静态权重 */
 export interface StrategySortFactor {
   table: string;
   field: string;
   direction: 1 | -1;
-  weight?: number;
 }
 
 /** 卖出规则：持仓期每日收盘后检查，命中生成 T+1 卖出指令（全仓） */
@@ -143,7 +142,7 @@ export interface StrategyBacktestInput {
   entryFilters?: unknown;
   /** 排序因子（缺省 = 默认 20 日动量·值大优，弹窗如实展示） */
   sortFactors?: unknown;
-  /** 权重函数引用（{name, params}；缺省 = constant 等权）。与 sortFactors[].weight 互斥 */
+  /** 权重函数引用（{name, params}；缺省 = constant 等权） */
   weightFn?: unknown;
   /** 仓位函数引用（缺省 = constant 等权金额）。触发模式不支持 */
   positionFn?: unknown;
@@ -244,7 +243,7 @@ export function effectiveSortFactors(sortFactors: StrategySortFactor[]): {
 export function describeSortFactors(factors: StrategySortFactor[], sep = '；'): string {
   return factors
     .map((f) =>
-      `${f.table}.${f.field}（${f.direction === 1 ? '值大优' : '值小优'}，${f.weight !== undefined ? `权重 ${f.weight}` : '等权'}）`,
+      `${f.table}.${f.field}（${f.direction === 1 ? '值大优' : '值小优'}）`,
     )
     .join(sep);
 }
@@ -331,14 +330,6 @@ export function assertStrategyInput(raw: StrategyBacktestInput): NormalizedStrat
 
   const parsedWeightFn = assertFunctionSpec(raw.weightFn, 'weightFn');
   const parsedPositionFn = assertFunctionSpec(raw.positionFn, 'positionFn');
-  const parsedSortFactors = assertSortFactors(raw.sortFactors);
-  if (parsedWeightFn && parsedSortFactors.some((f) => f.weight !== undefined)) {
-    throw new ApiException(
-      'INVALID_ARGUMENT',
-      400,
-      'weightFn 与 sortFactors[].weight 不可同时使用：静态权重列已内化为 constant_weights 函数，请二选一',
-    );
-  }
 
   // 股票池：缺省/空数组 = 全市场；给了必须全是 000002.XSHE 形态
   let securityIds: string[] | null = null;
@@ -461,7 +452,7 @@ export function assertStrategyInput(raw: StrategyBacktestInput): NormalizedStrat
     idealPositionPct,
     minPositionPct,
     entryFilters: assertFilters(raw.entryFilters),
-    sortFactors: parsedSortFactors,
+    sortFactors: assertSortFactors(raw.sortFactors),
     ...(parsedWeightFn ? { weightFn: parsedWeightFn } : {}),
     ...(parsedPositionFn ? { positionFn: parsedPositionFn } : {}),
     sellRules: assertSellRules(raw.sellRules),
@@ -614,14 +605,13 @@ function assertExcludeRanges(raw: unknown, startDate: string, endDate: string): 
 function assertSortFactors(rawFactors: unknown): StrategySortFactor[] {
   if (rawFactors === undefined || rawFactors === null || rawFactors === '') return [];
   if (!Array.isArray(rawFactors)) {
-    throw new ApiException('INVALID_ARGUMENT', 400, 'sortFactors 必须是数组，每项 {table, field, direction, weight?}');
+    throw new ApiException('INVALID_ARGUMENT', 400, 'sortFactors 必须是数组，每项 {table, field, direction}');
   }
   if (rawFactors.length > MAX_RULES) {
     throw new ApiException('INVALID_ARGUMENT', 400, `sortFactors 过多（${rawFactors.length} 个，最多 ${MAX_RULES} 个）`);
   }
   const factors: StrategySortFactor[] = [];
   const seen = new Set<string>();
-  let weightCount = 0;
   for (const item of rawFactors) {
     const o = (item ?? {}) as Record<string, unknown>;
     const table = String(o.table ?? '').trim();
@@ -636,22 +626,7 @@ function assertSortFactors(rawFactors: unknown): StrategySortFactor[] {
     const key = `${table}.${field}`;
     if (seen.has(key)) continue; // 重复因子忽略（同一因子过滤+排序两处传是合法的，列表内重复无意义）
     seen.add(key);
-    let weight: number | undefined;
-    if (o.weight !== undefined && o.weight !== null && o.weight !== '') {
-      weight = Number(o.weight);
-      if (!Number.isFinite(weight) || weight <= 0) {
-        throw new ApiException('INVALID_ARGUMENT', 400, `sortFactors[].weight 须为正数（引擎按总和归一化）: ${String(o.weight)}`);
-      }
-      weightCount++;
-    }
-    factors.push({ table, field, direction: direction as 1 | -1, ...(weight !== undefined ? { weight } : {}) });
-  }
-  if (weightCount > 0 && weightCount < factors.length) {
-    throw new ApiException(
-      'INVALID_ARGUMENT',
-      400,
-      `sortFactors 的 weight 只支持两种模式：全省略（等权 1/N）或全部传入（加权合成），当前 ${factors.length} 个因子只传了 ${weightCount} 个`,
-    );
+    factors.push({ table, field, direction: direction as 1 | -1 });
   }
   return factors;
 }
@@ -806,7 +781,7 @@ export function applyEntryFilters(
 
 /**
  * 排序合成：各排序因子在存活池上按值升序算分位数（(排名)/n），direction=1 直接用
- * （值大 → 分位高）、-1 取 1-分位数；标准化到 0~100 后加权平均（weight 缺省等权 1/N，
+ * （值大 → 分位高）、-1 取 1-分位数；标准化到 0~100 后加权平均（weights 由权重函数每调仓求值，
  * 只对该股有值的因子重归一化），全部因子都缺值的股票不入选。
  * @returns 综合分降序的候选列表
  */
@@ -814,8 +789,8 @@ export function rankUniverse(
   factors: StrategySortFactor[],
   sections: Map<string, number>[],
   pool: string[],
+  weights?: number[],
 ): { code: string; score: number }[] {
-  const weightTotal = factors.reduce((a, f) => a + (f.weight ?? 0), 0);
   const scoreSum = new Map<string, number>();
   factors.forEach((factor, i) => {
     const rows = pool
@@ -824,7 +799,7 @@ export function rankUniverse(
     if (!rows.length) return;
     rows.sort((a, b) => a.value - b.value);
     const n = rows.length;
-    const w = factor.weight ?? (weightTotal > 0 ? 0 : 1 / factors.length);
+    const w = weights?.[i] ?? 1 / factors.length;
     rows.forEach((row, idx) => {
       const pct = (idx + 1) / n;
       const score = (factor.direction === -1 ? 1 - pct : pct) * 100;

@@ -83,37 +83,23 @@ const twoFactorPanels = {
 };
 
 describe('权重/仓位函数（全流程 stub，不触库）', () => {
-  it('内化等价性对拍：constant_weights [3,1] ≡ 旧静态 weight 列同配置（交易与净值逐位一致）', async () => {
+  it('constant_weights 归一不变性：[3,1] 与 [0.75,0.25] 同配置（交易与净值逐位一致）', async () => {
     const sortFactors = [
       { table: 'equ_factor_obos', field: 'REVS20', direction: 1 as const },
       { table: 'equ_factor_obos', field: 'RSI', direction: -1 as const },
     ];
-    const legacy = await makeService({ momentum: {}, panels: twoFactorPanels, quotes: defaultQuotes() }).runStrategyBacktest({
-      ...baseArgs,
-      sortFactors: sortFactors.map((f, i) => ({ ...f, weight: [3, 1][i] })),
-    });
-    const functional = await makeService({ momentum: {}, panels: twoFactorPanels, quotes: defaultQuotes() }).runStrategyBacktest({
-      ...baseArgs,
-      sortFactors,
-      weightFn: { name: 'constant_weights', params: { weights: [3, 1] } },
-    });
-    expect(functional.card.trades).toEqual(legacy.card.trades);
-    expect(functional.card.curve).toEqual(legacy.card.curve);
-    expect(functional.summary.权重函数).toContain('常数比例');
-    expect(functional.summary.权重函数).toContain('[3,1]');
-  });
-
-  it('weightFn 与静态 weight 列同传 → 400（双轨互斥）', async () => {
-    await expect(
+    const run = (weights: [number, number]) =>
       makeService({ momentum: {}, panels: twoFactorPanels, quotes: defaultQuotes() }).runStrategyBacktest({
         ...baseArgs,
-        sortFactors: [
-          { table: 'equ_factor_obos', field: 'REVS20', direction: 1 as const, weight: 3 },
-          { table: 'equ_factor_obos', field: 'RSI', direction: -1 as const, weight: 1 },
-        ],
-        weightFn: { name: 'constant_weights', params: { weights: [3, 1] } },
-      }),
-    ).rejects.toThrow(/不可同时使用/);
+        sortFactors,
+        weightFn: { name: 'constant_weights', params: { weights } },
+      });
+    const scaled = await run([3, 1]);
+    const normalized = await run([0.75, 0.25]);
+    expect(scaled.card.trades).toEqual(normalized.card.trades);
+    expect(scaled.card.curve).toEqual(normalized.card.curve);
+    expect(normalized.summary.权重函数).toContain('常数比例');
+    expect(normalized.summary.权重函数).toContain('[0.75,0.25]');
   });
 
   it('未知函数名 → 400 附名录；参数不合法 → 澄清信号', async () => {

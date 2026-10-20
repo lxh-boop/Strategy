@@ -61,18 +61,12 @@ describe('assertStrategyInput（归一化与校验）', () => {
     expect(() => assertStrategyInput({ ...base, securityIds: ['000002'] })).toThrow(/000002.XSHE/);
   });
 
-  it('weight 部分传 → 报错（只支持全省略或全传入）', () => {
-    const sortFactors = [
-      { table: 'equ_factor_obos', field: 'REVS20', direction: 1 as const },
-      { table: 'equ_factor_obos', field: 'RSI', direction: -1 as const, weight: 2 },
-    ];
-    expect(() => assertStrategyInput({ ...base, sortFactors })).toThrow(/weight/);
-    expect(() =>
-      assertStrategyInput({
-        ...base,
-        sortFactors: sortFactors.map((f) => ({ ...f, weight: 1 })),
-      }),
-    ).not.toThrow();
+  it('静态 weight 列已删除：sortFactors 只认 table/field/direction，自定义权重走 weightFn', () => {
+    const p = assertStrategyInput({
+      ...base,
+      sortFactors: [{ table: 'equ_factor_obos', field: 'REVS20', direction: 1 as const, weight: 2 }],
+    });
+    expect((p.sortFactors[0] as unknown as Record<string, unknown>).weight).toBeUndefined();
   });
 
   it('direction / op / sellRule kind 非法 → INVALID_ARGUMENT', () => {
@@ -120,13 +114,13 @@ describe('effectiveSortFactors / collectFactorRefs（默认动量兜底与引用
     ]);
   });
 
-  it('describeSortFactors：方向与权重如实展示（确认弹窗契约）', () => {
+  it('describeSortFactors：方向如实展示（确认弹窗契约）', () => {
     const s = describeSortFactors([
       { table: 'equ_factor_obos', field: 'REVS20', direction: 1 },
-      { table: 'equ_factor_obos', field: 'RSI', direction: -1, weight: 3 },
+      { table: 'equ_factor_obos', field: 'RSI', direction: -1 },
     ]);
-    expect(s).toContain('REVS20（值大优，等权）');
-    expect(s).toContain('RSI（值小优，权重 3）');
+    expect(s).toContain('REVS20（值大优）');
+    expect(s).toContain('RSI（值小优）');
   });
 });
 
@@ -182,17 +176,18 @@ describe('rankUniverse（分位数合成纯函数）', () => {
     expect(ranked[0].score).toBe(100);
   });
 
-  it('weight 加权：方向相反的两因子按权重倾斜', () => {
+  it('weights 参数加权：方向相反的两因子按权重倾斜', () => {
     const ranked = rankUniverse(
       [
-        { table: 't', field: 'f1', direction: 1, weight: 3 },
-        { table: 't', field: 'f2', direction: 1, weight: 1 },
+        { table: 't', field: 'f1', direction: 1 },
+        { table: 't', field: 'f2', direction: 1 },
       ],
       [
         new Map([['A', 1], ['B', 2]]),
         new Map([['A', 100], ['B', 200]]),
       ],
       ['A', 'B'],
+      [3, 1],
     );
     expect(ranked[0].code).toBe('B'); // B 两因子分位均更高
   });

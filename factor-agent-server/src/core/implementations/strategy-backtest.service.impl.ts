@@ -457,18 +457,16 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
     });
     const rankSections = sortFactors.map((f) => byRef.get(`${f.table}.${f.field}`)!);
     const pool = applyEntryFilters(rawPool, entryFilters, filterSections);
-    let rankedFactors = sortFactors;
-    if (weightFn) {
-      const weights = weightFn({
-        factors: sortFactors,
-        sections: rankSections,
-        icByFactor,
-        pool,
-        count: pool.length,
-      });
-      rankedFactors = sortFactors.map((f, i) => ({ ...f, weight: weights[i] }));
-    }
-    return { rawPoolSize: rawPool.length, ranked: rankUniverse(rankedFactors, rankSections, pool), sectionsByKey: byRef };
+    const weights = weightFn
+      ? weightFn({
+          factors: sortFactors,
+          sections: rankSections,
+          icByFactor,
+          pool,
+          count: pool.length,
+        })
+      : undefined;
+    return { rawPoolSize: rawPool.length, ranked: rankUniverse(sortFactors, rankSections, pool, weights), sectionsByKey: byRef };
   }
 
   /** 每日选股（果仁「每日选股」对标）：不跑回测主循环、零交易零副作用，
@@ -893,7 +891,7 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
   ): BacktestCard {
     const feePct = (p.feeRate * 100).toFixed(2);
     const sortExpr = sortFactors.factors
-      .map((f) => `${f.field}${f.direction === -1 ? '(小值优)' : ''}${f.weight !== undefined ? `×${f.weight}` : ''}`)
+      .map((f) => `${f.field}${f.direction === -1 ? '(小值优)' : ''}`)
       .join(' + ');
     const totalFee = loop.trades.reduce((a, t) => a + t.fee, 0);
     return {
