@@ -21,3 +21,4 @@ v6/
 
 # Tushare 行业数据 CSV（可随时重下，见 SQL/industry/download-industry.mjs）
 factor-agent-server/SQL/industry/*.csv
+factor-agent-server/SQL/industry/*.duckdb
