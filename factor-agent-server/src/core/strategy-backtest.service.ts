@@ -1249,6 +1249,8 @@ export interface DailyScreenInput {
   entryFilters?: unknown;
   /** 排序因子（缺省 = 默认 20 日动量） */
   sortFactors?: unknown;
+  /** 权重函数引用（结构同回测 weightFn）：与回测排序口径保持一致；缺省 = 等权 */
+  weightFn?: unknown;
   /** 入选只数，默认 10 */
   maxPositions?: unknown;
   /** 查询日（纯数字 YYYYMMDD）；缺省 = 数据表内最近交易日 */
@@ -1260,6 +1262,8 @@ export interface DailyScreenNormalized {
   entryFilters: StrategyFilterRule[];
   /** 有效排序因子（空清单已兜底默认动量） */
   sortFactors: StrategySortFactor[];
+  /** 权重函数（缺省 = 等权；与回测排序口径一致） */
+  weightFn?: FunctionSpec;
   usedDefaultSort: boolean;
   maxPositions: number;
   /** YYYYMMDD 纯数字；未传为 null（由实现层解析最近交易日） */
@@ -1270,6 +1274,8 @@ export interface DailyScreenNormalized {
 export interface DailyScreenOutput {
   /** 实际查询交易日 YYYYMMDD */
   date: number;
+  /** 权重函数展示（未挂载 = 等权） */
+  权重函数?: string;
   /** 入选清单（综合分降序，≤ maxPositions）；factorValues 与 sortFactors 一一对应（缺值 null） */
   stocks: { code: string; score: number; factorValues: (number | null)[] }[];
   /** 有效排序因子（确认卡/卡片展示同源） */
@@ -1320,6 +1326,7 @@ export function assertDailyScreenInput(raw: DailyScreenInput): DailyScreenNormal
     securityIds,
     entryFilters,
     sortFactors: effective.factors,
+    weightFn: assertFunctionSpec(raw.weightFn, 'weightFn'),
     usedDefaultSort: effective.usedDefault,
     maxPositions,
     date,

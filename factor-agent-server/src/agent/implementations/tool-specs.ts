@@ -416,10 +416,20 @@ const RUN_DAILY_SCREEN_SPEC = {
               table: { type: 'string', description: '数据表名' },
               field: { type: 'string', description: '字段名' },
               direction: { type: 'integer', enum: [1, -1], description: '1=值大优（默认）/ -1=值小优' },
-              weight: { type: 'number', description: '权重；全部因子都传才生效（缺省等权 1/N）' },
             },
             required: ['table', 'field', 'direction'],
           },
+        },
+        weightFn: {
+          type: 'object',
+          description:
+            '权重函数（可选，缺省 = 常数比例等权）：与回测排序口径一致，每次选股求值因子权重。可用函数：\n' +
+            describeFunctions('factor-weight'),
+          properties: {
+            name: { type: 'string', description: '函数名，从上方名录选择' },
+            params: { type: 'object', description: '该函数的旋钮参数，结构见名录' },
+          },
+          required: ['name'],
         },
         securityIds: {
           type: 'array',

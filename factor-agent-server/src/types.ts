@@ -82,8 +82,7 @@ export interface StrategySortFactor {
   field: string;
   /** 1=值大优 / -1=值小优 */
   direction: 1 | -1;
-  /** 缺省 = 等权 1/N；加权模式必须全部因子都传 */
-  weight?: number;
+  /** 因子权重由 weightFn 函数每调仓求值（见 core/weight-functions.ts），本结构不承载静态权重 */
 }
 
 export type StrategySellRule =
@@ -121,7 +120,7 @@ export interface StrategyRunConfig {
   /** 大盘择时叠加（结构同 core/timing.ts StrategyTimingOverlay） */
   timingOverlay?: StrategyTimingOverlay;
   /** 权重函数引用（{name, params}，字典见 core/weight-functions.ts；缺省 = constant 等权）。
-   *  与 sortFactors[].weight 互斥——同传 400。引擎运行期经 resolve 绑定为纯函数 */
+   *  缺省 = constant 等权。引擎运行期经 resolve 绑定为纯函数 */
   weightFn?: FunctionSpec;
   /** 仓位函数引用（缺省 = constant 等权金额）。触发模式（rebalanceIntervalDays=0）不支持 */
   positionFn?: FunctionSpec;

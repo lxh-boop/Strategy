@@ -473,6 +473,7 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
    *  过滤/排序口径与回测信号完全一致（同一对纯函数 + 同一广播通道） */
   async runDailyScreen(input: DailyScreenInput): Promise<DailyScreenOutput> {
     const p = assertDailyScreenInput(input);
+    const weightBinding = p.weightFn ? resolveWeightFn(p.weightFn) : null;
     const refs = collectFactorRefs({ entryFilters: p.entryFilters, sortFactors: p.sortFactors, sellRules: [], keepRules: [] });
     assertWhitelist([
       ...refs,
@@ -507,6 +508,10 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
     }
 
     const indexSeriesByKey = await this.loadIndexFilterSeries(p.entryFilters, String(coverage.dates[0] ?? queryDate), String(queryDate));
+    // 与回测排序口径一致：ic_weight 挂载时同样预取滚动 IC
+    const icByFactor = weightBinding?.icWindow
+      ? await this.computeRollingIC(p.sortFactors, queryDate, weightBinding.icWindow)
+      : undefined;
     const sig = await this.crossSectionSignal({
       entryFilters: p.entryFilters,
       sortFactors: p.sortFactors,
@@ -514,6 +519,8 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
       securityIds: p.securityIds,
       indexSeriesByKey,
       day: queryDate,
+      weightFn: weightBinding?.fn,
+      icByFactor,
     });
     const stocks = sig.ranked.slice(0, p.maxPositions).map((r) => ({
       code: r.code,
@@ -526,6 +533,7 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
     );
     return {
       date: queryDate,
+      ...(weightBinding ? { 权重函数: formatFnCall('factor-weight', p.weightFn) } : {}),
       stocks,
       sortFactors: p.sortFactors,
       usedDefaultSort: p.usedDefaultSort,
