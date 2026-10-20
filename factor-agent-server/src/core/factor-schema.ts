@@ -15,6 +15,9 @@ import { IDENT_RE } from './factor-data.service';
 /** 字段字典目录：<项目根>/SQL（dist/core 编译产物向上两级） */
 const SQL_DIR = path.resolve(__dirname, '..', '..', 'SQL');
 
+/** 行业字典目录（字典即路由读取侧，ADR-0004）：SQL/industry/ 下独立 tables.md + <表名>.md */
+const INDUSTRY_DIR = path.join(SQL_DIR, 'industry');
+
 /** 表清单文档：表名白名单来源 */
 const TABLES_DOC = 'tables.md';
 
@@ -27,14 +30,42 @@ const TABLE_HEADING_RE = /^##\s+([A-Za-z_][A-Za-z0-9_]*)/;
 const FIELD_ROW_RE = /^\|\s*\d+\s*\|\s*([A-Za-z_][A-Za-z0-9_]*)\s*\|/;
 
 function readLines(file: string): string[] {
-  return readFileSync(path.join(SQL_DIR, file), 'utf-8').split(/\r?\n/);
+  return readFileSync(file, 'utf-8').split(/\r?\n/);
 }
 
-/** tables.md 中的表名清单（现读，主要用于报错时提示可用表） */
+/** 行业字典登记的表名（SQL/industry/tables.md；现读）。空 = 行业字典缺失/为空 */
+let industryTablesCache: Set<string> | null = null;
+function industryTables(): Set<string> {
+  if (!industryTablesCache) {
+    const names = new Set<string>();
+    try {
+      for (const line of readLines(path.join(INDUSTRY_DIR, TABLES_DOC))) {
+        const m = TABLE_HEADING_RE.exec(line);
+        if (m && IDENT_RE.test(m[1])) names.add(m[1]);
+      }
+    } catch (error) {
+      logger.warn(`行业字典不可读（${(error as Error).message.slice(0, 120)}）: ${path.join(INDUSTRY_DIR, TABLES_DOC)}`);
+    }
+    industryTablesCache = names;
+  }
+  return industryTablesCache;
+}
+
+/** 字典即路由（读取侧）：行业字典登记的表 → SQL/industry/<表名>.md，其余 → SQL/<表名>.md */
+function dictFileFor(table: string): string {
+  return industryTables().has(table) ? path.join(INDUSTRY_DIR, `${table}.md`) : path.join(SQL_DIR, `${table}.md`);
+}
+
+/** 表名清单（现读，根目录字典与行业字典的并集；主要用于报错时提示可用表） */
 export function listKnownTables(): string[] {
+  const root = listRootTables();
+  return [...root, ...[...industryTables()].filter((t) => !root.includes(t))];
+}
+
+function listRootTables(): string[] {
   try {
     const names: string[] = [];
-    for (const line of readLines(TABLES_DOC)) {
+    for (const line of readLines(path.join(SQL_DIR, TABLES_DOC))) {
       const m = TABLE_HEADING_RE.exec(line);
       if (m && IDENT_RE.test(m[1])) names.push(m[1]);
     }
@@ -51,7 +82,7 @@ export function loadTableFields(table: string): Set<string> | undefined {
   if (!listKnownTables().includes(table)) return undefined;
   const fields = new Set<string>();
   try {
-    for (const line of readLines(`${table}.md`)) {
+    for (const line of readLines(dictFileFor(table))) {
       const m = FIELD_ROW_RE.exec(line);
       if (m) fields.add(m[1]);
     }
@@ -98,23 +129,32 @@ export interface FactorTableInfo {
   uniqueKey: string;
 }
 
-/** 表目录：tables.md 全部条目（`## 表名（中文名）` + `- 描述 :` / `- 唯一键 :`） */
+/** 表目录：根目录字典（SQL/tables.md）与行业字典（SQL/industry/tables.md）全部条目的并集 */
 export function loadTableCatalog(): FactorTableInfo[] {
   const catalog: FactorTableInfo[] = [];
+  const seen = new Set<string>();
+  const files = [path.join(SQL_DIR, TABLES_DOC), path.join(INDUSTRY_DIR, TABLES_DOC)];
   try {
-    let current: FactorTableInfo | null = null;
-    for (const line of readLines(TABLES_DOC)) {
-      const heading = /^##\s+([A-Za-z_][A-Za-z0-9_]*)\s*（(.*)）/.exec(line);
-      if (heading) {
-        current = { table: heading[1], title: heading[2].trim(), description: '', uniqueKey: '' };
-        catalog.push(current);
-        continue;
+    for (const file of files) {
+      let current: FactorTableInfo | null = null;
+      for (const line of readLines(file)) {
+        const heading = /^##\s+([A-Za-z_][A-Za-z0-9_]*)\s*（(.*)）/.exec(line);
+        if (heading) {
+          if (!seen.has(heading[1])) {
+            seen.add(heading[1]);
+            current = { table: heading[1], title: heading[2].trim(), description: '', uniqueKey: '' };
+            catalog.push(current);
+          } else {
+            current = catalog.find((c) => c.table === heading[1]) ?? null;
+          }
+          continue;
+        }
+        if (!current) continue;
+        const desc = /^-\s*描述\s*:\s*(.*)$/.exec(line);
+        if (desc) current.description = desc[1].trim();
+        const key = /^-\s*唯一键\s*:\s*(.*)$/.exec(line);
+        if (key) current.uniqueKey = key[1].trim();
       }
-      if (!current) continue;
-      const desc = /^-\s*描述\s*:\s*(.*)$/.exec(line);
-      if (desc) current.description = desc[1].trim();
-      const key = /^-\s*唯一键\s*:\s*(.*)$/.exec(line);
-      if (key) current.uniqueKey = key[1].trim();
     }
   } catch (error) {
     logger.warn(`表清单不可读（${(error as Error).message.slice(0, 120)}）: ${path.join(SQL_DIR, TABLES_DOC)}`);
@@ -123,12 +163,12 @@ export function loadTableCatalog(): FactorTableInfo[] {
 }
 
 /** 指定表的字段明细（字段行第 3~6 列：中文名/类型/可空/描述）。
- *  返回 undefined = 表不在 tables.md 清单里；空数组 = 字典文件缺失。 */
+ *  返回 undefined = 表不在任一字典清单里；空数组 = 清单里有但字典文件缺失。 */
 export function loadTableFieldDetails(table: string): FactorFieldInfo[] | undefined {
   if (!listKnownTables().includes(table)) return undefined;
   const fields: FactorFieldInfo[] = [];
   try {
-    for (const line of readLines(`${table}.md`)) {
+    for (const line of readLines(dictFileFor(table))) {
       if (!FIELD_ROW_RE.test(line)) continue;
       const cells = line.split('|').map((c) => c.trim());
       // | 序号 | 字段名 | 中文名称 | 数据类型 | 可空 | 字段描述 | 备注 | → split 后首尾为空串

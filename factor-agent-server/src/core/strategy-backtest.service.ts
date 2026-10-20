@@ -146,6 +146,8 @@ export interface StrategyBacktestInput {
   weightFn?: unknown;
   /** 仓位函数引用（缺省 = constant 等权金额）。触发模式不支持 */
   positionFn?: unknown;
+  /** 行业筛选：申万 2021 一级行业名列表（数量不设上限）；缺省 = 不筛行业 */
+  industries?: unknown;
   /** 卖出规则（持仓期每日检查） */
   sellRules?: unknown;
   /** 不卖条件（可选）：命中的持仓跳过全部卖出检查（含调仓换出）；择时减仓不受保护 */
@@ -184,6 +186,8 @@ export interface NormalizedStrategyInput {
   weightFn?: FunctionSpec;
   /** 仓位函数引用（缺省 = constant 等权金额；每调仓求值，输出每股目标金额） */
   positionFn?: FunctionSpec;
+  /** 行业筛选（缺省 = 不筛）：调仓日时点归属并集构成股票池，与 securityIds 取交集 */
+  industries?: string[] | null;
   sellRules: StrategySellRule[];
   /** 不卖条件（空数组 = 无） */
   keepRules: StrategyKeepRule[];
@@ -330,6 +334,14 @@ export function assertStrategyInput(raw: StrategyBacktestInput): NormalizedStrat
 
   const parsedWeightFn = assertFunctionSpec(raw.weightFn, 'weightFn');
   const parsedPositionFn = assertFunctionSpec(raw.positionFn, 'positionFn');
+  // 行业筛选：非空字符串数组去重；空数组视为不筛
+  let industries: string[] | null = null;
+  if (Array.isArray(raw.industries)) {
+    industries = [...new Set((raw.industries as unknown[]).map((v) => String(v ?? '').trim()).filter(Boolean))];
+    if (!industries.length) industries = null;
+  } else if (raw.industries !== undefined && raw.industries !== null) {
+    throw new ApiException('INVALID_ARGUMENT', 400, 'industries 必须是行业名字符串数组（如 ["食品饮料"]）');
+  }
 
   // 股票池：缺省/空数组 = 全市场；给了必须全是 000002.XSHE 形态
   let securityIds: string[] | null = null;
@@ -455,6 +467,7 @@ export function assertStrategyInput(raw: StrategyBacktestInput): NormalizedStrat
     sortFactors: assertSortFactors(raw.sortFactors),
     ...(parsedWeightFn ? { weightFn: parsedWeightFn } : {}),
     ...(parsedPositionFn ? { positionFn: parsedPositionFn } : {}),
+    industries,
     sellRules: assertSellRules(raw.sellRules),
     keepRules: assertKeepRules(raw.keepRules),
     excludeRanges: assertExcludeRanges(raw.excludeRanges, startDate, endDate),
@@ -1251,6 +1264,8 @@ export interface DailyScreenInput {
   sortFactors?: unknown;
   /** 权重函数引用（结构同回测 weightFn）：与回测排序口径保持一致；缺省 = 等权 */
   weightFn?: unknown;
+  /** 行业筛选（缺省 = 不筛）：与回测口径一致（调仓日时点归属并集） */
+  industries?: unknown;
   /** 入选只数，默认 10 */
   maxPositions?: unknown;
   /** 查询日（纯数字 YYYYMMDD）；缺省 = 数据表内最近交易日 */
@@ -1264,6 +1279,7 @@ export interface DailyScreenNormalized {
   sortFactors: StrategySortFactor[];
   /** 权重函数（缺省 = 等权；与回测排序口径一致） */
   weightFn?: FunctionSpec;
+  industries: string[] | null;
   usedDefaultSort: boolean;
   maxPositions: number;
   /** YYYYMMDD 纯数字；未传为 null（由实现层解析最近交易日） */
@@ -1280,6 +1296,8 @@ export interface DailyScreenOutput {
   stocks: { code: string; score: number; factorValues: (number | null)[] }[];
   /** 有效排序因子（确认卡/卡片展示同源） */
   sortFactors: StrategySortFactor[];
+  /** 行业筛选展示（未传 = 不筛） */
+  industries?: string[] | null;
   usedDefaultSort: boolean;
   /** 过滤条件（展示同源） */
   entryFilters: StrategyFilterRule[];
@@ -1327,6 +1345,11 @@ export function assertDailyScreenInput(raw: DailyScreenInput): DailyScreenNormal
     entryFilters,
     sortFactors: effective.factors,
     weightFn: assertFunctionSpec(raw.weightFn, 'weightFn'),
+    industries: ((): string[] | null => {
+      if (!Array.isArray(raw.industries)) return null;
+      const list = [...new Set((raw.industries as unknown[]).map((v) => String(v ?? '').trim()).filter(Boolean))];
+      return list.length ? list : null;
+    })(),
     usedDefaultSort: effective.usedDefault,
     maxPositions,
     date,

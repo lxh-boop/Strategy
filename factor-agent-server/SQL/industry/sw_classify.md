@@ -1,7 +1,7 @@
-# sw2021_classify（申万行业分类）字段描述
+# sw_classify（申万行业分类）字段描述
 
 > 来源：Tushare Pro 接口 index_classify（参数 src=SW2021）实测下载（2026-10-17），字段描述按接口实际返回列整理，非通联字典原文。
-> 表级说明见 [tables.md](tables.md)；数据文件 [sw2021_classify.csv](sw2021_classify.csv)。
+> 表级说明见 [tables.md](tables.md)；数据文件 [sw2021_classify.csv](sw2021_classify.csv)（表名 = DuckDB 库表名）。
 
 **表描述**：申万 2021 行业分类标准全层级目录，覆盖一级、二级、三级共 511 个行业节点，经 parent_code 逐级挂接。
 
@@ -19,5 +19,5 @@
 
 ## 备注说明
 
-- 注1：index_code 与成分表（sw_member_current / sw_member_historical）的 l1_code / l2_code / l3_code 同口径。
+- 注1：index_code 与成分表（sw_member）的 l1_code / l2_code / l3_code 同口径。
 - 注2：L1 共 31 个，自顶向下展开 L2、L3。

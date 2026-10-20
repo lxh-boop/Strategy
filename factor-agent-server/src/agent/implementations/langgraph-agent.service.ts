@@ -23,6 +23,12 @@ import {
   StrategyBacktestInput,
   StrategyBacktestService,
 } from '../../core/strategy-backtest.service';
+import {
+  INDUSTRY_TABLES,
+  industryClarificationGuide,
+  industryReadTable,
+  resolveIndustrySecurities,
+} from '../../core/industry-engine';
 import { formatFnCall } from '../../core/weight-functions';
 import { assertAnalysisParams, FactorAnalysisService, FactorCorrelationInput, RankAnalysisInput } from '../../core/factor-analysis.service';
 import { describeTimingOverlay } from '../../core/timing';
@@ -621,6 +627,23 @@ export class LangGraphAgentService extends AgentService {
       };
     }
 
+    // 行业字典登记的表路由到引擎 B（DuckDB）：同一查表契约，GLM 无感（字典即路由读取侧）
+    if ((INDUSTRY_TABLES as readonly string[]).includes(table)) {
+      const industryRows = await industryReadTable({ table, fields, date, security });
+      if (!industryRows.length) {
+        return {
+          ok: true,
+          数据: [],
+          提示: `查询成功但无数据行：${table} 中 ${security || '（未指定证券）'} 在 ${date} 可能没有记录，请如实告知用户，不要编造`,
+        };
+      }
+      return {
+        ok: true,
+        数据: industryRows,
+        提示: '请据此用不超过 90 字写最终回复，只能引用返回数据，不要编造，不输出 JSON',
+      };
+    }
+
     // 异常交给 guard()：ApiException（格式/白名单/连接错误）原样把 message 给模型，便于它自行纠正
     const rows = await this.factorData.readTable({ table, fields, date, security });
     if (!rows.length) {
@@ -684,6 +707,13 @@ export class LangGraphAgentService extends AgentService {
             卖出规则: describeSellRules(p.sellRules),
             ...(p.weightFn ? { 权重函数: formatFnCall('factor-weight', p.weightFn) } : {}),
             ...(p.positionFn ? { 仓位函数: formatFnCall('position', p.positionFn) } : {}),
+            ...(p.industries?.length
+              ? {
+                  行业筛选: `${p.industries.join('、')}（候选 ${
+                    (await resolveIndustrySecurities(p.industries, Number(p.startDate))).securities.length
+                  } 只，按调仓日时点归属）`,
+                }
+              : {}),
             ...(p.keepRules.length ? { 不卖条件: describeKeepRules(p.keepRules) } : {}),
             ...(p.excludeRanges.length ? { 排除时间段: describeExcludeRanges(p.excludeRanges) } : {}),
             ...(p.timingOverlay ? { 择时规则: describeTimingOverlay(p.timingOverlay) } : {}),

@@ -1,26 +1,20 @@
 # 行业板块数据字典 —— 表描述
 
 > 来源：Tushare Pro 接口实测下载（2026-10-17），字段描述按接口实际返回列整理，非通联字典原文。
-> 字段级说明见 [sw2021_classify.md](sw2021_classify.md)、[sw_member_current.md](sw_member_current.md)、[sw_member_historical.md](sw_member_historical.md)、[stock_industry.md](stock_industry.md)、[dc_board_index.md](dc_board_index.md) 与 [dc_board_list.md](dc_board_list.md)。
+> 字段级说明见 [sw_classify.md](sw_classify.md)、[sw_member.md](sw_member.md)、[stock_industry.md](stock_industry.md)、[dc_board_index.md](dc_board_index.md) 与 [dc_board_list.md](dc_board_list.md)。
 > 刷新方式：`TUSHARE_TOKEN=<你的token> node download-industry.mjs`（token 仅走环境变量）。
 
-## sw2021_classify（申万行业分类）
+## sw_classify（申万行业分类）
 
-- 描述 : 申万 2021 行业分类标准全层级目录，覆盖一级、二级、三级共 511 个行业节点，经 parent_code 逐级挂接。
+- 描述 : 申万 2021 行业分类标准全层级目录，覆盖一级、二级、三级共 511 个行业节点，经 parent_code 逐级挂接。一级行业共 31 个：交通运输、传媒、公用事业、农林牧渔、医药生物、商贸零售、国防军工、基础化工、家用电器、建筑材料、建筑装饰、房地产、有色金属、机械设备、汽车、煤炭、环保、电力设备、电子、石油石化、社会服务、纺织服饰、综合、美容护理、计算机、轻工制造、通信、钢铁、银行、非银金融、食品饮料。
 - 唯一键 : index_code
 - 数据文件 : sw2021_classify.csv
 
-## sw_member_current（申万行业成分·在册）
+## sw_member（申万行业成分）
 
-- 描述 : 当前在册的个股申万行业归属，一、二、三级行业编码与名称齐全，5918 行；in_date 为纳入日期，out_date 为空。
-- 唯一键 : ts_code
-- 数据文件 : sw_member_current.csv
-
-## sw_member_historical（申万行业成分·已调出）
-
-- 描述 : 已调出申万行业成分的历史记录，字段与在册表一致，2006 行；in_date 与 out_date 齐全，与在册表合并可按调仓日重建时点行业归属（PIT）。
+- 描述 : 个股申万行业归属的全量进出记录（在册 5918 行 is_new=Y + 已调出 2006 行 is_new=N），一、二、三级行业编码与名称齐全，in_date/out_date 支持 PIT 时点归属。行业筛选引擎的消费表。
 - 唯一键 : ts_code,in_date,out_date
-- 数据文件 : sw_member_historical.csv
+- 数据文件 : sw_member_current.csv + sw_member_historical.csv（导入时合并）
 
 ## stock_industry（个股基础信息）
 

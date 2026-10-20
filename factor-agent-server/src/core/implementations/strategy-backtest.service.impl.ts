@@ -8,6 +8,7 @@ import {
   validatePositionAmounts,
   WeightFn,
 } from '../weight-functions';
+import { industryClarificationGuide, resolveIndustrySecurities } from '../industry-engine';
 
 import { ApiException } from '../../common/api.exception';
 import {
@@ -44,6 +45,7 @@ import {
   NormalizedStrategyInput,
   rankUniverse,
   StrategyAggregate,
+  ClarificationSignal,
   StrategyBacktestInput,
   StrategyBacktestOutput,
   StrategyBacktestService,
@@ -147,12 +149,22 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
 
   async runStrategyBacktest(input: StrategyBacktestInput, onProgress?: AgentProgressSink): Promise<StrategyBacktestOutput> {
     const p = assertStrategyInput(input);
-    if (p.rebalanceIntervalDays === 0 && (p.weightFn || p.positionFn)) {
-      throw new ApiException('INVALID_ARGUMENT', 400, '触发模式（模型 Ⅱ）暂不支持权重/仓位函数，请改用定期调仓模式');
+    if (p.rebalanceIntervalDays === 0 && (p.weightFn || p.positionFn || (p.industries?.length ?? 0) > 0)) {
+      throw new ApiException(
+        'INVALID_ARGUMENT',
+        400,
+        '触发模式（模型 Ⅱ）暂不支持权重/仓位函数与行业筛选，请改用定期调仓模式',
+      );
+    }
+    // 行业名校验：未知行业 → 澄清信号附名录（模型自纠后重发）
+    if (p.industries?.length) {
+      const { unknown } = await resolveIndustrySecurities(p.industries, Number(p.startDate));
+      if (unknown.length) throw new ClarificationSignal(await industryClarificationGuide(unknown));
     }
     // 函数解析（边界上一次）：未知函数名 → 400 附名录；参数不合法 → ClarificationSignal 引导模型修正
     const weightBinding = p.weightFn ? resolveWeightFn(p.weightFn) : null;
     const positionBinding = p.positionFn ? resolvePositionFn(p.positionFn) : null;
+    const industries = p.industries ?? [];
     // 触发模式（rebalanceIntervalDays=0）路由到模型 Ⅱ 独立引擎
     if (p.rebalanceIntervalDays === 0) {
       if (!this.triggerEngine) {
@@ -226,11 +238,17 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
               ).map((r) => [r.securityId, r.value]),
             )
           : undefined;
+        // 行业筛选（PIT）：决策日 D 的时点归属并集，与显式股票池取交集
+        const dayPool = industries.length
+          ? (await resolveIndustrySecurities(industries, day)).securities.filter(
+              (c) => !p.securityIds || p.securityIds.includes(c),
+            )
+          : p.securityIds;
         const sig = await this.crossSectionSignal({
           entryFilters: p.entryFilters,
           sortFactors: sortFactors.factors,
           refs,
-          securityIds: p.securityIds,
+          securityIds: dayPool,
           indexSeriesByKey,
           day,
           weightFn: weightBinding?.fn,
@@ -474,6 +492,7 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
   async runDailyScreen(input: DailyScreenInput): Promise<DailyScreenOutput> {
     const p = assertDailyScreenInput(input);
     const weightBinding = p.weightFn ? resolveWeightFn(p.weightFn) : null;
+    const industries = p.industries ?? [];
     const refs = collectFactorRefs({ entryFilters: p.entryFilters, sortFactors: p.sortFactors, sellRules: [], keepRules: [] });
     assertWhitelist([
       ...refs,
@@ -512,11 +531,21 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
     const icByFactor = weightBinding?.icWindow
       ? await this.computeRollingIC(p.sortFactors, queryDate, weightBinding.icWindow)
       : undefined;
+    // 行业筛选（PIT）：查询日的时点归属并集，与显式股票池取交集；未知行业 → 澄清附名录
+    if (industries.length) {
+      const { unknown } = await resolveIndustrySecurities(industries, queryDate);
+      if (unknown.length) throw new ClarificationSignal(await industryClarificationGuide(unknown));
+    }
+    const industryPool = industries.length
+      ? (await resolveIndustrySecurities(industries, queryDate)).securities.filter(
+          (c) => !p.securityIds || p.securityIds.includes(c),
+        )
+      : p.securityIds;
     const sig = await this.crossSectionSignal({
       entryFilters: p.entryFilters,
       sortFactors: p.sortFactors,
       refs,
-      securityIds: p.securityIds,
+      securityIds: industryPool,
       indexSeriesByKey,
       day: queryDate,
       weightFn: weightBinding?.fn,
