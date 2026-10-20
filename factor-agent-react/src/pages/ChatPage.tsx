@@ -1,28 +1,16 @@
 import { useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
-import type { AgentCard, BacktestCard, ChatMessage, Conversation, MetricItem } from "../types";
+import type { AgentCard, BacktestCard, ChatMessage, Conversation } from "../types";
 import { CHAT_SUGGESTIONS } from "../data/mock";
-import { fmtConvDate } from "../utils/format";
+import { fmtYmd, fmtConvDate } from "../utils/format";
 import { IcChart, PerfChart, Sparkline } from "../components/charts";
-import { ConfirmModal, Modal, ParamsBlock } from "../components/ui";
+import { ConfirmModal, MetricGrid, Modal, ParamsBlock } from "../components/ui";
+import { PeriodHoldingsTable } from "../components/HoldingsTable";
 import { MiniMarkdown } from "../components/markdown";
 import { IconClose, IconLogo, IconPlus, IconSend, IconStop } from "../components/icons";
 import type { ConfirmGatePending } from "../hooks/useConversations";
 
 /* ----- 智能体卡片 ----- */
-
-function MetricGrid({ metrics }: { metrics: MetricItem[] }) {
-  return (
-    <div className="backtest-grid">
-      {metrics.map(m => (
-        <div className="bt-item" key={m.label}>
-          <div className="bt-label">{m.label}</div>
-          <div className={`bt-val ${m.cls ?? ""}`}>{m.value}</div>
-        </div>
-      ))}
-    </div>
-  );
-}
 
 /* 收益视图切换按钮（分段累计 / 多空净值）的内联样式 */
 const viewBtnStyle = (active: boolean): CSSProperties => ({
@@ -114,7 +102,7 @@ function AgentCardView({ card, saved, onSaveBacktest, onAskOptimize, onGotoStrat
         {latestPeriod && (
           <div style={{ marginTop: 12 }}>
             <div className="btp-title">
-              最近一期持仓（第 {latestPeriod.seq} 期 · {String(latestPeriod.startDate).replace(/^(\d{4})(\d{2})(\d{2})$/, "$1-$2-$3")} ~ {String(latestPeriod.endDate).replace(/^(\d{4})(\d{2})(\d{2})$/, "$1-$2-$3")}）
+              最近一期持仓（第 {latestPeriod.seq} 期 · {fmtYmd(latestPeriod.startDate)} ~ {fmtYmd(latestPeriod.endDate)}）
             </div>
             <div className="trade-scroll">
               <table className="mini-table">
@@ -149,7 +137,7 @@ function AgentCardView({ card, saved, onSaveBacktest, onAskOptimize, onGotoStrat
                     <tbody>
                       {card.latestOrders.map((t, i) => (
                         <tr key={i}>
-                          <td>{String(t.date).replace(/^(\d{4})(\d{2})(\d{2})$/, "$1-$2-$3")}</td>
+                          <td>{fmtYmd(t.date)}</td>
                           <td>{t.code}</td>
                           <td className={t.direction === "buy" ? "up" : "down"}>{t.direction === "buy" ? "买入" : "卖出"}</td>
                           <td className="num">{t.shares.toLocaleString("zh-CN")}</td>
@@ -293,7 +281,7 @@ function AgentCardView({ card, saved, onSaveBacktest, onAskOptimize, onGotoStrat
     body = (
       <>
         <div className="agent-card-text">
-          {String(card.date).replace(/^(\d{4})(\d{2})(\d{2})$/, "$1-$2-$3")} · 过滤前 {card.rawPoolSize} 只 →
+          {fmtYmd(card.date)} · 过滤前 {card.rawPoolSize} 只 →
           条件存活 {card.survivedCount} 只 · 入选前 {card.stocks.length} 只
           {card.usedDefaultSort ? " · 排序缺省（默认 20 日动量，值大优）" : ""}
         </div>

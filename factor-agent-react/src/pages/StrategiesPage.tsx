@@ -4,6 +4,8 @@ import { useConfig } from "../config";
 import { fmtPct, upDownCls } from "../utils/format";
 import { PerfChart, Sparkline } from "../components/charts";
 import { ConfirmModal, MetricGrid, Modal, ParamsBlock } from "../components/ui";
+import { PeriodHoldingsTable } from "../components/HoldingsTable";
+import { fmtYmd } from "../utils/format";
 import { IconClose, IconInfo, IconLogo, IconPlay, IconPlus, IconTrash } from "../components/icons";
 
 const STATUS: Record<Strategy["status"], { cls: string; text: string }> = {
@@ -13,7 +15,6 @@ const STATUS: Record<Strategy["status"], { cls: string; text: string }> = {
 };
 
 /* 交易日 YYYYMMDD → 展示 YYYY-MM-DD（引擎产出的明细日期口径） */
-const fmtYmd = (n: number) => String(n).replace(/^(\d{4})(\d{2})(\d{2})$/, "$1-$2-$3");
 
 /* 策略详情的回测参数口径：优先引擎产出的 params（与对话卡片同源）；
    旧策略无 params 时从存储的 backtestConfig 推导基础项（完整排序/过滤/卖出口径以重新回测后为准） */
@@ -128,26 +129,7 @@ function HistoryPanel({ kind, s, onClose }: {
         periods.length ? periods.map(p => (
           <div key={p.seq} style={{ marginBottom: 12 }}>
             <div className="agent-card-text">第 {p.seq} 期（{fmtYmd(p.startDate)} ~ {fmtYmd(p.endDate)}）</div>
-            <div className="trade-scroll">
-              <table className="mini-table">
-                <thead>
-                  <tr><th>证券</th><th className="num">股数</th><th className="num">期末收盘</th>
-                    <th className="num">进入价格</th><th className="num">期间收益%</th><th className="num">权重%</th></tr>
-                </thead>
-                <tbody>
-                  {p.holdings.map(h => (
-                    <tr key={h.code}>
-                      <td>{h.code}</td>
-                      <td className="num">{h.shares.toLocaleString("zh-CN")}</td>
-                      <td className="num">{h.closePrice}</td>
-                      <td className="num">{h.entryPrice}</td>
-                      <td className={`num ${h.periodReturnPct >= 0 ? "up" : "down"}`}>{h.periodReturnPct > 0 ? "+" : ""}{h.periodReturnPct}%</td>
-                      <td className="num">{h.weightPct}%</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            <PeriodHoldingsTable holdings={p.holdings} />
           </div>
         )) : (
           <div className="agent-card-text">暂无逐期持仓明细；点击「重新回测」按真引擎口径生成。</div>
@@ -297,26 +279,7 @@ function StrategyDetailCard({ s, historyView, onShowHistory, onClose, onRebackte
             </div>
           </div>
           {latestPeriod ? (
-            <div className="trade-scroll">
-              <table className="mini-table">
-                <thead>
-                  <tr><th>证券</th><th className="num">股数</th><th className="num">期末收盘</th>
-                    <th className="num">进入价格</th><th className="num">期间收益%</th><th className="num">权重%</th></tr>
-                </thead>
-                <tbody>
-                  {latestPeriod.holdings.map(h => (
-                    <tr key={h.code}>
-                      <td>{h.code}</td>
-                      <td className="num">{h.shares.toLocaleString("zh-CN")}</td>
-                      <td className="num">{h.closePrice}</td>
-                      <td className="num">{h.entryPrice}</td>
-                      <td className={`num ${h.periodReturnPct >= 0 ? "up" : "down"}`}>{h.periodReturnPct > 0 ? "+" : ""}{h.periodReturnPct}%</td>
-                      <td className="num">{h.weightPct}%</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            <PeriodHoldingsTable holdings={latestPeriod.holdings} />
           ) : s.holdings.length ? (
             <table className="mini-table">
               <thead>
