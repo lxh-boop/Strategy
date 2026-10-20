@@ -44,8 +44,9 @@ export class ConversationsController {
   }
 
   /** 发消息（流式）：过程事件以 text/event-stream 推送（节点级，非推理流式）。
-   *  事件序列 = start → tool_call/tool_result* → final（携带与 POST /:id/messages
-   *  完全相同的响应体）→ 连接结束；失败以 error 事件收尾。
+   *  事件序列 = start → tool_call/tool_result* → confirm_pending?（确认门挂起时，
+   *  先于 final 到达）→ final（携带与 POST /:id/messages 完全相同的响应体）→ 连接结束；
+   *  失败以 error 事件收尾。
    *  HTTP 恒 200（开流后状态码不可改），错误一律走 error 事件；
    *  EventSource 不支持 POST，前端用 fetch 读流；中途断开不影响最终落库。 */
   @Post(':id/chat/stream')

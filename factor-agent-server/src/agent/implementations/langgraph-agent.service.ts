@@ -445,7 +445,7 @@ export class LangGraphAgentService extends AgentService {
         },
         { configurable: { thread_id: threadId, onProgress }, recursionLimit: 15 },
       );
-      return this.collectReply(state, conversation.id, threadId);
+      return this.collectReply(state, conversation.id, threadId, onProgress);
     } catch (error) {
       const reply = this.errorReply(error, conversation.id);
       onProgress?.({ type: 'error', message: reply.text });
@@ -484,11 +484,17 @@ export class LangGraphAgentService extends AgentService {
       configurable: { thread_id: threadId, onProgress },
       recursionLimit: 15,
     });
-    return this.collectReply(state, conversation.id, threadId);
+    return this.collectReply(state, conversation.id, threadId, onProgress);
   }
 
-  /** invoke 结果收尾：中断 → 记挂起映射、返回参数确认文案；正常 → 卡片择优出回复并清挂起映射 */
-  private collectReply(state: StrategyGraphStateType, conversationId: string, threadId: string): AgentReply {
+  /** invoke 结果收尾：中断 → 记挂起映射、发 confirm_pending 过程事件（前端据此弹确认窗）、
+   *  返回参数确认文案；正常 → 卡片择优出回复并清挂起映射 */
+  private collectReply(
+    state: StrategyGraphStateType,
+    conversationId: string,
+    threadId: string,
+    onProgress?: AgentProgressSink,
+  ): AgentReply {
     const interrupted = (
       state as { __interrupt__?: Array<{ value: { type?: string; params?: Record<string, string> } }> }
     ).__interrupt__;
@@ -497,6 +503,7 @@ export class LangGraphAgentService extends AgentService {
       const value = interrupted[0]?.value ?? {};
       const params = value.params ?? {};
       const kind = value.type === 'confirm_analysis' ? 'analysis' : 'backtest';
+      onProgress?.({ type: 'confirm_pending', kind, params });
       this.logger.log(`确认挂起(${kind}) 会话=${conversationId} thread=${threadId} 参数=${toLogPreview(params)}`);
       appendConversationLog(conversationId, `确认挂起(${kind}): ${toLogPreview(params)}`);
       return { text: formatConfirmText(params, kind) };

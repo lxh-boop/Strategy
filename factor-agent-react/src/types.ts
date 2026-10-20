@@ -272,12 +272,15 @@ export interface Conversation {
 /* ----- 发消息流式过程事件（SSE 节点级推送，契约 §3.1 chat/stream） -----
    粒度 = 工具调用的开始与结果，不做 token 级推理流式；
    stage 为工具中文名（可直接展示），最终回复以 final 事件为准；
-   keepalive 为链路保活帧（无内容语义），api 层照常喂空闲看门狗、hook 不消费 */
+   keepalive 为链路保活帧（无内容语义），api 层照常喂空闲看门狗、hook 不消费；
+   confirm_pending = 确认门挂起（先于 final 到达），是弹参数确认窗的唯一依据——
+   一次性事件不做历史恢复，刷新后不弹 */
 export type ChatProgressEvent =
   | { type: "start" }
   | { type: "keepalive" }
   | { type: "tool_call"; name: string; stage: string; args: string }
-  | { type: "tool_result"; name: string; stage: string; ok: boolean; detail: string };
+  | { type: "tool_result"; name: string; stage: string; ok: boolean; detail: string }
+  | { type: "confirm_pending"; kind: "backtest" | "analysis"; params: Record<string, string> };
 
 /* ----- 策略 ----- */
 export type StrategyStatus = "running" | "done" | "draft";

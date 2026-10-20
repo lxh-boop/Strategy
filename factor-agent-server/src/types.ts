@@ -246,6 +246,9 @@ export type AgentProgressEvent =
   | { type: 'keepalive' }
   | { type: 'tool_call'; name: string; stage: string; args: string }
   | { type: 'tool_result'; name: string; stage: string; ok: boolean; detail: string }
+  /** 确认门挂起：confirm 节点 interrupt 等待用户决策（前端据此弹参数确认窗；
+   *  一次性事件、不做历史恢复——刷新后不弹，历史里的确认提案只是普通消息） */
+  | { type: 'confirm_pending'; kind: 'backtest' | 'analysis'; params: Record<string, string> }
   | { type: 'error'; message: string };
 
 /** 过程事件接收端（conversations 层写 SSE 用） */
