@@ -143,6 +143,10 @@ export interface StrategyBacktestInput {
   entryFilters?: unknown;
   /** 排序因子（缺省 = 默认 20 日动量·值大优，弹窗如实展示） */
   sortFactors?: unknown;
+  /** 权重函数引用（{name, params}；缺省 = constant 等权）。与 sortFactors[].weight 互斥 */
+  weightFn?: unknown;
+  /** 仓位函数引用（缺省 = constant 等权金额）。触发模式不支持 */
+  positionFn?: unknown;
   /** 卖出规则（持仓期每日检查） */
   sellRules?: unknown;
   /** 不卖条件（可选）：命中的持仓跳过全部卖出检查（含调仓换出）；择时减仓不受保护 */
@@ -158,6 +162,9 @@ export interface StrategyBacktestInput {
 }
 
 /** 归一化后的合法入参 */
+import { assertFunctionSpec } from './weight-functions';
+import type { FunctionSpec } from '../types';
+
 export interface NormalizedStrategyInput {
   /** null = 全市场 */
   securityIds: string[] | null;
@@ -174,6 +181,10 @@ export interface NormalizedStrategyInput {
   minPositionPct: number;
   entryFilters: StrategyFilterRule[];
   sortFactors: StrategySortFactor[];
+  /** 权重函数引用（缺省 = constant 等权；每调仓求值，替代静态 weight 列） */
+  weightFn?: FunctionSpec;
+  /** 仓位函数引用（缺省 = constant 等权金额；每调仓求值，输出每股目标金额） */
+  positionFn?: FunctionSpec;
   sellRules: StrategySellRule[];
   /** 不卖条件（空数组 = 无） */
   keepRules: StrategyKeepRule[];
@@ -318,6 +329,17 @@ export function assertStrategyInput(raw: StrategyBacktestInput): NormalizedStrat
     throw new ApiException('INVALID_ARGUMENT', 400, `回测区间非法：startDate/endDate 须为纯数字 YYYYMMDD 且 start 早于 end，当前 ${startDate} ~ ${endDate}`);
   }
 
+  const parsedWeightFn = assertFunctionSpec(raw.weightFn, 'weightFn');
+  const parsedPositionFn = assertFunctionSpec(raw.positionFn, 'positionFn');
+  const parsedSortFactors = assertSortFactors(raw.sortFactors);
+  if (parsedWeightFn && parsedSortFactors.some((f) => f.weight !== undefined)) {
+    throw new ApiException(
+      'INVALID_ARGUMENT',
+      400,
+      'weightFn 与 sortFactors[].weight 不可同时使用：静态权重列已内化为 constant_weights 函数，请二选一',
+    );
+  }
+
   // 股票池：缺省/空数组 = 全市场；给了必须全是 000002.XSHE 形态
   let securityIds: string[] | null = null;
   if (raw.securityIds !== undefined && raw.securityIds !== null && raw.securityIds !== '') {
@@ -439,7 +461,9 @@ export function assertStrategyInput(raw: StrategyBacktestInput): NormalizedStrat
     idealPositionPct,
     minPositionPct,
     entryFilters: assertFilters(raw.entryFilters),
-    sortFactors: assertSortFactors(raw.sortFactors),
+    sortFactors: parsedSortFactors,
+    ...(parsedWeightFn ? { weightFn: parsedWeightFn } : {}),
+    ...(parsedPositionFn ? { positionFn: parsedPositionFn } : {}),
     sellRules: assertSellRules(raw.sellRules),
     keepRules: assertKeepRules(raw.keepRules),
     excludeRanges: assertExcludeRanges(raw.excludeRanges, startDate, endDate),

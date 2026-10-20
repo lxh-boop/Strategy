@@ -7,6 +7,8 @@
    这里写的约束是给模型看的行为指引，服务端校验不依赖本文件。
    ========================================================== */
 
+import { describeFunctions } from '../../core/weight-functions';
+
 /** 工具 1：列出全部可用数据表（tables.md 目录）。表目录通常已注入 system prompt，本工具仅作兜底 */
 export const LIST_FACTOR_TABLES_SPEC = {
   type: 'function' as const,
@@ -172,18 +174,40 @@ export const RUN_STRATEGY_BACKTEST_SPEC = {
           maxItems: 10,
           description:
             '排序因子：各因子截面分位数标准化（0~100）后加权合成综合分，按综合分降序取前 maxPositions。' +
-            '缺省 = 引擎自动用默认排序因子（20 日动量 REVS20，值大优）。weight 全省略 = 等权 1/N；' +
-            '需要加权时必须给全部因子传 weight（按总和归一化），不支持只传部分',
+            '缺省 = 引擎自动用默认排序因子（20 日动量 REVS20，值大优）。' +
+            '需要自定义因子权重时不要在这里传权重，改用 weightFn 函数参数',
           items: {
             type: 'object',
             properties: {
               table: { type: 'string', description: '数据表名，来自系统提示中的表目录' },
               field: { type: 'string', description: '字段名，来自 list_factor_fields 的返回' },
               direction: { type: 'integer', enum: [1, -1], description: '排序方向：1=值大优（默认，如动量）/ -1=值小优（如低估值）' },
-              weight: { type: 'number', description: '权重；全部因子都传才生效（缺省等权 1/N）' },
             },
             required: ['table', 'field', 'direction'],
           },
+        },
+        weightFn: {
+          type: 'object',
+          description:
+            '权重函数（可选，缺省 = 常数比例等权）：每次调仓求值各排序因子的权重，因子截面由引擎供给，只需给函数名与旋钮参数。可用函数：\n' +
+            describeFunctions('factor-weight'),
+          properties: {
+            name: { type: 'string', description: '函数名，从上方名录中选择' },
+            params: { type: 'object', description: '该函数的旋钮参数，结构见名录' },
+          },
+          required: ['name'],
+        },
+        positionFn: {
+          type: 'object',
+          description:
+            '仓位函数（可选，缺省 = 常数比例等权）：每次调仓输出各候选股的目标买入金额（整手/现金由校验器修正）。' +
+            '注意"指数级均线定总仓位"属于大盘择时，不要用仓位函数表达。可用函数：\n' +
+            describeFunctions('position'),
+          properties: {
+            name: { type: 'string', description: '函数名，从上方名录中选择' },
+            params: { type: 'object', description: '该函数的旋钮参数，结构见名录' },
+          },
+          required: ['name'],
         },
         sellRules: {
           type: 'array',

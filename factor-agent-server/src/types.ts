@@ -120,6 +120,17 @@ export interface StrategyRunConfig {
   benchmark?: 'hs300' | 'csi500' | 'sse';
   /** 大盘择时叠加（结构同 core/timing.ts StrategyTimingOverlay） */
   timingOverlay?: StrategyTimingOverlay;
+  /** 权重函数引用（{name, params}，字典见 core/weight-functions.ts；缺省 = constant 等权）。
+   *  与 sortFactors[].weight 互斥——同传 400。引擎运行期经 resolve 绑定为纯函数 */
+  weightFn?: FunctionSpec;
+  /** 仓位函数引用（缺省 = constant 等权金额）。触发模式（rebalanceIntervalDays=0）不支持 */
+  positionFn?: FunctionSpec;
+}
+
+/** 函数引用：统一函数字典条目的名称 + 策略旋钮参数（序列化形态，可持久化） */
+export interface FunctionSpec {
+  name: string;
+  params?: Record<string, unknown>;
 }
 
 /** 回测交易明细（日频事件内核产出；卡片截最近若干笔） */

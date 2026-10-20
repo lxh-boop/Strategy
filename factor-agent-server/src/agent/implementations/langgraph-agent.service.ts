@@ -23,6 +23,7 @@ import {
   StrategyBacktestInput,
   StrategyBacktestService,
 } from '../../core/strategy-backtest.service';
+import { formatFnCall } from '../../core/weight-functions';
 import { assertAnalysisParams, FactorAnalysisService, FactorCorrelationInput, RankAnalysisInput } from '../../core/factor-analysis.service';
 import { describeTimingOverlay } from '../../core/timing';
 import { FactorDataService } from '../../core/factor-data.service';
@@ -681,6 +682,8 @@ export class LangGraphAgentService extends AgentService {
             排序因子: describeSortFactors(sort.factors) + (sort.usedDefault ? '【默认追加】' : ''),
             过滤因子: describeFilters(p.entryFilters),
             卖出规则: describeSellRules(p.sellRules),
+            ...(p.weightFn ? { 权重函数: formatFnCall('factor-weight', p.weightFn) } : {}),
+            ...(p.positionFn ? { 仓位函数: formatFnCall('position', p.positionFn) } : {}),
             ...(p.keepRules.length ? { 不卖条件: describeKeepRules(p.keepRules) } : {}),
             ...(p.excludeRanges.length ? { 排除时间段: describeExcludeRanges(p.excludeRanges) } : {}),
             ...(p.timingOverlay ? { 择时规则: describeTimingOverlay(p.timingOverlay) } : {}),
