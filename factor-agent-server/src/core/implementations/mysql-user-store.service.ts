@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { createPool, Pool, PoolConnection } from 'mysql2/promise';
 import { ApiException } from '../../common/api.exception';
 import {
+  PoolRefRow,
   SettingKey,
   UserRow,
   UserSettingsRow,
@@ -466,5 +467,27 @@ export class MysqlUserStoreService extends UserStoreService {
     } finally {
       conn.release();
     }
+  }
+
+  /* ----- 池句柄（ADR-0006，会话维度） ----- */
+
+  async savePoolRef(ref: { id: string; conversationId: string; spec: unknown; summary: string; memberCount: number }): Promise<void> {
+    await this.exec(
+      'INSERT INTO pool_refs (id, conversation_id, spec_json, summary, member_count) VALUES (?, ?, ?, ?, ?)',
+      [ref.id, ref.conversationId, JSON.stringify(ref.spec), ref.summary, ref.memberCount],
+      '保存池句柄失败',
+    );
+  }
+
+  async findPoolRef(id: string): Promise<PoolRefRow | undefined> {
+    const rows = await this.selectRows<{ id: string; conversation_id: string; spec_json: unknown; summary: string; member_count: number; created_at: string }>(
+      'SELECT id, conversation_id, spec_json, summary, member_count, created_at FROM pool_refs WHERE id = ? LIMIT 1',
+      [id],
+      '查询池句柄失败',
+    );
+    const r = rows[0];
+    return r
+      ? { id: r.id, conversationId: r.conversation_id, spec: r.spec_json, summary: r.summary, memberCount: Number(r.member_count), createdAt: String(r.created_at) }
+      : undefined;
   }
 }

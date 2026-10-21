@@ -8,7 +8,7 @@ import { IDENT_RE } from '../../src/core/factor-data.service';
 
 describe('factor-schema（SQL 字段字典解析）', () => {
   describe('listKnownTables（表名白名单）', () => {
-    it('返回根目录字典与行业字典并集（11 张通联表 + 5 张行业表）', () => {
+    it('返回根目录字典与行业字典并集（11 张通联表 + 6 张行业表，idx_member 为池筛选消费表）', () => {
       expect(listKnownTables()).toEqual([
         'equ_factor_cf',
         'equ_factor_derive',
@@ -26,6 +26,7 @@ describe('factor-schema（SQL 字段字典解析）', () => {
         'stock_industry',
         'dc_board_index',
         'dc_board_list',
+        'idx_member',
       ]);
     });
   });

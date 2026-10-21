@@ -124,9 +124,9 @@ export interface StrategyRunConfig {
   weightFn?: FunctionSpec;
   /** 仓位函数引用（缺省 = constant 等权金额）。触发模式（rebalanceIntervalDays=0）不支持 */
   positionFn?: FunctionSpec;
-  /** 行业筛选：申万 2021 一级行业名列表（数量不设上限）；缺省 = 不筛行业。
-   *  股票池 = 所选行业在调仓日时点归属的并集（PIT），与 securityIds 取交集 */
-  industries?: unknown;
+  /** 股票池规格快照（ADR-0006）：保存策略时随 config 落库，重跑自包含不依赖池句柄存活；
+   *  结构 = 引擎入参 EnginePoolRef（groups/summary/memberCount） */
+  pool?: unknown;
 }
 
 /** 函数引用：统一函数字典条目的名称 + 策略旋钮参数（序列化形态，可持久化） */

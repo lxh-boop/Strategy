@@ -1,7 +1,7 @@
 import { BaseMessage, HumanMessage, SystemMessage, AIMessage, ToolMessage } from '@langchain/core/messages';
 import { Command } from '@langchain/langgraph';
 import { ConfigService } from '@nestjs/config';
-import { Conversation } from '../../../src/types';
+import { MemoryUserStoreService } from '../../../src/core/implementations/memory-user-store.service';import { Conversation } from '../../../src/types';
 import {
   applyCardSelection,
   formatTableCatalog,
@@ -22,7 +22,7 @@ import { StrategyBacktestService } from '../../../src/core/strategy-backtest.ser
 /** 无 Key 配置：get 恒 undefined → 开发模式分支，不创建 LLM 与图 */
 function newService(): LangGraphAgentService {
   const config = { get: () => undefined } as unknown as ConfigService;
-  return new LangGraphAgentService(config, {} as FactorDataService, {} as StrategyBacktestService, {} as FactorAnalysisService);
+  return new LangGraphAgentService(config, {} as FactorDataService, {} as StrategyBacktestService, {} as FactorAnalysisService, new MemoryUserStoreService());
 }
 
 function conv(id: string): Conversation {
@@ -156,6 +156,7 @@ function buildTestGraph() {
     {} as FactorDataService,
     backtest as unknown as StrategyBacktestService,
     factorAnalysis as unknown as FactorAnalysisService,
+    new MemoryUserStoreService(),
   );
   const agent = { invoke: jest.fn() };
   const app = (service as unknown as { buildGraph(a: unknown): { invoke(input: object, config?: object): Promise<Record<string, unknown>> } }).buildGraph(agent);

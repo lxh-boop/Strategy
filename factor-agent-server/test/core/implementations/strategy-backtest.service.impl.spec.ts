@@ -16,6 +16,17 @@ import {
 import { FactorDataService, QuoteRow } from '../../../src/core/factor-data.service';
 import { StrategyBacktestServiceImpl } from '../../../src/core/implementations/strategy-backtest.service.impl';
 
+// 行业/池引擎 stub：不触 DuckDB（factory 内字面量，hoist 作用域限制不引外部变量）
+jest.mock('../../../src/core/industry-engine', () => ({
+  resolvePoolSpec: async (groups: Array<{ kind: string; names?: string[] }>) => ({
+    securities: ['000001.XSHE', '000002.XSHE'],
+    unknownIndustry: groups.filter((g) => g.kind === 'industry').flatMap((g) => g.names ?? []).filter((n) => n === '不存在行业'),
+    unknownIndex: [] as string[],
+  }),
+  industryClarificationGuide: async () => ({ 请从申万一级行业名录重选: true }),
+  indexClarificationGuide: async () => ({ 请修正指数代码: true }),
+}));
+
 /* ==========================================================
    策略回测（日频事件内核）单元测试：入参归一化/纯函数/全流程 stub 不触库
    ========================================================== */
@@ -601,5 +612,59 @@ describe('StrategyBacktestServiceImpl（全流程 stub，不触库）', () => {
         rebalanceIntervalDays: 2,
       }),
     ).rejects.toThrow(/超出数据范围/);
+  });
+});
+
+describe('股票池筛选入卡（pool 摘要即参数，回测卡不再误报全市场）', () => {
+  const momentum = {
+    20240102: { '000001.XSHE': 10, '000002.XSHE': 20 },
+    20240104: { '000001.XSHE': 30, '000002.XSHE': 5 },
+  };
+
+  it('池模式：卡片与摘要股票池 = 筛选摘要+成员数，全文不再出现"全市场"', async () => {
+    const service = makeService({ momentum, quotes: defaultQuotes() });
+    const out = await service.runStrategyBacktest({
+      pool: { groups: [{ kind: 'industry', names: ['有色金属'] }], summary: '有色金属', memberCount: 2 },
+      startDate: '20240101',
+      endDate: '20240108',
+      initialCapital: 100_000,
+      feeRate: 0,
+      rebalanceIntervalDays: 2,
+      maxPositions: 2,
+    });
+    expect(out.summary.股票池).toBe('有色金属（2 只）');
+    const pool = out.card.params?.find((r) => r.label === '股票池');
+    expect(pool?.value).toBe('有色金属（2 只）');
+    expect(JSON.stringify(out)).not.toContain('全市场');
+  });
+
+  it('池与显式清单同传：显示交集口径', async () => {
+    const service = makeService({ momentum, quotes: defaultQuotes() });
+    const out = await service.runStrategyBacktest({
+      securityIds: ['000001.XSHE', '000002.XSHE'],
+      pool: { groups: [{ kind: 'industry', names: ['有色金属'] }], summary: '有色金属', memberCount: 2 },
+      startDate: '20240101',
+      endDate: '20240108',
+      initialCapital: 100_000,
+      feeRate: 0,
+      rebalanceIntervalDays: 2,
+      maxPositions: 2,
+    });
+    expect(out.summary.股票池).toBe('有色金属（2 只）∩2 只清单');
+  });
+
+  it('未知行业 → ClarificationSignal（预检语义不回归）', async () => {
+    const service = makeService({ momentum, quotes: defaultQuotes() });
+    await expect(
+      service.runStrategyBacktest({
+        pool: { groups: [{ kind: 'industry', names: ['不存在行业'] }], summary: '不存在行业', memberCount: 0 },
+        startDate: '20240101',
+        endDate: '20240108',
+        initialCapital: 100_000,
+        feeRate: 0,
+        rebalanceIntervalDays: 2,
+        maxPositions: 2,
+      }),
+    ).rejects.toThrow(ClarificationSignal);
   });
 });

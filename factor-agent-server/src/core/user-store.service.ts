@@ -67,4 +67,18 @@ export abstract class UserStoreService {
   /* ----- 用户设置（按用户隔离，方法集镜像 SVC-D17~D18） ----- */
   abstract getSettings(userId: number): Promise<UserSettingsRow>;
   abstract updateSetting(userId: number, key: SettingKey, patch: { on?: boolean; value?: string }): Promise<void>;
+
+  /* ----- 池句柄（ADR-0006）：唯一的会话维度数据（不带 userId 的约定例外，隔离靠会话归属链） ----- */
+  abstract savePoolRef(ref: { id: string; conversationId: string; spec: unknown; summary: string; memberCount: number }): Promise<void>;
+  abstract findPoolRef(id: string): Promise<PoolRefRow | undefined>;
+}
+
+/** 池句柄行（spec 为 PoolGroup[] 的 JSON 形态，读取方经 assertPoolGroups 再校验，不信任存储内容） */
+export interface PoolRefRow {
+  id: string;
+  conversationId: string;
+  spec: unknown;
+  summary: string;
+  memberCount: number;
+  createdAt: string;
 }

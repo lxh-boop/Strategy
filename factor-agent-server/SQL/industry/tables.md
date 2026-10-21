@@ -1,7 +1,7 @@
 # 行业板块数据字典 —— 表描述
 
 > 来源：Tushare Pro 接口实测下载（2026-10-17），字段描述按接口实际返回列整理，非通联字典原文。
-> 字段级说明见 [sw_classify.md](sw_classify.md)、[sw_member.md](sw_member.md)、[stock_industry.md](stock_industry.md)、[dc_board_index.md](dc_board_index.md) 与 [dc_board_list.md](dc_board_list.md)。
+> 字段级说明见 [sw_classify.md](sw_classify.md)、[sw_member.md](sw_member.md)、[stock_industry.md](stock_industry.md)、[dc_board_index.md](dc_board_index.md) 与 [dc_board_list.md](dc_board_list.md) 与 [idx_member.md](idx_member.md)。
 > 刷新方式：`TUSHARE_TOKEN=<你的token> node download-industry.mjs`（token 仅走环境变量）。
 
 ## sw_classify（申万行业分类）
@@ -33,6 +33,12 @@
 - 描述 : 东方财富板块静态清单共 1046 个板块，由 dc_board_index 按板块代码去重派生，用于板块代码与名称、类型的对照；重新下载后需同步再生。
 - 唯一键 : ts_code
 - 数据文件 : dc_board_list.csv
+
+## idx_member（指数成分月度快照）
+
+- 描述 : 宽基指数成分的月度快照序列（沪深300/中证500/上证50，2005 至今按月去重），股票池筛选工具 index 来源的消费表；PIT 查询取 ≤ 决策日 的最近快照，期内调样自然跟随。
+- 唯一键 : index_code,trade_date,con_code
+- 数据文件 : idx_member.csv
 
 ## 通用备注
 

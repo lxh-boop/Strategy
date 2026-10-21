@@ -20,16 +20,22 @@ import {
   describeSellRules,
   describeSortFactors,
   effectiveSortFactors,
+  EnginePoolRef,
   StrategyBacktestInput,
   StrategyBacktestService,
 } from '../../core/strategy-backtest.service';
 import {
   INDUSTRY_TABLES,
+  assertPoolGroups,
+  describePoolSpec,
+  indexClarificationGuide,
   industryClarificationGuide,
   industryReadTable,
-  resolveIndustrySecurities,
+  resolvePoolSpec,
 } from '../../core/industry-engine';
 import { formatFnCall } from '../../core/weight-functions';
+import { UserStoreService } from '../../core/user-store.service';
+import { todayStr } from '../../common/time';
 import { assertAnalysisParams, FactorAnalysisService, FactorCorrelationInput, RankAnalysisInput } from '../../core/factor-analysis.service';
 import { describeTimingOverlay } from '../../core/timing';
 import { FactorDataService } from '../../core/factor-data.service';
@@ -52,6 +58,7 @@ const TOOL_STAGE: Record<string, string> = {
   run_rank_analysis: '排名分析计算',
   run_factor_correlation: '因子相关性计算',
   run_daily_screen: '每日选股查询',
+  screen_stock_pool: '股票池筛选',
 };
 
 /* ==========================================================
@@ -106,6 +113,8 @@ interface ToolOutcome {
 /** 工具执行上下文：随调用传入的图状态只读片段（参数授权标记等） */
 interface ToolContext {
   delegated: boolean;
+  /** 池句柄归属会话（screen 工具写入 / 回测选股校验归属） */
+  conversationId: string;
   /** 过程事件出口：回测工具透传给引擎，长阶段（信号预计算/行情拉取）内部发进度 */
   onProgress?: AgentProgressSink;
 }
@@ -230,6 +239,7 @@ export class LangGraphAgentService extends AgentService {
     private readonly factorData: FactorDataService,
     private readonly backtest: StrategyBacktestService,
     private readonly factorAnalysis: FactorAnalysisService,
+    private readonly userStore: UserStoreService,
   ) {
     super();
     // 漂移检查（启动一次）：tables.md 已登记但 <表名>.md 字典缺失/无字段行的表，提醒补齐
@@ -313,6 +323,8 @@ export class LangGraphAgentService extends AgentService {
                 runner(call.args, {
                   // 回测调用走到 tools 必已获授权（confirm 节点放行/委托）——标记仅供执行器记录口径
                   delegated: state.backtestDelegated === true || state.confirmedCalls.includes(call.id ?? ''),
+                  // 池句柄的写入与归属校验都挂会话（ADR-0006）
+                  conversationId: state.conversationId,
                   // 过程事件出口：回测工具透传给引擎，长阶段内部发批次进度（防 90s 空闲看门狗误断）
                   onProgress: progressSink(config),
                 }),
@@ -562,8 +574,9 @@ export class LangGraphAgentService extends AgentService {
     run_strategy_backtest: async (args, ctx) => this.execRunBacktest(args as StrategyBacktestInput, ctx),
     run_rank_analysis: async (args) => this.execRunRankAnalysis(args as Record<string, unknown>),
     run_factor_correlation: async (args) => this.execRunFactorCorrelation(args as Record<string, unknown>),
-    // 每日选股：只读零副作用，不进 CONFIRMABLE（免确认，即查即得）
-    run_daily_screen: async (args) => this.execRunDailyScreen(args as DailyScreenInput),
+    // 每日选股/股票池筛选：只读零副作用，不进 CONFIRMABLE（免确认，即查即得）
+    run_daily_screen: async (args, ctx) => this.execRunDailyScreen(args as DailyScreenInput, ctx),
+    screen_stock_pool: async (args, ctx) => this.execScreenStockPool(args as { groups?: unknown }, ctx),
   };
 
   /** 统一兜底：澄清信号 → 指引模型向用户提问；ApiException → 原因给模型自纠；其他 → 通用失败并记日志。
@@ -700,11 +713,17 @@ export class LangGraphAgentService extends AgentService {
           // 不让用户确认一个注定失败的提案（区间报错带可用范围，模型改参重发只需用户确认一次）
           this.backtest.preflight(collectAllRefs(p));
           await this.backtest.checkRange(p);
+          // 池句柄在确认门前解析：句柄不存在/跨会话的提案先打回模型自纠，不让用户确认注定失败的提案
+          const pool = await this.resolvePoolRef((call.args as { poolId?: unknown }).poolId, state.conversationId);
           const sort = effectiveSortFactors(p.sortFactors);
           confirmType = 'confirm_backtest';
           params = {
             回测区间: `${p.startDate}~${p.endDate}`,
-            股票池: p.securityIds ? `${p.securityIds.length} 只` : '全市场',
+            股票池: pool
+              ? `${pool.summary}（${pool.memberCount} 只）${p.securityIds?.length ? `∩${p.securityIds.length} 只清单` : ''}`
+              : p.securityIds?.length
+                ? `${p.securityIds.length} 只`
+                : '全市场',
             调仓间隔: `每 ${p.rebalanceIntervalDays} 个交易日`,
             每期持仓: `${p.maxPositions} 只 × ${p.idealPositionPct}%${isUserSet(call.args?.maxPositions) ? '' : '（默认）'}`,
             排序因子: describeSortFactors(sort.factors) + (sort.usedDefault ? '【默认追加】' : ''),
@@ -712,13 +731,6 @@ export class LangGraphAgentService extends AgentService {
             卖出规则: describeSellRules(p.sellRules),
             ...(p.weightFn ? { 权重函数: formatFnCall('factor-weight', p.weightFn) } : {}),
             ...(p.positionFn ? { 仓位函数: formatFnCall('position', p.positionFn) } : {}),
-            ...(p.industries?.length
-              ? {
-                  行业筛选: `${p.industries.join('、')}（候选 ${
-                    (await resolveIndustrySecurities(p.industries, Number(p.startDate))).securities.length
-                  } 只，按调仓日时点归属）`,
-                }
-              : {}),
             ...(p.keepRules.length ? { 不卖条件: describeKeepRules(p.keepRules) } : {}),
             ...(p.excludeRanges.length ? { 排除时间段: describeExcludeRanges(p.excludeRanges) } : {}),
             ...(p.timingOverlay ? { 择时规则: describeTimingOverlay(p.timingOverlay) } : {}),
@@ -802,13 +814,51 @@ export class LangGraphAgentService extends AgentService {
 
   /** 策略回测执行（tools 侧）：到达时参数必已过确认门（confirm 节点放行/委托）——
    *  这里只做归一化复核与引擎调用，不再含任何 interrupt，节点重跑也不会重复建仓扣费 */
+  /** poolId → 引擎池引用（确认卡/回测/每日选股共用；句柄不存在或跨会话 → 澄清打回，ADR-0006） */
+  private async resolvePoolRef(poolId: unknown, conversationId: string): Promise<EnginePoolRef | undefined> {
+    if (poolId === undefined || poolId === null || poolId === '') return undefined;
+    const ref = await this.userStore.findPoolRef(String(poolId));
+    if (!ref || ref.conversationId !== conversationId) {
+      throw new ClarificationSignal({
+        需要澄清: `池句柄 ${String(poolId)} 不存在（句柄只在本会话内有效）。请先调用 screen_stock_pool 重新筛选生成新的池句柄`,
+      });
+    }
+    const groups = assertPoolGroups(ref.spec); // 存储内容不信任，读取时再校验
+    return { groups, summary: ref.summary, memberCount: ref.memberCount };
+  }
+
+  /** 股票池筛选（免确认只读）：组内并集、组间交集 → 规格落库拿句柄；回执只给摘要，清单不进对话 */
+  private async execScreenStockPool(args: { groups?: unknown }, ctx: ToolContext): Promise<ToolOutcome> {
+    const groups = assertPoolGroups(args.groups);
+    const { securities, unknownIndustry, unknownIndex } = await resolvePoolSpec(groups, Number(todayStr().replaceAll('-', '')));
+    if (unknownIndustry.length) throw new ClarificationSignal(await industryClarificationGuide(unknownIndustry));
+    if (unknownIndex.length) throw new ClarificationSignal(await indexClarificationGuide(unknownIndex));
+    if (!securities.length) {
+      throw new ApiException('INVALID_ARGUMENT', 400, '筛选条件交集为空（没有股票同时满足全部筛选组），请调整条件后重试');
+    }
+    const poolId = 'p' + Math.random().toString(36).slice(2, 14);
+    const summary = describePoolSpec(groups);
+    await this.userStore.savePoolRef({ id: poolId, conversationId: ctx.conversationId, spec: groups, summary, memberCount: securities.length });
+    return {
+      result: {
+        ok: true,
+        池句柄: poolId,
+        筛选条件: summary,
+        成员数: securities.length,
+        说明: '回测（run_strategy_backtest）或每日选股（run_daily_screen）传 poolId 即可在本池内选股；' +
+          '成员清单不进入对话，向用户转述只引用筛选条件与成员数；期内调样自动跟随，成员数是当前时点口径',
+      },
+    };
+  }
+
   private async execRunBacktest(args: StrategyBacktestInput, ctx: ToolContext): Promise<ToolOutcome> {
     const p = assertStrategyInput(args);
     this.backtest.preflight(collectAllRefs(p));
+    const pool = await this.resolvePoolRef((args as { poolId?: unknown }).poolId, ctx.conversationId);
 
     let output;
     try {
-      output = await this.backtest.runStrategyBacktest(p, ctx.onProgress);
+      output = await this.backtest.runStrategyBacktest(pool ? { ...p, pool } : p, ctx.onProgress);
     } catch (error) {
       // 已授权回测的引擎失败：错误交模型自纠（如区间超出数据范围时改用表内可用区间），
       // 授权仍有效，模型可改参重发；回执带"行动"指引——失败必须告知用户，不许默默重试装作没发生
@@ -949,8 +999,9 @@ export class LangGraphAgentService extends AgentService {
   }
 
   /** 每日选股执行：只读查询（白名单与日历校验在引擎 runDailyScreen 内），清单卡 + 回执 */
-  private async execRunDailyScreen(args: DailyScreenInput): Promise<ToolOutcome> {
-    const out = await this.backtest.runDailyScreen(args);
+  private async execRunDailyScreen(args: DailyScreenInput, ctx: ToolContext): Promise<ToolOutcome> {
+    const pool = await this.resolvePoolRef((args as { poolId?: unknown }).poolId, ctx.conversationId);
+    const out = await this.backtest.runDailyScreen(pool ? { ...args, pool } : args);
     const card: ScreenCard = {
       type: 'screen',
       title: `每日选股 ${out.date}`,
@@ -967,6 +1018,7 @@ export class LangGraphAgentService extends AgentService {
     return {
       result: {
         查询日: out.date,
+        ...(out.poolSummary ? { 股票池: out.poolSummary } : {}),
         过滤条件: describeFilters(out.entryFilters),
         排序因子: describeSortFactors(out.sortFactors) + (out.usedDefaultSort ? '【默认追加】' : ''),
         过滤前候选: out.rawPoolSize,
@@ -1059,6 +1111,10 @@ export class LangGraphAgentService extends AgentService {
         '命中的持仓不会被卖出规则与调仓卖出，但择时减仓照常生效（提案中注明这一边界）；',
       '- 排除时间段（excludeRanges）：用户要"剔除某段行情（如股灾）再回测"时传入 [{start,end}]（≤5 段）；' +
         '段内不交易、净值走平，指标按全序列计算——如实向用户说明这一口径；',
+      '- 股票池筛选（screen_stock_pool）：用户按行业/指数圈定股票池（"只做有色金属""在沪深300里选"）时先调用它生成池句柄，' +
+        '再在回测/每日选股传 poolId 引用；支持多组条件交并（组内并集、组间交集，如 有色金属∪黄金 ∩ 沪深300）；' +
+        '行业/指数成员清单一律不手工拼（禁止编造成分股），用本工具或 industries→industry 组表达；' +
+        '用户点名少量股票时直接传 securityIds 即可，不必走筛选工具；',
       '- 每日选股（run_daily_screen）：用户问"今天/某个历史日这套条件选出哪些股票"时使用；' +
         'entryFilters/sortFactors 结构同回测，date 缺省=最近交易日；只读免确认、零副作用，不产生可保存的策略；' +
         '清单已出卡片，回复只做不超过 90 字的概括；',

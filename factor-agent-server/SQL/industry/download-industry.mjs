@@ -52,4 +52,23 @@ function save(name, { fields, items }) {
   } catch (e) {
     console.log(`- dc_index 跳过: ${e.message}`);
   }
+
+  // 5. 指数成分月度快照（股票池筛选的 index 来源，PIT 查询取 ≤ asOf 最近快照）。
+  //    可用环境变量覆盖：POOL_INDEX_CODES=000300.SH,000905.SH（逗号分隔）。
+  //    注意：空年 continue（上证50 等指数早年无数据），按年分段无重复行、不再去重
+  const indexes = (process.env.POOL_INDEX_CODES || "000300.SH,000905.SH,000016.SH").split(",").map((s) => s.trim()).filter(Boolean);
+  const rows = [];
+  for (const code of indexes) {
+    const thisYear = new Date().getFullYear();
+    for (let y = 2005; y <= thisYear; y++) {
+      const w = await call("index_weight", { index_code: code, start_date: `${y}0101`, end_date: `${y}1231` });
+      rows.push(...w.items);
+    }
+    console.log(`  ${code}: 累计 ${rows.length} 行`);
+  }
+  if (rows.length) {
+    save("idx_member.csv", { fields: ["index_code", "con_code", "trade_date", "weight"], items: rows });
+  } else {
+    console.log("- index_weight 无数据（积分权限不足或接口不可用），idx_member.csv 未生成");
+  }
 })().catch((e) => { console.error("ERR", e.message); process.exit(1); });

@@ -153,23 +153,24 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
 
   async runStrategyBacktest(input: StrategyBacktestInput, onProgress?: AgentProgressSink): Promise<StrategyBacktestOutput> {
     const p = assertStrategyInput(input);
-    if (p.rebalanceIntervalDays === 0 && (p.weightFn || p.positionFn || (p.industries?.length ?? 0) > 0)) {
+    if (p.rebalanceIntervalDays === 0 && (p.weightFn || p.positionFn || p.pool)) {
       throw new ApiException(
         'INVALID_ARGUMENT',
         400,
-        '触发模式（模型 Ⅱ）暂不支持权重/仓位函数与行业筛选，请改用定期调仓模式',
+        '触发模式（模型 Ⅱ）暂不支持权重/仓位函数与股票池筛选，请改用定期调仓模式',
       );
     }
-    // 行业名校验：未知行业 → 澄清信号附名录（模型自纠后重发）
-    if (p.industries?.length) {
-      const { unknown } = await industryEngine().resolveIndustrySecurities(p.industries, Number(p.startDate));
-      if (unknown.length) throw new ClarificationSignal(await industryEngine().industryClarificationGuide(unknown));
+    // 池规格预检：未知行业/指数 → 澄清信号附名录（模型自纠后重发）
+    if (p.pool) {
+      const { unknownIndustry, unknownIndex } = await industryEngine().resolvePoolSpec(p.pool.groups, Number(p.startDate));
+      if (unknownIndustry.length) throw new ClarificationSignal(await industryEngine().industryClarificationGuide(unknownIndustry));
+      if (unknownIndex.length) throw new ClarificationSignal(await industryEngine().indexClarificationGuide(unknownIndex));
     }
 
     // 函数解析（边界上一次）：未知函数名 → 400 附名录；参数不合法 → ClarificationSignal 引导模型修正
     const weightBinding = p.weightFn ? resolveWeightFn(p.weightFn) : null;
     const positionBinding = p.positionFn ? resolvePositionFn(p.positionFn) : null;
-    const industries = p.industries ?? [];
+    const poolGroups = p.pool?.groups ?? [];
     // 触发模式（rebalanceIntervalDays=0）路由到模型 Ⅱ 独立引擎
     if (p.rebalanceIntervalDays === 0) {
       if (!this.triggerEngine) {
@@ -243,9 +244,9 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
               ).map((r) => [r.securityId, r.value]),
             )
           : undefined;
-        // 行业筛选（PIT）：决策日 D 的时点归属并集，与显式股票池取交集
-        const dayPool = industries.length
-          ? (await industryEngine().resolveIndustrySecurities(industries, day)).securities.filter(
+        // 池规格（PIT）：决策日 D 组内并集、组间交集，与显式股票池取交集
+        const dayPool = poolGroups.length
+          ? (await industryEngine().resolvePoolSpec(poolGroups, day)).securities.filter(
               (c) => !p.securityIds || p.securityIds.includes(c),
             )
           : p.securityIds;
@@ -497,7 +498,7 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
   async runDailyScreen(input: DailyScreenInput): Promise<DailyScreenOutput> {
     const p = assertDailyScreenInput(input);
     const weightBinding = p.weightFn ? resolveWeightFn(p.weightFn) : null;
-    const industries = p.industries ?? [];
+    const poolGroups = p.pool?.groups ?? [];
     const refs = collectFactorRefs({ entryFilters: p.entryFilters, sortFactors: p.sortFactors, sellRules: [], keepRules: [] });
     assertWhitelist([
       ...refs,
@@ -536,11 +537,12 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
     const icByFactor = weightBinding?.icWindow
       ? await this.computeRollingIC(p.sortFactors, queryDate, weightBinding.icWindow)
       : undefined;
-    // 行业筛选（PIT）：查询日的时点归属并集，与显式股票池取交集；未知行业 → 澄清附名录（单次解析）
+    // 池规格（PIT）：查询日组内并集、组间交集，与显式股票池取交集；未知行业/指数 → 澄清附名录
     let industryPool = p.securityIds;
-    if (industries.length) {
-      const { securities, unknown } = await industryEngine().resolveIndustrySecurities(industries, queryDate);
-      if (unknown.length) throw new ClarificationSignal(await industryEngine().industryClarificationGuide(unknown));
+    if (poolGroups.length) {
+      const { securities, unknownIndustry, unknownIndex } = await industryEngine().resolvePoolSpec(poolGroups, queryDate);
+      if (unknownIndustry.length) throw new ClarificationSignal(await industryEngine().industryClarificationGuide(unknownIndustry));
+      if (unknownIndex.length) throw new ClarificationSignal(await industryEngine().indexClarificationGuide(unknownIndex));
       industryPool = securities.filter((c) => !p.securityIds || p.securityIds.includes(c));
     }
     const sig = await this.crossSectionSignal({
@@ -565,6 +567,7 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
     return {
       date: queryDate,
       ...(weightBinding ? { 权重函数: formatFnCall('factor-weight', p.weightFn) } : {}),
+      ...(p.pool ? { 股票池: p.pool.summary } : {}),
       stocks,
       sortFactors: p.sortFactors,
       usedDefaultSort: p.usedDefaultSort,
@@ -958,8 +961,16 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
         },
         {
           label: '股票池',
-          value: p.securityIds ? `${p.securityIds.length} 只` : '全市场',
-          hint: p.securityIds ? '前置筛选产出的证券清单，回测仅在池内选股' : '未限定股票池，全部调仓日在全市场过滤排序选股',
+          value: p.pool
+            ? `${p.pool.summary}（${p.pool.memberCount} 只）${p.securityIds?.length ? `∩${p.securityIds.length} 只清单` : ''}`
+            : p.securityIds?.length
+              ? `${p.securityIds.length} 只`
+              : '全市场',
+          hint: p.pool
+            ? '股票池筛选产物：成员按调仓日时点归属解析（期内调样自动跟随）'
+            : p.securityIds
+              ? '前置筛选产出的证券清单，回测仅在池内选股'
+              : '未限定股票池，全部调仓日在全市场过滤排序选股',
         },
         {
           label: '调仓间隔',
@@ -1055,6 +1066,7 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
         ...(p.excludeRanges.length ? { excludeRanges: p.excludeRanges } : {}),
         benchmark: p.benchmark,
         ...(timing ? { timingOverlay: timing } : {}),
+        ...(p.pool ? { pool: p.pool } : {}),
       },
       // 逐点交易日（YYYYMMDD）：前端 x 轴按真实日期打刻度
       dates: tradeDates,
@@ -1099,7 +1111,11 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
     return {
       ok: true,
       策略类型: p.strategyType,
-      股票池: p.securityIds ? `${p.securityIds.length} 只` : '全市场',
+      股票池: p.pool
+        ? `${p.pool.summary}（${p.pool.memberCount} 只）${p.securityIds?.length ? `∩${p.securityIds.length} 只清单` : ''}`
+        : p.securityIds?.length
+          ? `${p.securityIds.length} 只`
+          : '全市场',
       区间: `${p.startDate}~${p.endDate}`,
       调仓间隔: `每${p.rebalanceIntervalDays}个交易日（${rebalanceCount} 次调仓）`,
       排序因子: describeSortFactors(sortFactors.factors) + (sortFactors.usedDefault ? '【sortFactors 缺省，引擎默认追加】' : ''),

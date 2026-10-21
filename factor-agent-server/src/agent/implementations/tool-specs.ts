@@ -98,19 +98,15 @@ export const RUN_STRATEGY_BACKTEST_SPEC = {
           type: 'array',
           items: { type: 'string' },
           description:
-            '股票池：证券代码数组（如 ["000002.XSHE"]，来自前置筛选或用户指定）。缺省/空 = 全市场。' +
-            '禁止在对话中手拼超长清单；行业股票池改用 industries 参数，不要手工拼行业成分清单',
+            '股票池：证券代码数组（如 ["000002.XSHE"]），只放用户点名或前置筛选的少量股票。缺省/空 = 全市场。' +
+            '行业/指数等成分池改用 poolId（screen_stock_pool 产物），禁止手工拼成分清单',
         },
-        industries: {
-          type: 'array',
-          items: { type: 'string' },
+        poolId: {
+          type: 'string',
           description:
-            '行业筛选：申万一级行业名数组（如 ["食品饮料"]），数量不设上限。' +
-            '股票池 = 所选行业在每个调仓日的时点归属成分并集（期内调入调出自动跟随），再与 securityIds 取交集。' +
-            '合法行业名（申万 2021 一级，共 31 个）：农林牧渔、基础化工、钢铁、有色金属、电子、汽车、家用电器、食品饮料、' +
-            '纺织服饰、轻工制造、医药生物、公用事业、交通运输、房地产、商贸零售、社会服务、银行、非银金融、综合、' +
-            '建筑材料、建筑装饰、电力设备、机械设备、国防军工、计算机、传媒、通信、煤炭、石油石化、环保、美容护理。' +
-            '用户按行业圈股票池时优先用本参数，禁止自行编造行业成分股清单；触发模式（rebalanceIntervalDays=0）不支持',
+            '股票池句柄（可选）：screen_stock_pool 返回的池句柄，回测仅在池内选股。' +
+            '池成员按每个调仓日的时点归属解析（期内调样自动跟随），再与 securityIds 取交集；' +
+            '句柄只在本会话内有效；触发模式（rebalanceIntervalDays=0）不支持',
         },
         startDate: {
           type: 'string',
@@ -445,13 +441,11 @@ const RUN_DAILY_SCREEN_SPEC = {
         securityIds: {
           type: 'array',
           items: { type: 'string' },
-          description: '股票池（000002.XSHE 形态）；缺省 = 全市场',
+          description: '股票池（000002.XSHE 形态，用户点名少量股票）；缺省 = 全市场',
         },
-        industries: {
-          type: 'array',
-          items: { type: 'string' },
-          description:
-            '行业筛选（可选）：申万一级行业名数组，名录同 run_strategy_backtest 的 industries；按查询日时点归属收窄股票池，再与 securityIds 取交集',
+        poolId: {
+          type: 'string',
+          description: '股票池句柄（可选）：screen_stock_pool 返回的池句柄，按查询日时点归属收窄选股域，再与 securityIds 取交集',
         },
         maxPositions: { type: 'integer', description: '入选只数，默认 10，上限 100' },
         date: { type: 'string', description: '查询日，纯数字 YYYYMMDD；缺省 = 最近交易日' },
@@ -461,6 +455,56 @@ const RUN_DAILY_SCREEN_SPEC = {
 } as const;
 
 /** 全部工具 schema：bindTools 一次绑定，顺序即 prompt 里的工具编号 */
+/** 工具 7：股票池筛选（ADR-0006）：多组条件交并 → 池句柄；成员清单不进对话，回测/选股以 poolId 引用 */
+export const SCREEN_STOCK_POOL_SPEC = {
+  type: 'function' as const,
+  function: {
+    name: 'screen_stock_pool',
+    description:
+      '股票池筛选：把定义固定的证券集合（行业/指数成分/点名清单）组合成可复用的股票池，返回池句柄（poolId）。' +
+      '组内并集、组间交集，如 [有色金属,黄金] ∩ 沪深300。回测或每日选股传 poolId 即在池内选股；' +
+      '成员清单不进入对话（回执只有条件摘要与成员数），向用户转述时同样只引用条件与数量。' +
+      '即查即得无需确认。用户点名少量股票时不必用本工具，直接在回测传 securityIds。',
+    parameters: {
+      type: 'object',
+      properties: {
+        groups: {
+          type: 'array',
+          minItems: 1,
+          maxItems: 5,
+          description: '筛选组数组：组内并集、组间交集',
+          items: {
+            type: 'object',
+            properties: {
+              kind: { type: 'string', enum: ['industry', 'index', 'list'], description: '来源类型' },
+              names: {
+                type: 'array',
+                items: { type: 'string' },
+                description:
+                  'kind=industry 时必填：申万一级行业名（共 31 个）：农林牧渔、基础化工、钢铁、有色金属、电子、汽车、家用电器、食品饮料、' +
+                  '纺织服饰、轻工制造、医药生物、公用事业、交通运输、房地产、商贸零售、社会服务、银行、非银金融、综合、' +
+                  '建筑材料、建筑装饰、电力设备、机械设备、国防军工、计算机、传媒、通信、煤炭、石油石化、环保、美容护理',
+              },
+              codes: {
+                type: 'array',
+                items: { type: 'string' },
+                description: 'kind=index 时必填：指数代码，常用 000300.SH（沪深300）/ 000905.SH（中证500）/ 000016.SH（上证50）',
+              },
+              ids: {
+                type: 'array',
+                items: { type: 'string' },
+                description: 'kind=list 时必填：证券代码数组（000002.XSHE 形态）',
+              },
+            },
+            required: ['kind'],
+          },
+        },
+      },
+      required: ['groups'],
+    },
+  },
+};
+
 export const AGENT_TOOL_SPECS = [
   LIST_FACTOR_TABLES_SPEC,
   LIST_FACTOR_FIELDS_SPEC,
@@ -469,6 +513,7 @@ export const AGENT_TOOL_SPECS = [
   RUN_RANK_ANALYSIS_SPEC,
   RUN_FACTOR_CORRELATION_SPEC,
   RUN_DAILY_SCREEN_SPEC,
+  SCREEN_STOCK_POOL_SPEC,
 ] as const;
 
 /* ----- 工具入参形态（LLM 传入，字段均为未知形态，服务端归一化校验） ----- */
