@@ -8,6 +8,7 @@ import { AgentService } from '../../../src/agent/agent.service';
 import { ApiException } from '../../../src/common/api.exception';
 import { ConversationsService } from '../../../src/conversations/conversations.service';
 import { ConversationsServiceImpl } from '../../../src/conversations/implementations/conversations.service.impl';
+import { MemoryStoreService } from '../../../src/core/memory-store.service';
 import { UserStoreService } from '../../../src/core/user-store.service';
 import { AgentReply, ChatMessage, Conversation } from '../../../src/types';
 
@@ -32,7 +33,8 @@ describe('B-INT-01 ConversationsServiceImpl（会话业务）', () => {
     appendMessages: jest.fn(),
     renameConversationFromFirstMessage: jest.fn(),
   };
-  const agent = { reply: jest.fn(), replyStream: jest.fn() };
+  const agent = { reply: jest.fn(), replyStream: jest.fn(), hasInflightRun: jest.fn() };
+  const memories = { clearSummary: jest.fn() };
   let svc: ConversationsService;
 
   beforeEach(async () => {
@@ -42,6 +44,7 @@ describe('B-INT-01 ConversationsServiceImpl（会话业务）', () => {
         ConversationsServiceImpl,
         { provide: UserStoreService, useValue: store },
         { provide: AgentService, useValue: agent },
+        { provide: MemoryStoreService, useValue: memories },
       ],
     }).compile();
     svc = moduleRef.get(ConversationsServiceImpl);
@@ -75,21 +78,25 @@ describe('B-INT-01 ConversationsServiceImpl（会话业务）', () => {
 
   /* ---------- 404 语义：会话不存在 ---------- */
 
-  it('remove：删除成功无返回；会话不存在抛 404 NOT_FOUND', async () => {
+  it('remove：删除成功无返回并清滚动摘要；会话不存在抛 404 且不清摘要', async () => {
     store.deleteConversation.mockResolvedValue(true);
     expect(await svc.remove(USER, 'c1')).toBeUndefined();
+    expect(memories.clearSummary).toHaveBeenCalledWith(USER, 'c1');
 
     store.deleteConversation.mockResolvedValue(false);
     await expectApiError(() => svc.remove(USER, 'nope'), 404, 'NOT_FOUND');
+    expect(memories.clearSummary).not.toHaveBeenCalledWith(USER, 'nope');
   });
 
-  it('clear：返回清空后的会话；会话不存在抛 404 NOT_FOUND', async () => {
+  it('clear：返回清空后的会话并清滚动摘要（否则摘要提及已删消息）；会话不存在抛 404 且不清摘要', async () => {
     const cleared = conv('c1', [agentMsg('欢迎')]);
     store.clearConversation.mockResolvedValue(cleared);
     expect(await svc.clear(USER, 'c1')).toBe(cleared);
+    expect(memories.clearSummary).toHaveBeenCalledWith(USER, 'c1');
 
     store.clearConversation.mockResolvedValue(undefined);
     await expectApiError(() => svc.clear(USER, 'nope'), 404, 'NOT_FOUND');
+    expect(memories.clearSummary).not.toHaveBeenCalledWith(USER, 'nope');
   });
 
   it('getMessages：返回该会话的消息数组；会话不存在抛 404 NOT_FOUND', async () => {
@@ -99,6 +106,22 @@ describe('B-INT-01 ConversationsServiceImpl（会话业务）', () => {
 
     store.getConversation.mockResolvedValue(undefined);
     await expectApiError(() => svc.getMessages(USER, 'nope'), 404, 'NOT_FOUND');
+  });
+
+  /* ---------- getRunStatus：在跑轮次查询（刷新恢复"执行中"占位用） ---------- */
+
+  it('getRunStatus：透传 agent.hasInflightRun；会话不存在抛 404 且不查运行态', async () => {
+    store.getConversation.mockResolvedValue(conv('c1', []));
+    agent.hasInflightRun.mockReturnValue(true);
+    expect(await svc.getRunStatus(USER, 'c1')).toEqual({ running: true });
+    expect(agent.hasInflightRun).toHaveBeenCalledWith('c1');
+
+    agent.hasInflightRun.mockReturnValue(false);
+    expect(await svc.getRunStatus(USER, 'c1')).toEqual({ running: false });
+
+    store.getConversation.mockResolvedValue(undefined);
+    await expectApiError(() => svc.getRunStatus(USER, 'nope'), 404, 'NOT_FOUND');
+    expect(agent.hasInflightRun).not.toHaveBeenCalledWith('nope');
   });
 
   /* ---------- sendMessage：编排逻辑 ---------- */
@@ -117,7 +140,8 @@ describe('B-INT-01 ConversationsServiceImpl（会话业务）', () => {
     await svc.sendMessage(USER, 'c1', '构建策略');
 
     expect(agent.reply).toHaveBeenCalledTimes(1);
-    expect(agent.reply).toHaveBeenCalledWith(c, '构建策略', '第一问 第二问 构建策略');
+    // prepare 附加 userId（ADR-0007 记忆/摘要目录隔离用）
+    expect(agent.reply).toHaveBeenCalledWith({ ...c, userId: USER }, '构建策略', '第一问 第二问 构建策略');
   });
 
   it('sendMessage：没有历史用户消息时 routeText 即当前消息', async () => {
@@ -127,7 +151,7 @@ describe('B-INT-01 ConversationsServiceImpl（会话业务）', () => {
 
     await svc.sendMessage(USER, 'c1', '你好');
 
-    expect(agent.reply).toHaveBeenCalledWith(c, '你好', '你好');
+    expect(agent.reply).toHaveBeenCalledWith({ ...c, userId: USER }, '你好', '你好');
   });
 
   it('sendMessage：落库用户+智能体两条消息、按首条消息命名、返回值与智能体回复一致', async () => {
@@ -171,7 +195,7 @@ describe('B-INT-01 ConversationsServiceImpl（会话业务）', () => {
     const { userMessage, agentMessage } = await svc.sendMessageStream(USER, 'c1', '回测一下', onProgress);
 
     expect(agent.replyStream).toHaveBeenCalledTimes(1);
-    expect(agent.replyStream).toHaveBeenCalledWith(c, '回测一下', '第一问 回测一下', onProgress);
+    expect(agent.replyStream).toHaveBeenCalledWith({ ...c, userId: USER }, '回测一下', '第一问 回测一下', onProgress);
     expect(seen).toHaveLength(0); // 事件由智能体引擎产生，编排层只透传不自行发事件
     expect(userMessage).toMatchObject({ role: 'user', bubble: '回测一下' });
     expect(agentMessage).toMatchObject({ role: 'agent', bubble: '流式回复', card });

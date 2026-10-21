@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { createPool, Pool, PoolConnection } from 'mysql2/promise';
 import { ApiException } from '../../common/api.exception';
 import {
+  PoolRefRow,
   SettingKey,
   UserRow,
   UserSettingsRow,
@@ -47,6 +48,9 @@ interface StrategyDbRow {
   holdings: unknown;
   dates: unknown;
   backtest_config: unknown;
+  params: unknown;
+  period_holdings: unknown;
+  trades: unknown;
   updated_at: string;
 }
 
@@ -131,7 +135,7 @@ export class MysqlUserStoreService extends UserStoreService {
 
   async listStrategies(userId: number): Promise<Strategy[]> {
     const rows = await this.selectRows<StrategyDbRow>(
-      'SELECT id, name, universe, rebalance, benchmark, factors, status, metrics, curve, bench_curve, holdings, dates, backtest_config, updated_at FROM strategies WHERE user_id = ? ORDER BY created_at, id',
+      'SELECT id, name, universe, rebalance, benchmark, factors, status, metrics, curve, bench_curve, holdings, dates, backtest_config, params, period_holdings, trades, updated_at FROM strategies WHERE user_id = ? ORDER BY created_at, id',
       [userId],
       '查询策略列表失败',
     );
@@ -140,7 +144,7 @@ export class MysqlUserStoreService extends UserStoreService {
 
   async getStrategy(userId: number, id: string): Promise<Strategy | undefined> {
     const rows = await this.selectRows<StrategyDbRow>(
-      'SELECT id, name, universe, rebalance, benchmark, factors, status, metrics, curve, bench_curve, holdings, dates, backtest_config, updated_at FROM strategies WHERE user_id = ? AND id = ? LIMIT 1',
+      'SELECT id, name, universe, rebalance, benchmark, factors, status, metrics, curve, bench_curve, holdings, dates, backtest_config, params, period_holdings, trades, updated_at FROM strategies WHERE user_id = ? AND id = ? LIMIT 1',
       [userId, id],
       '查询策略失败',
     );
@@ -150,12 +154,13 @@ export class MysqlUserStoreService extends UserStoreService {
   async saveStrategy(userId: number, strategy: Strategy): Promise<void> {
     try {
       await this.exec(
-        `INSERT INTO strategies (id, user_id, name, universe, rebalance, benchmark, factors, status, metrics, curve, bench_curve, holdings, dates, backtest_config)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) AS new
+        `INSERT INTO strategies (id, user_id, name, universe, rebalance, benchmark, factors, status, metrics, curve, bench_curve, holdings, dates, backtest_config, params, period_holdings, trades)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) AS new
          ON DUPLICATE KEY UPDATE name = new.name, universe = new.universe, rebalance = new.rebalance,
            benchmark = new.benchmark, factors = new.factors, status = new.status, metrics = new.metrics,
            curve = new.curve, bench_curve = new.bench_curve, holdings = new.holdings, dates = new.dates,
-           backtest_config = new.backtest_config`,
+           backtest_config = new.backtest_config, params = new.params, period_holdings = new.period_holdings,
+           trades = new.trades`,
         [
           strategy.id, userId, strategy.name, strategy.universe, strategy.rebalance, strategy.benchmark,
           JSON.stringify(strategy.factors), strategy.status,
@@ -164,6 +169,9 @@ export class MysqlUserStoreService extends UserStoreService {
           JSON.stringify(strategy.holdings),
           strategy.dates ? JSON.stringify(strategy.dates) : null,
           strategy.backtestConfig ? JSON.stringify(strategy.backtestConfig) : null,
+          strategy.params && strategy.params.length ? JSON.stringify(strategy.params) : null,
+          strategy.periodHoldings && strategy.periodHoldings.length ? JSON.stringify(strategy.periodHoldings) : null,
+          strategy.trades && strategy.trades.length ? JSON.stringify(strategy.trades) : null,
         ],
         '保存策略失败',
       );
@@ -359,6 +367,9 @@ export class MysqlUserStoreService extends UserStoreService {
       holdings: (r.holdings ?? []) as Strategy['holdings'],
       dates: (r.dates ?? undefined) as Strategy['dates'],
       backtestConfig: (r.backtest_config ?? undefined) as Strategy['backtestConfig'],
+      params: (r.params ?? undefined) as Strategy['params'],
+      periodHoldings: (r.period_holdings ?? undefined) as Strategy['periodHoldings'],
+      trades: (r.trades ?? undefined) as Strategy['trades'],
     };
   }
 
@@ -456,5 +467,27 @@ export class MysqlUserStoreService extends UserStoreService {
     } finally {
       conn.release();
     }
+  }
+
+  /* ----- 池句柄（ADR-0006，会话维度） ----- */
+
+  async savePoolRef(ref: { id: string; conversationId: string; spec: unknown; summary: string; memberCount: number }): Promise<void> {
+    await this.exec(
+      'INSERT INTO pool_refs (id, conversation_id, spec_json, summary, member_count) VALUES (?, ?, ?, ?, ?)',
+      [ref.id, ref.conversationId, JSON.stringify(ref.spec), ref.summary, ref.memberCount],
+      '保存池句柄失败',
+    );
+  }
+
+  async findPoolRef(id: string): Promise<PoolRefRow | undefined> {
+    const rows = await this.selectRows<{ id: string; conversation_id: string; spec_json: unknown; summary: string; member_count: number; created_at: string }>(
+      'SELECT id, conversation_id, spec_json, summary, member_count, created_at FROM pool_refs WHERE id = ? LIMIT 1',
+      [id],
+      '查询池句柄失败',
+    );
+    const r = rows[0];
+    return r
+      ? { id: r.id, conversationId: r.conversation_id, spec: r.spec_json, summary: r.summary, memberCount: Number(r.member_count), createdAt: String(r.created_at) }
+      : undefined;
   }
 }

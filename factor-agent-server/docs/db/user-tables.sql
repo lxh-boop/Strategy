@@ -92,3 +92,15 @@ CREATE TABLE IF NOT EXISTS messages (
   KEY idx_conv_id (conversation_id, id),
   CONSTRAINT fk_msg_conv2 FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='会话消息（一行=一次问答；ask 为 NULL 的行是开场欢迎语）';
+
+-- 6. 池句柄表（ADR-0006）：股票池筛选工具的产物（规格+摘要），回测/每日选股以 poolId 引用。
+--    会话维度（不挂 user_id：句柄生命周期随会话，隔离靠 conversation_id 归属链）。
+CREATE TABLE IF NOT EXISTS pool_refs (
+  id              VARCHAR(32)  NOT NULL PRIMARY KEY COMMENT '池句柄：p + 12 位随机',
+  conversation_id VARCHAR(36)  NOT NULL COMMENT '产出该池的会话',
+  spec_json       JSON         NOT NULL COMMENT '筛选规格 PoolGroup[]（组内并集、组间交集）',
+  summary         VARCHAR(255) NOT NULL COMMENT '展示摘要（如 有色金属∩沪深300），回测卡直读',
+  member_count    INT UNSIGNED NOT NULL COMMENT '筛选时点成员数（当前时点口径）',
+  created_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  KEY idx_pool_conv (conversation_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='股票池筛选句柄';

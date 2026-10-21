@@ -82,8 +82,7 @@ export interface StrategySortFactor {
   field: string;
   /** 1=值大优 / -1=值小优 */
   direction: 1 | -1;
-  /** 缺省 = 等权 1/N；加权模式必须全部因子都传 */
-  weight?: number;
+  /** 因子权重由 weightFn 函数每调仓求值（见 core/weight-functions.ts），本结构不承载静态权重 */
 }
 
 export type StrategySellRule =
@@ -120,6 +119,20 @@ export interface StrategyRunConfig {
   benchmark?: 'hs300' | 'csi500' | 'sse';
   /** 大盘择时叠加（结构同 core/timing.ts StrategyTimingOverlay） */
   timingOverlay?: StrategyTimingOverlay;
+  /** 权重函数引用（{name, params}，字典见 core/weight-functions.ts；缺省 = constant 等权）。
+   *  缺省 = constant 等权。引擎运行期经 resolve 绑定为纯函数 */
+  weightFn?: FunctionSpec;
+  /** 仓位函数引用（缺省 = constant 等权金额）。触发模式（rebalanceIntervalDays=0）不支持 */
+  positionFn?: FunctionSpec;
+  /** 股票池规格快照（ADR-0006）：保存策略时随 config 落库，重跑自包含不依赖池句柄存活；
+   *  结构 = 引擎入参 EnginePoolRef（groups/summary/memberCount） */
+  pool?: unknown;
+}
+
+/** 函数引用：统一函数字典条目的名称 + 策略旋钮参数（序列化形态，可持久化） */
+export interface FunctionSpec {
+  name: string;
+  params?: Record<string, unknown>;
 }
 
 /** 回测交易明细（日频事件内核产出；卡片截最近若干笔） */
@@ -267,6 +280,9 @@ export interface Conversation {
   title: string;
   messages: ChatMessage[];
   updatedAt: number;
+  /** 编排层（conversations.service.prepare）附加：来自 JWT 的用户 id，不信任请求入参。
+   *  智能体据此隔离长期记忆目录（ADR-0007）；存储层返回的会话不带此字段 */
+  userId?: number;
 }
 
 /* ----- 策略 ----- */
@@ -291,6 +307,12 @@ export interface Strategy {
   backtestConfig?: BacktestRunConfig | StrategyRunConfig;
   /** 曲线逐点交易日（YYYYMMDD，与 curve 等长）：仅等权真引擎产出，详情图按真实日期打刻度 */
   dates?: number[];
+  /** 回测实际参数口径（引擎产出，与对话卡片 params 同源）；旧策略无此字段 */
+  params?: { label: string; value: string; hint?: string }[];
+  /** 每期持仓明细（引擎产出）：详情页「最新一期持仓」与「历史持仓」数据源 */
+  periodHoldings?: PeriodHoldingsRow[];
+  /** 回测交易明细（引擎产出）：详情页「历史交易」数据源 */
+  trades?: BacktestTrade[];
 }
 
 /* ----- 个人中心 ----- */

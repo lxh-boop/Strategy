@@ -1,4 +1,18 @@
 import { forwardRef, Inject, Injectable, Logger, Optional } from '@nestjs/common';
+import {
+  formatFnCall,
+  PositionFn,
+  resolvePositionFn,
+  resolveWeightFn,
+  spearman,
+  validatePositionAmounts,
+  WeightFn,
+} from '../weight-functions';
+
+// 引擎 B 延迟 require：避免 DuckDB 原生模块在引擎 A 的测试/装载路径上被静态引入
+function industryEngine(): typeof import('../industry-engine') {
+  return require('../industry-engine');
+}
 
 import { ApiException } from '../../common/api.exception';
 import {
@@ -35,6 +49,7 @@ import {
   NormalizedStrategyInput,
   rankUniverse,
   StrategyAggregate,
+  ClarificationSignal,
   StrategyBacktestInput,
   StrategyBacktestOutput,
   StrategyBacktestService,
@@ -92,6 +107,10 @@ interface RebalanceSignal {
   candidates: string[];
   /** 过滤后存活池的综合分排名（1 起）；rank_out 判断"持仓跌出 bottomN"用 */
   compositeRank: Map<string, number>;
+  /** 综合分（仓位函数 ctx 用） */
+  scores: Map<string, number>;
+  /** 定权因子截面（factor_position，引擎按 params 因子引用在决策日预取） */
+  sizingSection?: Map<string, number>;
 }
 
 @Injectable()
@@ -134,6 +153,24 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
 
   async runStrategyBacktest(input: StrategyBacktestInput, onProgress?: AgentProgressSink): Promise<StrategyBacktestOutput> {
     const p = assertStrategyInput(input);
+    if (p.rebalanceIntervalDays === 0 && (p.weightFn || p.positionFn || p.pool)) {
+      throw new ApiException(
+        'INVALID_ARGUMENT',
+        400,
+        '触发模式（模型 Ⅱ）暂不支持权重/仓位函数与股票池筛选，请改用定期调仓模式',
+      );
+    }
+    // 池规格预检：未知行业/指数 → 澄清信号附名录（模型自纠后重发）
+    if (p.pool) {
+      const { unknownIndustry, unknownIndex } = await industryEngine().resolvePoolSpec(p.pool.groups, Number(p.startDate));
+      if (unknownIndustry.length) throw new ClarificationSignal(await industryEngine().industryClarificationGuide(unknownIndustry));
+      if (unknownIndex.length) throw new ClarificationSignal(await industryEngine().indexClarificationGuide(unknownIndex));
+    }
+
+    // 函数解析（边界上一次）：未知函数名 → 400 附名录；参数不合法 → ClarificationSignal 引导模型修正
+    const weightBinding = p.weightFn ? resolveWeightFn(p.weightFn) : null;
+    const positionBinding = p.positionFn ? resolvePositionFn(p.positionFn) : null;
+    const poolGroups = p.pool?.groups ?? [];
     // 触发模式（rebalanceIntervalDays=0）路由到模型 Ⅱ 独立引擎
     if (p.rebalanceIntervalDays === 0) {
       if (!this.triggerEngine) {
@@ -142,7 +179,7 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
       return this.triggerEngine.run(p, onProgress);
     }
     const refs = collectFactorRefs(p);
-    assertWhitelist(collectAllRefs(p));
+    assertWhitelist([...collectAllRefs(p), ...(positionBinding?.factorRef ? [positionBinding.factorRef] : [])]);
     const sortFactors = effectiveSortFactors(p.sortFactors);
     const fieldSellRules = p.sellRules.filter((r): r is Extract<StrategySellRule, { kind: 'field' }> => r.kind === 'field');
     const rankOutBottomN: number | null = p.sellRules.some((r) => r.kind === 'rank_out')
@@ -190,17 +227,43 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
         args: `第 ${Math.floor(b / SIGNAL_BATCH) + 1}/${totalBatches} 批 · 调仓日 ${String(tradeDates[batch[0]])} 起 ${batch.length} 个`,
       });
       for (const idx of batch) {
+        const day = tradeDates[idx];
+        // 信号函数上下文：滚动 IC（ic_weight）/ 定权因子截面（factor_position），仅在挂载相应函数时预取
+        const icByFactor = weightBinding?.icWindow
+          ? await this.computeRollingIC(sortFactors.factors, day, weightBinding.icWindow)
+          : undefined;
+        const sizingSection = positionBinding?.factorRef
+          ? new Map(
+              (
+                await this.factorData.readFactorSection(
+                  positionBinding.factorRef.table,
+                  positionBinding.factorRef.field,
+                  String(day),
+                  p.securityIds ?? null,
+                )
+              ).map((r) => [r.securityId, r.value]),
+            )
+          : undefined;
+        // 池规格（PIT）：决策日 D 组内并集、组间交集，与显式股票池取交集
+        const dayPool = poolGroups.length
+          ? (await industryEngine().resolvePoolSpec(poolGroups, day)).securities.filter(
+              (c) => !p.securityIds || p.securityIds.includes(c),
+            )
+          : p.securityIds;
         const sig = await this.crossSectionSignal({
           entryFilters: p.entryFilters,
           sortFactors: sortFactors.factors,
           refs,
-          securityIds: p.securityIds,
+          securityIds: dayPool,
           indexSeriesByKey,
-          day: tradeDates[idx],
+          day,
+          weightFn: weightBinding?.fn,
+          icByFactor,
         });
         const candidates = sig.ranked.slice(0, p.maxPositions).map((r) => r.code);
         const compositeRank = new Map(sig.ranked.map((r, i) => [r.code, i + 1]));
-        signals.set(idx, { candidates, compositeRank });
+        const scores = new Map(sig.ranked.map((r) => [r.code, r.score]));
+        signals.set(idx, { candidates, compositeRank, scores, sizingSection });
         for (const code of candidates) involved.add(code);
       }
       onProgress?.({
@@ -313,6 +376,7 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
       sellFieldSeries,
       sortFactors.factors,
       rankOutBottomN,
+      positionBinding?.fn ?? null,
       exposureByDay,
       frozenByDay,
       p.keepRules,
@@ -389,13 +453,17 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
     securityIds: string[] | null;
     indexSeriesByKey: Map<string, Map<number, number>>;
     day: number;
+    /** 权重函数（已绑定参数）：本次截面求值各因子权重；缺省 = 等权 */
+    weightFn?: WeightFn;
+    /** 滚动 Rank IC 均值（ic_weight 的引擎预计算上下文，键 = table.field） */
+    icByFactor?: Record<string, number>;
   }): Promise<{
     rawPoolSize: number;
     ranked: { code: string; score: number }[];
     /** 截面按 table.field 键索引（每日选股回填入选股的因子值用） */
     sectionsByKey: Map<string, Map<string, number>>;
   }> {
-    const { entryFilters, sortFactors, refs, securityIds, indexSeriesByKey, day } = opts;
+    const { entryFilters, sortFactors, refs, securityIds, indexSeriesByKey, day, weightFn, icByFactor } = opts;
     const sections = await Promise.all(
       refs.map((ref) => this.factorData.readFactorSection(ref.table, ref.field, String(day), securityIds)),
     );
@@ -413,13 +481,24 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
     });
     const rankSections = sortFactors.map((f) => byRef.get(`${f.table}.${f.field}`)!);
     const pool = applyEntryFilters(rawPool, entryFilters, filterSections);
-    return { rawPoolSize: rawPool.length, ranked: rankUniverse(sortFactors, rankSections, pool), sectionsByKey: byRef };
+    const weights = weightFn
+      ? weightFn({
+          factors: sortFactors,
+          sections: rankSections,
+          icByFactor,
+          pool,
+          count: pool.length,
+        })
+      : undefined;
+    return { rawPoolSize: rawPool.length, ranked: rankUniverse(sortFactors, rankSections, pool, weights), sectionsByKey: byRef };
   }
 
   /** 每日选股（果仁「每日选股」对标）：不跑回测主循环、零交易零副作用，
    *  过滤/排序口径与回测信号完全一致（同一对纯函数 + 同一广播通道） */
   async runDailyScreen(input: DailyScreenInput): Promise<DailyScreenOutput> {
     const p = assertDailyScreenInput(input);
+    const weightBinding = p.weightFn ? resolveWeightFn(p.weightFn) : null;
+    const poolGroups = p.pool?.groups ?? [];
     const refs = collectFactorRefs({ entryFilters: p.entryFilters, sortFactors: p.sortFactors, sellRules: [], keepRules: [] });
     assertWhitelist([
       ...refs,
@@ -454,13 +533,27 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
     }
 
     const indexSeriesByKey = await this.loadIndexFilterSeries(p.entryFilters, String(coverage.dates[0] ?? queryDate), String(queryDate));
+    // 与回测排序口径一致：ic_weight 挂载时同样预取滚动 IC
+    const icByFactor = weightBinding?.icWindow
+      ? await this.computeRollingIC(p.sortFactors, queryDate, weightBinding.icWindow)
+      : undefined;
+    // 池规格（PIT）：查询日组内并集、组间交集，与显式股票池取交集；未知行业/指数 → 澄清附名录
+    let industryPool = p.securityIds;
+    if (poolGroups.length) {
+      const { securities, unknownIndustry, unknownIndex } = await industryEngine().resolvePoolSpec(poolGroups, queryDate);
+      if (unknownIndustry.length) throw new ClarificationSignal(await industryEngine().industryClarificationGuide(unknownIndustry));
+      if (unknownIndex.length) throw new ClarificationSignal(await industryEngine().indexClarificationGuide(unknownIndex));
+      industryPool = securities.filter((c) => !p.securityIds || p.securityIds.includes(c));
+    }
     const sig = await this.crossSectionSignal({
       entryFilters: p.entryFilters,
       sortFactors: p.sortFactors,
       refs,
-      securityIds: p.securityIds,
+      securityIds: industryPool,
       indexSeriesByKey,
       day: queryDate,
+      weightFn: weightBinding?.fn,
+      icByFactor,
     });
     const stocks = sig.ranked.slice(0, p.maxPositions).map((r) => ({
       code: r.code,
@@ -473,6 +566,8 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
     );
     return {
       date: queryDate,
+      ...(weightBinding ? { 权重函数: formatFnCall('factor-weight', p.weightFn) } : {}),
+      ...(p.pool ? { 股票池: p.pool.summary } : {}),
       stocks,
       sortFactors: p.sortFactors,
       usedDefaultSort: p.usedDefaultSort,
@@ -494,6 +589,7 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
     sellFieldSeries: SellFieldData,
     sortFactors: StrategySortFactor[],
     rankOutBottomN: number | null,
+    positionFn: PositionFn | null,
     exposureByDay: number[],
     frozenByDay: boolean[],
     keepRules: StrategyKeepRule[],
@@ -512,6 +608,7 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
     const turnoverByDay: number[] = [];
     let pendingSells = new Map<string, string>(); // code → 触发原因
     let pendingRebalance: RebalanceSignal | null = null;
+    const sizingViolations: string[] = []; // 仓位函数金额的前置校验修正清单（整手/现金）
 
     const quoteOf = (code: string, day: number): Quote | undefined => quotes.get(code)?.get(day);
     /** 执行价：0=开盘 1=收盘；停牌/开盘价缺失 → undefined（当日不可交易该标的） */
@@ -575,13 +672,39 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
 
         // b. 调仓指令：先卖非目标/强制卖出，再按综合分序买入候选，最后已持有的调回目标仓位
         if (pendingRebalance) {
-          const { candidates, compositeRank } = pendingRebalance;
+          const { candidates, compositeRank, scores, sizingSection } = pendingRebalance;
           if (candidates.length) {
             const targetSet = new Set(candidates);
             const equity0 = account.equity((code) => execPriceOf(code, day));
             const minMv = (equity0 * p.minPositionPct) / 100;
             // 目标市值乘择时暴露系数：熊市仓位 <100% 时，调仓自然落在降档仓位内
             const targetMv = ((equity0 * p.idealPositionPct) / 100) * ((exposureByDay[i] ?? 100) / 100);
+
+            // 仓位函数：每股独立目标金额（缺省 null = 等权 targetMv，现状路径）；
+            // 字典缺省成员（如不卖条件保住的持仓）在 b3 回退等权目标，防误清仓
+            let sizingTargets: Map<string, number> | null = null;
+            if (positionFn) {
+              const raw = positionFn({
+                candidates: candidates.map((code, idx) => ({
+                  code,
+                  rank: compositeRank.get(code) ?? idx + 1,
+                  score: scores.get(code) ?? 0,
+                })),
+                sizingSection,
+                remainingCash: targetMv,
+                remainingPct: (p.idealPositionPct * (exposureByDay[i] ?? 100)) / 100,
+                maxPositions: p.maxPositions,
+              });
+              const { fixed, violations: vs } = validatePositionAmounts(raw, {
+                cash: Math.min(targetMv, account.cash()),
+                priceOf: (code) => execPriceOf(code, day),
+              });
+              sizingTargets = new Map(Object.entries(fixed));
+              for (const v of vs) sizingViolations.push(`D${day} ${v}`);
+            }
+            // b2 新买：函数未分配金额的候选 = 不买（0）；b3 持仓调平：未分配成员回退等权目标，防误清仓
+            const tvOf = (code: string, isExisting: boolean): number =>
+              sizingTargets ? (sizingTargets.get(code) ?? (isExisting ? targetMv : 0)) : targetMv;
 
             // b1. 清出不在目标（或被 rank_out 强制卖出）的持仓；不卖条件命中 = 受保护，
             //     不被调出、按目标仓位同权调平（ADR-0003）
@@ -610,7 +733,9 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
               const q = quoteOf(code, day);
               if (price === undefined || !q) continue; // 停牌跳过
               if (price >= q.preClose * LIMIT_UP_RATIO) continue; // 涨停跳过
-              let shares = Math.floor(targetMv / (price * (1 + p.feeRate)) / LOT_SIZE) * LOT_SIZE;
+              const tv = tvOf(code, false);
+              if (tv <= 0) continue; // 仓位函数给了 0 金额 = 本期不买（如 MA 下方）
+              let shares = Math.floor(tv / (price * (1 + p.feeRate)) / LOT_SIZE) * LOT_SIZE;
               const affordable = account.affordableShares(price);
               if (shares > affordable) shares = affordable;
               if (!Number.isFinite(shares) || shares < LOT_SIZE || shares * price < minMv) continue; // 顺延下一候选
@@ -625,7 +750,9 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
               if (pos.buyDayIdx >= i) continue; // T+1 保护
               const price = execPriceOf(code, day);
               if (price === undefined) continue;
-              const diff = Math.floor(targetMv / price / LOT_SIZE) * LOT_SIZE - pos.shares;
+              // 字典未覆盖的成员（如不卖条件保住的持仓）→ 回退等权目标，防误清仓
+              const tv = tvOf(code, true);
+              const diff = Math.floor(tv / price / LOT_SIZE) * LOT_SIZE - pos.shares;
               if (diff > 0) {
                 let shares = Math.floor(diff / LOT_SIZE) * LOT_SIZE;
                 const affordable = account.affordableShares(price);
@@ -673,6 +800,7 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
       equities,
       turnoverByDay,
       finalEquity,
+      sizingViolations,
       lastClose: account.lastCloseMap(),
       periodHoldings: periodAgg.periodHoldings,
       latestOrders: periodAgg.latestOrders,
@@ -684,6 +812,72 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
   private rankOutOf(code: string, compositeRank: Map<string, number>, bottomN: number): boolean {
     const rank = compositeRank.get(code);
     return rank === undefined || rank > bottomN;
+  }
+
+  /** ic_weight 上下文：各因子在决策日前的滚动 Spearman Rank IC 均值。
+   *  窗口配对 = (截面@d_k, d_k→d_{k+1} 前复权收益)，末对 = (D-1 截面, D 收盘收益)，无未来泄漏。
+   *  数据成本：窗口内每日全市场因子截面 + 一次全窗口行情，缓存→数据库（因子值唯一事实）。 */
+  private async computeRollingIC(
+    factors: { table: string; field: string }[],
+    day: number,
+    window: number,
+  ): Promise<Record<string, number>> {
+    const out: Record<string, number> = {};
+    if (!factors.length || window <= 0) return out;
+    const cov = await this.factorData.readTradeDates(factors[0].table, '19000101', String(day));
+    const dates = cov.dates.filter((d) => d <= day).slice(-(window + 1));
+    if (dates.length < 2) return out;
+    const sectionsByDate: Map<number, Map<string, number>>[] = factors.map(() => new Map());
+    const codes = new Set<string>();
+    for (const d of dates) {
+      for (let fi = 0; fi < factors.length; fi++) {
+        const rows = await this.factorData.readFactorSection(factors[fi].table, factors[fi].field, String(d), null);
+        const m = new Map<string, number>();
+        for (const r of rows) {
+          m.set(r.securityId, r.value);
+          codes.add(r.securityId);
+        }
+        sectionsByDate[fi].set(d, m);
+      }
+    }
+    const quoteRows = await this.factorData.readQuoteSeries(
+      [...codes],
+      String(dates[0]),
+      String(dates[dates.length - 1]),
+    );
+    const closes = new Map<string, Map<number, number>>();
+    for (const row of quoteRows) {
+      const code = `${row.ticker}.${row.exchange}`;
+      let byDate = closes.get(code);
+      if (!byDate) {
+        byDate = new Map<number, number>();
+        closes.set(code, byDate);
+      }
+      byDate.set(Number(row.tradeDate.replaceAll('-', '')), row.close);
+    }
+    factors.forEach((f, fi) => {
+      let sum = 0;
+      let n = 0;
+      for (let k = 0; k + 1 < dates.length; k++) {
+        const d0 = dates[k];
+        const d1 = dates[k + 1];
+        const sec = sectionsByDate[fi].get(d0);
+        if (!sec || !sec.size) continue;
+        const xs: (number | undefined)[] = [];
+        const ys: (number | undefined)[] = [];
+        for (const [code, v] of sec) {
+          const c0 = closes.get(code)?.get(d0);
+          const c1 = closes.get(code)?.get(d1);
+          if (c0 === undefined || c1 === undefined || c0 <= 0) continue;
+          xs.push(v);
+          ys.push((c1 / c0 - 1) * 100);
+        }
+        sum += spearman(xs, ys);
+        n++;
+      }
+      out[`${f.table}.${f.field}`] = n > 0 ? sum / n : 0;
+    });
+    return out;
   }
 
   /** 字段条件的区间序列预取（field 类卖出规则与不卖条件共用）：带 TRADE_DATE 的表按日构建；静态表单值 */
@@ -741,7 +935,7 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
   ): BacktestCard {
     const feePct = (p.feeRate * 100).toFixed(2);
     const sortExpr = sortFactors.factors
-      .map((f) => `${f.field}${f.direction === -1 ? '(小值优)' : ''}${f.weight !== undefined ? `×${f.weight}` : ''}`)
+      .map((f) => `${f.field}${f.direction === -1 ? '(小值优)' : ''}`)
       .join(' + ');
     const totalFee = loop.trades.reduce((a, t) => a + t.fee, 0);
     return {
@@ -767,8 +961,16 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
         },
         {
           label: '股票池',
-          value: p.securityIds ? `${p.securityIds.length} 只` : '全市场',
-          hint: p.securityIds ? '前置筛选产出的证券清单，回测仅在池内选股' : '未限定股票池，全部调仓日在全市场过滤排序选股',
+          value: p.pool
+            ? `${p.pool.summary}（${p.pool.memberCount} 只）${p.securityIds?.length ? `∩${p.securityIds.length} 只清单` : ''}`
+            : p.securityIds?.length
+              ? `${p.securityIds.length} 只`
+              : '全市场',
+          hint: p.pool
+            ? '股票池筛选产物：成员按调仓日时点归属解析（期内调样自动跟随）'
+            : p.securityIds
+              ? '前置筛选产出的证券清单，回测仅在池内选股'
+              : '未限定股票池，全部调仓日在全市场过滤排序选股',
         },
         {
           label: '调仓间隔',
@@ -792,6 +994,15 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
           value: describeFilters(p.entryFilters, '\n'),
           hint: '全部满足才入选；个股字段缺失视为不满足、大盘字段缺值弃权（不清空股票池）',
         },
+        ...(p.weightFn
+          ? [{ label: '权重函数', value: formatFnCall('factor-weight', p.weightFn), hint: '每次调仓求值；参数只放策略旋钮，因子截面由引擎按缓存→数据库供给' }]
+          : []),
+        ...(p.positionFn
+          ? [{ label: '仓位函数', value: formatFnCall('position', p.positionFn), hint: '每股目标金额 = 函数输出，经整手/现金校验器逐条修正后执行' }]
+          : []),
+        ...(loop.sizingViolations.length
+          ? [{ label: '仓位校验', value: loop.sizingViolations.join('；'), hint: '仓位函数金额的前置校验修正清单（整手/现金）' }]
+          : []),
         ...(p.keepRules.length
           ? [
               {
@@ -855,6 +1066,7 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
         ...(p.excludeRanges.length ? { excludeRanges: p.excludeRanges } : {}),
         benchmark: p.benchmark,
         ...(timing ? { timingOverlay: timing } : {}),
+        ...(p.pool ? { pool: p.pool } : {}),
       },
       // 逐点交易日（YYYYMMDD）：前端 x 轴按真实日期打刻度
       dates: tradeDates,
@@ -899,7 +1111,11 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
     return {
       ok: true,
       策略类型: p.strategyType,
-      股票池: p.securityIds ? `${p.securityIds.length} 只` : '全市场',
+      股票池: p.pool
+        ? `${p.pool.summary}（${p.pool.memberCount} 只）${p.securityIds?.length ? `∩${p.securityIds.length} 只清单` : ''}`
+        : p.securityIds?.length
+          ? `${p.securityIds.length} 只`
+          : '全市场',
       区间: `${p.startDate}~${p.endDate}`,
       调仓间隔: `每${p.rebalanceIntervalDays}个交易日（${rebalanceCount} 次调仓）`,
       排序因子: describeSortFactors(sortFactors.factors) + (sortFactors.usedDefault ? '【sortFactors 缺省，引擎默认追加】' : ''),
@@ -928,6 +1144,11 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
               .map((m) => `${m.date} 基准${formatPct(m.pct)}(仓位${m.exposure}%)`)
               .join(' ') || '无（择时期间未错过基准大涨日）',
           }
+        : {}),
+      ...(p.weightFn ? { 权重函数: formatFnCall('factor-weight', p.weightFn) } : {}),
+      ...(p.positionFn ? { 仓位函数: formatFnCall('position', p.positionFn) } : {}),
+      ...(loop.sizingViolations.length
+        ? { 仓位校验: loop.sizingViolations.slice(-6).join('；').slice(0, 300) }
         : {}),
       期末持仓: finalPositions.slice(0, 5),
       月度收益: agg.monthlyReturns.map((m) => `${m.month}:${formatPct(m.pct)}`).join(' '),

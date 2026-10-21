@@ -16,6 +16,17 @@ import {
 import { FactorDataService, QuoteRow } from '../../../src/core/factor-data.service';
 import { StrategyBacktestServiceImpl } from '../../../src/core/implementations/strategy-backtest.service.impl';
 
+// 行业/池引擎 stub：不触 DuckDB（factory 内字面量，hoist 作用域限制不引外部变量）
+jest.mock('../../../src/core/industry-engine', () => ({
+  resolvePoolSpec: async (groups: Array<{ kind: string; names?: string[] }>) => ({
+    securities: ['000001.XSHE', '000002.XSHE'],
+    unknownIndustry: groups.filter((g) => g.kind === 'industry').flatMap((g) => g.names ?? []).filter((n) => n === '不存在行业'),
+    unknownIndex: [] as string[],
+  }),
+  industryClarificationGuide: async () => ({ 请从申万一级行业名录重选: true }),
+  indexClarificationGuide: async () => ({ 请修正指数代码: true }),
+}));
+
 /* ==========================================================
    策略回测（日频事件内核）单元测试：入参归一化/纯函数/全流程 stub 不触库
    ========================================================== */
@@ -61,18 +72,12 @@ describe('assertStrategyInput（归一化与校验）', () => {
     expect(() => assertStrategyInput({ ...base, securityIds: ['000002'] })).toThrow(/000002.XSHE/);
   });
 
-  it('weight 部分传 → 报错（只支持全省略或全传入）', () => {
-    const sortFactors = [
-      { table: 'equ_factor_obos', field: 'REVS20', direction: 1 as const },
-      { table: 'equ_factor_obos', field: 'RSI', direction: -1 as const, weight: 2 },
-    ];
-    expect(() => assertStrategyInput({ ...base, sortFactors })).toThrow(/weight/);
-    expect(() =>
-      assertStrategyInput({
-        ...base,
-        sortFactors: sortFactors.map((f) => ({ ...f, weight: 1 })),
-      }),
-    ).not.toThrow();
+  it('静态 weight 列已删除：sortFactors 只认 table/field/direction，自定义权重走 weightFn', () => {
+    const p = assertStrategyInput({
+      ...base,
+      sortFactors: [{ table: 'equ_factor_obos', field: 'REVS20', direction: 1 as const, weight: 2 }],
+    });
+    expect((p.sortFactors[0] as unknown as Record<string, unknown>).weight).toBeUndefined();
   });
 
   it('direction / op / sellRule kind 非法 → INVALID_ARGUMENT', () => {
@@ -120,13 +125,13 @@ describe('effectiveSortFactors / collectFactorRefs（默认动量兜底与引用
     ]);
   });
 
-  it('describeSortFactors：方向与权重如实展示（确认弹窗契约）', () => {
+  it('describeSortFactors：方向如实展示（确认弹窗契约）', () => {
     const s = describeSortFactors([
       { table: 'equ_factor_obos', field: 'REVS20', direction: 1 },
-      { table: 'equ_factor_obos', field: 'RSI', direction: -1, weight: 3 },
+      { table: 'equ_factor_obos', field: 'RSI', direction: -1 },
     ]);
-    expect(s).toContain('REVS20（值大优，等权）');
-    expect(s).toContain('RSI（值小优，权重 3）');
+    expect(s).toContain('REVS20（值大优）');
+    expect(s).toContain('RSI（值小优）');
   });
 });
 
@@ -182,17 +187,18 @@ describe('rankUniverse（分位数合成纯函数）', () => {
     expect(ranked[0].score).toBe(100);
   });
 
-  it('weight 加权：方向相反的两因子按权重倾斜', () => {
+  it('weights 参数加权：方向相反的两因子按权重倾斜', () => {
     const ranked = rankUniverse(
       [
-        { table: 't', field: 'f1', direction: 1, weight: 3 },
-        { table: 't', field: 'f2', direction: 1, weight: 1 },
+        { table: 't', field: 'f1', direction: 1 },
+        { table: 't', field: 'f2', direction: 1 },
       ],
       [
         new Map([['A', 1], ['B', 2]]),
         new Map([['A', 100], ['B', 200]]),
       ],
       ['A', 'B'],
+      [3, 1],
     );
     expect(ranked[0].code).toBe('B'); // B 两因子分位均更高
   });
@@ -606,5 +612,59 @@ describe('StrategyBacktestServiceImpl（全流程 stub，不触库）', () => {
         rebalanceIntervalDays: 2,
       }),
     ).rejects.toThrow(/超出数据范围/);
+  });
+});
+
+describe('股票池筛选入卡（pool 摘要即参数，回测卡不再误报全市场）', () => {
+  const momentum = {
+    20240102: { '000001.XSHE': 10, '000002.XSHE': 20 },
+    20240104: { '000001.XSHE': 30, '000002.XSHE': 5 },
+  };
+
+  it('池模式：卡片与摘要股票池 = 筛选摘要+成员数，全文不再出现"全市场"', async () => {
+    const service = makeService({ momentum, quotes: defaultQuotes() });
+    const out = await service.runStrategyBacktest({
+      pool: { groups: [{ kind: 'industry', names: ['有色金属'] }], summary: '有色金属', memberCount: 2 },
+      startDate: '20240101',
+      endDate: '20240108',
+      initialCapital: 100_000,
+      feeRate: 0,
+      rebalanceIntervalDays: 2,
+      maxPositions: 2,
+    });
+    expect(out.summary.股票池).toBe('有色金属（2 只）');
+    const pool = out.card.params?.find((r) => r.label === '股票池');
+    expect(pool?.value).toBe('有色金属（2 只）');
+    expect(JSON.stringify(out)).not.toContain('全市场');
+  });
+
+  it('池与显式清单同传：显示交集口径', async () => {
+    const service = makeService({ momentum, quotes: defaultQuotes() });
+    const out = await service.runStrategyBacktest({
+      securityIds: ['000001.XSHE', '000002.XSHE'],
+      pool: { groups: [{ kind: 'industry', names: ['有色金属'] }], summary: '有色金属', memberCount: 2 },
+      startDate: '20240101',
+      endDate: '20240108',
+      initialCapital: 100_000,
+      feeRate: 0,
+      rebalanceIntervalDays: 2,
+      maxPositions: 2,
+    });
+    expect(out.summary.股票池).toBe('有色金属（2 只）∩2 只清单');
+  });
+
+  it('未知行业 → ClarificationSignal（预检语义不回归）', async () => {
+    const service = makeService({ momentum, quotes: defaultQuotes() });
+    await expect(
+      service.runStrategyBacktest({
+        pool: { groups: [{ kind: 'industry', names: ['不存在行业'] }], summary: '不存在行业', memberCount: 0 },
+        startDate: '20240101',
+        endDate: '20240108',
+        initialCapital: 100_000,
+        feeRate: 0,
+        rebalanceIntervalDays: 2,
+        maxPositions: 2,
+      }),
+    ).rejects.toThrow(ClarificationSignal);
   });
 });

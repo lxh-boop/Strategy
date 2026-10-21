@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import {
+  PoolRefRow,
   SettingKey,
   UserRow,
   UserSettingsRow,
@@ -152,5 +153,16 @@ export class MemoryUserStoreService extends UserStoreService {
     const s = await this.getSettings(userId);
     if (key === 'risk') s.risk = patch.value ?? s.risk;
     else if (patch.on !== undefined) s[key] = patch.on;
+  }
+
+  /* ----- 池句柄 ----- */
+  private readonly poolRefs = new Map<string, PoolRefRow>();
+
+  async savePoolRef(ref: { id: string; conversationId: string; spec: unknown; summary: string; memberCount: number }): Promise<void> {
+    this.poolRefs.set(ref.id, { ...ref, createdAt: fmtNow() });
+  }
+
+  async findPoolRef(id: string): Promise<PoolRefRow | undefined> {
+    return this.poolRefs.get(id);
   }
 }

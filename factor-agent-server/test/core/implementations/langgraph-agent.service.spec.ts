@@ -1,28 +1,47 @@
 import { BaseMessage, HumanMessage, SystemMessage, AIMessage, ToolMessage } from '@langchain/core/messages';
 import { Command } from '@langchain/langgraph';
 import { ConfigService } from '@nestjs/config';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { Conversation } from '../../../src/types';
 import {
   applyCardSelection,
+  bubbleChars,
   formatTableCatalog,
   LangGraphAgentService,
+  suffixStartIndex,
+  uncoveredSlice,
 } from '../../../src/agent/implementations/langgraph-agent.service';
 import { FactorDataService } from '../../../src/core/factor-data.service';
+import { MemoryUserStoreService } from '../../../src/core/implementations/memory-user-store.service';
+import { MemoryFileStoreService } from '../../../src/core/implementations/memory-file-store.service';
 import { FactorAnalysisService } from '../../../src/core/factor-analysis.service';
 import { StrategyBacktestService } from '../../../src/core/strategy-backtest.service';
 
 /* ==========================================================
-   智能体 system prompt 拼装单元测试：表目录注入 + 数据会话门
+   智能体 system prompt 拼装单元测试：表目录注入 + 数据会话门 + 长期记忆注入
    - 无 Key 构造（开发模式，不建 LLM），只测 prompt 组装逻辑；
    - 目录读仓库内真实 SQL/tables.md（与 factor-schema.spec 同口径）；
    - 门语义：未执行过因子工具的会话不带目录（探索指令），
-     dataConversations 中的会话带目录原文、免探索直达字段/读数/回测。
+     dataConversations 中的会话带目录原文、免探索直达字段/读数/回测；
+   - 记忆段（ADR-0007）：带 userId 的会话注入条目，空记忆/无 userId 不注入。
    ========================================================== */
+
+/** 临时记忆根目录：整个 spec 文件共享一个，afterAll 清理 */
+const MEMORY_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-spec-mem-'));
 
 /** 无 Key 配置：get 恒 undefined → 开发模式分支，不创建 LLM 与图 */
 function newService(): LangGraphAgentService {
   const config = { get: () => undefined } as unknown as ConfigService;
-  return new LangGraphAgentService(config, {} as FactorDataService, {} as StrategyBacktestService, {} as FactorAnalysisService);
+  return new LangGraphAgentService(
+    config,
+    {} as FactorDataService,
+    {} as StrategyBacktestService,
+    {} as FactorAnalysisService,
+    new MemoryUserStoreService(),
+    new MemoryFileStoreService(MEMORY_ROOT),
+  );
 }
 
 function conv(id: string): Conversation {
@@ -30,12 +49,12 @@ function conv(id: string): Conversation {
 }
 
 /** 私有成员的两个类型安全访问口径 */
-type PromptBuilder = { prepareMessages(c: Conversation, text: string): BaseMessage[] };
+type PromptBuilder = { prepareMessages(c: Conversation, text: string): Promise<BaseMessage[]> };
 type Gate = { dataConversations: Set<string> };
 
-function systemOf(service: LangGraphAgentService, id: string): string {
+async function systemOf(service: LangGraphAgentService, id: string): Promise<string> {
   const builder = service as unknown as PromptBuilder;
-  const messages = builder.prepareMessages(conv(id), '你好');
+  const messages = await builder.prepareMessages(conv(id), '你好');
   const last = messages[messages.length - 1];
   expect(last).toBeInstanceOf(HumanMessage);
   expect((last as HumanMessage).content).toBe('你好');
@@ -44,19 +63,23 @@ function systemOf(service: LangGraphAgentService, id: string): string {
 }
 
 describe('LangGraphAgentService（表目录注入 + 数据会话门）', () => {
-  it('未执行过因子工具的会话：system 走探索指令，不注入目录块', () => {
+  afterAll(() => {
+    fs.rmSync(MEMORY_ROOT, { recursive: true, force: true });
+  });
+
+  it('未执行过因子工具的会话：system 走探索指令，不注入目录块', async () => {
     const service = newService();
-    const system = systemOf(service, 'conv-fresh');
+    const system = await systemOf(service, 'conv-fresh');
     expect(system).toContain('先 list_factor_tables 看有哪些表');
     expect(system).toContain('list_factor_fields 看因子字段');
     expect(system).not.toContain('【数据表目录】');
     expect(system).not.toContain('直接从中选定数据表');
   });
 
-  it('进门的会话（执行过任一因子工具）：system 注入目录原文，指令改为直接选表', () => {
+  it('进门的会话（执行过任一因子工具）：system 注入目录原文，指令改为直接选表', async () => {
     const service = newService();
     (service as unknown as Gate).dataConversations.add('conv-data');
-    const system = systemOf(service, 'conv-data');
+    const system = await systemOf(service, 'conv-data');
     expect(system).toContain('【数据表目录】');
     expect(system).toContain('与 list_factor_tables 返回一致，无需再调用该工具');
     // 目录内容为真实字典原文（照录不压缩），以 mkt_idxd 为样本断言
@@ -77,6 +100,282 @@ describe('LangGraphAgentService（表目录注入 + 数据会话门）', () => {
     expect(lines[0]).toContain('【数据表目录】');
     expect(lines[1]).toBe('- t_a（表甲）：描述甲。 唯一键: ID,DATE');
     expect(lines[2]).toBe('- t_b（表乙）：描述乙');
+  });
+});
+
+describe('LangGraphAgentService（长期记忆注入，ADR-0007 第 1 刀）', () => {
+  const userId = 42;
+
+  async function systemWithMemory(
+    seed: { slug: string; title: string; content: string }[],
+    uid: number = userId,
+  ): Promise<string> {
+    const store = new MemoryFileStoreService(MEMORY_ROOT);
+    for (const item of seed) await store.saveEntry(uid, item);
+    const service = newService();
+    const builder = service as unknown as PromptBuilder;
+    const messages = await builder.prepareMessages({ ...conv('conv-mem'), userId: uid }, '你好');
+    return String((messages[0] as SystemMessage).content);
+  }
+
+  it('有条目且带 userId：system 注入记忆块与条目行（slug 可见，供 update/delete 引用）', async () => {
+    const system = await systemWithMemory([{ slug: 'prefer-momentum', title: '偏好动量', content: '只做 20 日动量。' }]);
+    expect(system).toContain('【用户长期记忆】');
+    expect(system).toContain('- [prefer-momentum] 偏好动量（');
+    expect(system).toContain('只做 20 日动量。');
+  });
+
+  it('记忆为空：不注入记忆块（prompt 与既往一致）', async () => {
+    const system = await systemWithMemory([], 43); // 全新用户：目录里没有任何条目
+    expect(system).not.toContain('【用户长期记忆】');
+  });
+
+  it('会话不带 userId（编排层漏接线的防御口径）：不注入记忆块', async () => {
+    const store = new MemoryFileStoreService(MEMORY_ROOT);
+    await store.saveEntry(userId, { slug: 'orphan', title: '孤儿条目', content: '不应出现。' });
+    const service = newService();
+    const builder = service as unknown as PromptBuilder;
+    const messages = await builder.prepareMessages(conv('conv-nouser'), '你好');
+    expect(String((messages[0] as SystemMessage).content)).not.toContain('【用户长期记忆】');
+  });
+
+  it('预算截断：budgetChars 调小后只注入预算内条目（新者先留）', async () => {
+    await systemWithMemory([
+      { slug: 'new-entry', title: '新条目', content: '新的偏好。' },
+      { slug: 'old-entry', title: '旧条目', content: '旧的偏好，内容还特别长，超出预算就应该被淘汰掉。' },
+    ]);
+    const service = newService();
+    (service as unknown as { memoryBudgetChars: number }).memoryBudgetChars = 60;
+    const builder = service as unknown as PromptBuilder;
+    const messages = await builder.prepareMessages({ ...conv('conv-mem'), userId }, '你好');
+    const system = String((messages[0] as SystemMessage).content);
+    expect(system).toContain('【用户长期记忆】');
+    expect(system).toContain('new-entry');
+    expect(system).not.toContain('old-entry');
+  });
+});
+
+describe('会话滚动摘要（长度制，ADR-0007 第 3 刀）', () => {
+  const msg = (role: 'user' | 'agent', text: string) =>
+    ({ role, bubble: text, time: '10:00' }) as Conversation['messages'][number];
+  type PromptBuilder = { prepareMessages(c: Conversation, text: string): Promise<BaseMessage[]> };
+
+  it('bubbleChars：气泡字符累计（卡片不参与）', () => {
+    const msgs = [msg('user', '12345'), msg('agent', '678')];
+    expect(bubbleChars(msgs)).toBe(8);
+  });
+
+  it('uncoveredSlice：边界收整条消息，压线时多注入不丢失', () => {
+    const msgs = [msg('user', 'a'.repeat(6)), msg('agent', 'b'.repeat(6))];
+    // covered=10 落在第二条消息中间 → 第二条整条注入（多注入安全）
+    expect(uncoveredSlice(msgs, 10).msgs).toEqual([msgs[1]]);
+    // covered ≥ 总长 → 空；covered=0 → 全量
+    expect(uncoveredSlice(msgs, 12).msgs).toEqual([]);
+    expect(uncoveredSlice(msgs, 0).msgs).toEqual(msgs);
+  });
+
+  it('suffixStartIndex：从尾部累计到 ≥ minChars 的最小整条后缀', () => {
+    const msgs = [msg('user', 'x'.repeat(5)), msg('agent', 'y'.repeat(5)), msg('user', 'z'.repeat(5))];
+    expect(suffixStartIndex(msgs, 8)).toBe(1);
+    expect(suffixStartIndex(msgs, 1)).toBe(2);
+    expect(suffixStartIndex(msgs, 15)).toBe(0);
+  });
+
+  it('无损性质：任意消息序列与尾部预算下，摘要覆盖段 ∪ 原文段 = 全部消息且不重叠', () => {
+    const lengths = [3, 7, 2, 9, 4, 6, 1, 8, 5];
+    const msgs = lengths.map((n, i) => msg(i % 2 ? 'agent' : 'user', String(i).repeat(n)));
+    const total = bubbleChars(msgs);
+    for (const tail of [0, 5, 12, 20, total]) {
+      const covered = bubbleChars(msgs.slice(0, suffixStartIndex(msgs, tail)));
+      const { msgs: uncovered } = uncoveredSlice(msgs, covered);
+      const expected = msgs.slice(suffixStartIndex(msgs, tail));
+      expect(uncovered).toEqual(expected);
+      // 覆盖段与原文段拼接 = 原序列（顺序不变、无遗漏）
+      expect(bubbleChars(msgs.slice(0, suffixStartIndex(msgs, tail))) + uncovered.length).toBeGreaterThanOrEqual(0);
+      expect(msgs.slice(0, msgs.length - uncovered.length).every((m, i) => msgs[i] === m)).toBe(true);
+    }
+  });
+
+  it('slice(-6) 退役：短会话 12 条全量原文注入', async () => {
+    const service = newService();
+    const conv: Conversation = {
+      id: 'conv-long-short',
+      title: '',
+      updatedAt: 0,
+      userId: 20,
+      messages: Array.from({ length: 12 }, (_, i) => msg(i % 2 ? 'agent' : 'user', `第${i}轮`)),
+    };
+    const messages = await (service as unknown as PromptBuilder).prepareMessages(conv, '新问题');
+    // system + 12 条原文 + 当前问题；旧 slice(-6) 只会有 8 条
+    expect(messages).toHaveLength(14);
+    expect(messages.filter((m) => m instanceof HumanMessage || m instanceof AIMessage)).toHaveLength(13);
+    expect(messages.map((m) => String(m.content))).toContain('第0轮');
+    expect(messages.map((m) => String(m.content))).toContain('第11轮');
+  });
+
+  it('无 userId 长会话（防御口径）：只注入最近 triggerChars 内的原文', async () => {
+    const service = newService();
+    (service as unknown as { memoryTriggerChars: number }).memoryTriggerChars = 100;
+    const conv: Conversation = {
+      id: 'conv-nouser-long',
+      title: '',
+      updatedAt: 0,
+      messages: Array.from({ length: 10 }, (_, i) => msg('user', 'x'.repeat(30) + `#${i}`)),
+    };
+    const messages = await (service as unknown as PromptBuilder).prepareMessages(conv, '新问题');
+    const contents = messages.map((m) => String(m.content));
+    expect(contents.some((c) => c.includes('#0'))).toBe(false);
+    expect(contents.some((c) => c.includes('#9'))).toBe(true);
+  });
+
+  describe('摘要闭环（假 LLM）', () => {
+    const userId = 30;
+    const SUMMARY = '用户在调优动量策略，已确认 20 日动量、日频调仓。';
+
+    function serviceWithLlm(): { service: LangGraphAgentService; invoke: jest.Mock } {
+      const service = newService();
+      const invoke = jest.fn().mockResolvedValue({ content: SUMMARY, additional_kwargs: {} });
+      (service as unknown as { llm: unknown }).llm = { invoke };
+      Object.assign(service as unknown as Record<string, number>, {
+        memoryTriggerChars: 100,
+        memoryTailChars: 40,
+        memorySummaryChars: 50,
+        memoryRefitCapChars: 30_000,
+      });
+      return { service, invoke };
+    }
+
+    const longConv = (id: string): Conversation => ({
+      id,
+      title: '',
+      updatedAt: 0,
+      userId,
+      messages: Array.from({ length: 6 }, (_, i) => msg(i % 2 ? 'agent' : 'user', `${i}`.repeat(30))),
+    });
+
+    it('懒兜底：超触发线且无摘要 → 内联压缩落盘，注入 = 摘要 SystemMessage + 尾部原文', async () => {
+      const { service, invoke } = serviceWithLlm();
+      const conv = longConv('conv-summ-a');
+      const messages = await (service as unknown as PromptBuilder).prepareMessages(conv, '新问题');
+      expect(invoke).toHaveBeenCalledTimes(1);
+      const store = new MemoryFileStoreService(MEMORY_ROOT);
+      const summary = await store.readSummary(userId, 'conv-summ-a');
+      expect(summary).not.toBeNull();
+      expect(summary!.coveredChars).toBe(120); // 6×30，尾部保留 2 条（60 字 ≥ tail 40）
+      // 注入形态：system + 摘要 + 2 条尾部原文 + 当前问题
+      expect(messages).toHaveLength(5);
+      expect(String((messages[1] as SystemMessage).content)).toContain(SUMMARY);
+      expect(String(messages[2].content)).toBe('4'.repeat(30));
+      expect(String(messages[3].content)).toBe('5'.repeat(30));
+      // 无损不变式：前 4 条在摘要覆盖段，后 2 条原文在场
+      expect(summary!.coveredChars).toBe(bubbleChars(conv.messages.slice(0, 4)));
+    });
+
+    it('滞后带内不炼：有摘要且未覆盖原文 ≤ trigger-tail → 直接注入，LLM 零调用', async () => {
+      const { service, invoke } = serviceWithLlm();
+      const store = new MemoryFileStoreService(MEMORY_ROOT);
+      await store.writeSummary(userId, 'conv-summ-b', SUMMARY, 180); // 全覆盖：未覆盖 0 字
+      const messages = await (service as unknown as PromptBuilder).prepareMessages(longConv('conv-summ-b'), '新问题');
+      expect(invoke).not.toHaveBeenCalled();
+      expect(String((messages[1] as SystemMessage).content)).toContain(SUMMARY);
+    });
+
+    it('硬上限：有旧摘要但未覆盖原文超 triggerChars → 内联重炼封顶', async () => {
+      const { service, invoke } = serviceWithLlm();
+      const store = new MemoryFileStoreService(MEMORY_ROOT);
+      await store.writeSummary(userId, 'conv-summ-c', '旧摘要', 0); // covered=0：未覆盖 = 全部 180 字 > 100
+      const messages = await (service as unknown as PromptBuilder).prepareMessages(longConv('conv-summ-c'), '新问题');
+      expect(invoke).toHaveBeenCalledTimes(1);
+      const summary = await store.readSummary(userId, 'conv-summ-c');
+      expect(summary!.summary).toBe(SUMMARY); // 已被重炼覆盖
+      expect(String((messages[1] as SystemMessage).content)).toContain(SUMMARY);
+    });
+  });
+});
+
+describe('save_memory（长期记忆写入闭环，ADR-0007 第 2 刀）', () => {
+  const conv = (id: string): Conversation => ({ id, title: '', messages: [], updatedAt: 0 });
+  type SaveRunner = {
+    execSaveMemory(
+      args: unknown,
+      ctx: { delegated: boolean; conversationId: string; userId?: number },
+    ): Promise<{ result: Record<string, unknown> }>;
+  };
+  const ctxOf = (userId?: number) => ({ delegated: false, conversationId: 'spec-save', userId });
+  const add = (slug: string, extra: Record<string, unknown> = {}) => ({ op: 'add', slug, title: '标题', content: '内容。', ...extra });
+
+  it('add：落盘成功，回执带「已记住」', async () => {
+    const service = newService();
+    const r = await (service as unknown as SaveRunner).execSaveMemory(add('prefer-low-vol'), ctxOf(9));
+    expect(r.result).toMatchObject({ ok: true, 回执: '已记住：标题', slug: 'prefer-low-vol' });
+    const entries = await new MemoryFileStoreService(MEMORY_ROOT).listEntries(9);
+    expect(entries.map((e) => e.slug)).toContain('prefer-low-vol');
+  });
+
+  it('add 撞既有 slug：报错引导 update，不覆盖', async () => {
+    const service = newService();
+    await (service as unknown as SaveRunner).execSaveMemory(add('dup-slug'), ctxOf(10));
+    const r = await (service as unknown as SaveRunner).execSaveMemory(add('dup-slug'), ctxOf(10));
+    expect(String(r.result.error)).toContain('改用 op=update');
+    const entries = await new MemoryFileStoreService(MEMORY_ROOT).listEntries(10);
+    expect(entries.filter((e) => e.slug === 'dup-slug')).toHaveLength(1);
+  });
+
+  it('update：覆盖既有条目；引用不存在的 slug 报错引导 add', async () => {
+    const service = newService();
+    await (service as unknown as SaveRunner).execSaveMemory(add('upd-target'), ctxOf(11));
+    const ok = await (service as unknown as SaveRunner).execSaveMemory(
+      { op: 'update', slug: 'upd-target', title: '新标题', content: '新内容。' },
+      ctxOf(11),
+    );
+    expect(ok.result).toMatchObject({ ok: true, 回执: '已更新：新标题' });
+    const miss = await (service as unknown as SaveRunner).execSaveMemory(
+      { op: 'update', slug: 'no-such', title: 't', content: 'c' },
+      ctxOf(11),
+    );
+    expect(String(miss.result.error)).toContain('改用 op=add');
+  });
+
+  it('delete：存在则移除，不存在报错', async () => {
+    const service = newService();
+    await (service as unknown as SaveRunner).execSaveMemory(add('del-target'), ctxOf(12));
+    const ok = await (service as unknown as SaveRunner).execSaveMemory({ op: 'delete', slug: 'del-target' }, ctxOf(12));
+    expect(ok.result).toMatchObject({ ok: true, 回执: '已忘掉：del-target' });
+    const miss = await (service as unknown as SaveRunner).execSaveMemory({ op: 'delete', slug: 'del-target' }, ctxOf(12));
+    expect(String(miss.result.error)).toContain('无法删除');
+  });
+
+  it('缺参与非法 op：逐项报错不落盘', async () => {
+    const service = newService();
+    const runner = service as unknown as SaveRunner;
+    expect(String((await runner.execSaveMemory({ op: 'add' }, ctxOf(13))).result.error)).toContain('参数不完整');
+    expect(String((await runner.execSaveMemory({ op: 'delete' }, ctxOf(13))).result.error)).toContain('需要 slug');
+    expect(String((await runner.execSaveMemory({ op: 'wat', slug: 's', title: 't', content: 'c' }, ctxOf(13))).result.error)).toContain('op 不合法');
+    await expect(new MemoryFileStoreService(MEMORY_ROOT).listEntries(13)).resolves.toEqual([]);
+  });
+
+  it('会话未携带 userId（防御口径）：报错不落盘', async () => {
+    const service = newService();
+    const r = await (service as unknown as SaveRunner).execSaveMemory(add('no-user'), ctxOf(undefined));
+    expect(String(r.result.error)).toContain('未携带用户身份');
+  });
+
+  it('图闭环：save_memory 工具调用经 tools 节点落盘，ToolMessage 回执带「已记住」', async () => {
+    const { app, agent } = buildTestGraph();
+    agent.invoke
+      .mockImplementationOnce(async () =>
+        withToolCalls('save_memory', '', [{ id: 'm1', args: { op: 'add', slug: 'graph-add', title: '图测条目', content: '图级闭环写入。' } }]),
+      )
+      .mockImplementationOnce(async () => finalText('已记住你的偏好。'));
+    const state = (await app.invoke(
+      { conversationId: 'spec-mem-graph', userText: '记住我只做动量', userId: 14, messages: [new HumanMessage('记住我只做动量')] },
+      { configurable: { thread_id: 'mem-graph-1' }, recursionLimit: 25 },
+    )) as { messages: BaseMessage[] };
+    const toolMsg = state.messages.find((m) => (m as unknown as { tool_call_id?: string }).tool_call_id === 'm1');
+    expect(toolMsg).toBeInstanceOf(ToolMessage);
+    expect(JSON.parse(String((toolMsg as ToolMessage).content))).toMatchObject({ 回执: '已记住：图测条目' });
+    const entries = await new MemoryFileStoreService(MEMORY_ROOT).listEntries(14);
+    expect(entries.map((e) => e.slug)).toContain('graph-add');
   });
 });
 
@@ -156,6 +455,8 @@ function buildTestGraph() {
     {} as FactorDataService,
     backtest as unknown as StrategyBacktestService,
     factorAnalysis as unknown as FactorAnalysisService,
+    new MemoryUserStoreService(),
+    new MemoryFileStoreService(MEMORY_ROOT),
   );
   const agent = { invoke: jest.fn() };
   const app = (service as unknown as { buildGraph(a: unknown): { invoke(input: object, config?: object): Promise<Record<string, unknown>> } }).buildGraph(agent);

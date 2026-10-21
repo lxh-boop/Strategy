@@ -23,3 +23,7 @@ export const fmtConvDate = (ts: number): string => {
 
 export const totalReturnPct = (arr: number[]): number =>
   (arr[arr.length - 1] / arr[0] - 1) * 100;
+
+/** YYYYMMDD（数字或纯数字字符串）→ YYYY-MM-DD */
+export const fmtYmd = (v: number | string): string =>
+  String(v).replace(/^(\d{4})(\d{2})(\d{2})$/, "$1-$2-$3");

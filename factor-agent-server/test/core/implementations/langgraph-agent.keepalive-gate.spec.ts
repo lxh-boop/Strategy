@@ -1,8 +1,13 @@
 import { ConfigService } from '@nestjs/config';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { ApiException } from '../../../src/common/api.exception';
 import { AgentProgressEvent } from '../../../src/types';
 import { LangGraphAgentService } from '../../../src/agent/implementations/langgraph-agent.service';
 import { FactorDataService } from '../../../src/core/factor-data.service';
+import { MemoryUserStoreService } from '../../../src/core/implementations/memory-user-store.service';
+import { MemoryFileStoreService } from '../../../src/core/implementations/memory-file-store.service';
 import { StrategyBacktestService } from '../../../src/core/strategy-backtest.service';
 import { FactorAnalysisService } from '../../../src/core/factor-analysis.service';
 
@@ -15,9 +20,18 @@ import { FactorAnalysisService } from '../../../src/core/factor-analysis.service
    ========================================================== */
 
 /** 无 Key 配置：get 恒 undefined → 构造走开发模式分支，不创建真 LLM 与图 */
+const MEMORY_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-gate-mem-'));
+
 function newService(): LangGraphAgentService {
   const config = { get: () => undefined } as unknown as ConfigService;
-  return new LangGraphAgentService(config, {} as FactorDataService, {} as StrategyBacktestService, {} as FactorAnalysisService);
+  return new LangGraphAgentService(
+    config,
+    {} as FactorDataService,
+    {} as StrategyBacktestService,
+    {} as FactorAnalysisService,
+    new MemoryUserStoreService(),
+    new MemoryFileStoreService(MEMORY_ROOT),
+  );
 }
 
 /** 假图注入：绕开开发模式检查，invoke 行为由用例定制 */

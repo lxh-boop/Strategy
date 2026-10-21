@@ -7,6 +7,8 @@
    这里写的约束是给模型看的行为指引，服务端校验不依赖本文件。
    ========================================================== */
 
+import { describeFunctions } from '../../core/weight-functions';
+
 /** 工具 1：列出全部可用数据表（tables.md 目录）。表目录通常已注入 system prompt，本工具仅作兜底 */
 export const LIST_FACTOR_TABLES_SPEC = {
   type: 'function' as const,
@@ -96,8 +98,15 @@ export const RUN_STRATEGY_BACKTEST_SPEC = {
           type: 'array',
           items: { type: 'string' },
           description:
-            '股票池：证券代码数组（如 ["000002.XSHE"]，来自前置筛选或用户指定）。缺省/空 = 全市场。' +
-            '禁止在对话中手拼超长清单；需要行业/主题股票池时先用筛选手段得到代码清单',
+            '股票池：证券代码数组（如 ["000002.XSHE"]），只放用户点名或前置筛选的少量股票。缺省/空 = 全市场。' +
+            '行业/指数等成分池改用 poolId（screen_stock_pool 产物），禁止手工拼成分清单',
+        },
+        poolId: {
+          type: 'string',
+          description:
+            '股票池句柄（可选）：screen_stock_pool 返回的池句柄，回测仅在池内选股。' +
+            '池成员按每个调仓日的时点归属解析（期内调样自动跟随），再与 securityIds 取交集；' +
+            '句柄只在本会话内有效；触发模式（rebalanceIntervalDays=0）不支持',
         },
         startDate: {
           type: 'string',
@@ -172,18 +181,40 @@ export const RUN_STRATEGY_BACKTEST_SPEC = {
           maxItems: 10,
           description:
             '排序因子：各因子截面分位数标准化（0~100）后加权合成综合分，按综合分降序取前 maxPositions。' +
-            '缺省 = 引擎自动用默认排序因子（20 日动量 REVS20，值大优）。weight 全省略 = 等权 1/N；' +
-            '需要加权时必须给全部因子传 weight（按总和归一化），不支持只传部分',
+            '缺省 = 引擎自动用默认排序因子（20 日动量 REVS20，值大优）。' +
+            '需要自定义因子权重时不要在这里传权重，改用 weightFn 函数参数',
           items: {
             type: 'object',
             properties: {
               table: { type: 'string', description: '数据表名，来自系统提示中的表目录' },
               field: { type: 'string', description: '字段名，来自 list_factor_fields 的返回' },
               direction: { type: 'integer', enum: [1, -1], description: '排序方向：1=值大优（默认，如动量）/ -1=值小优（如低估值）' },
-              weight: { type: 'number', description: '权重；全部因子都传才生效（缺省等权 1/N）' },
             },
             required: ['table', 'field', 'direction'],
           },
+        },
+        weightFn: {
+          type: 'object',
+          description:
+            '权重函数（可选，缺省 = 常数比例等权）：每次调仓求值各排序因子的权重，因子截面由引擎供给，只需给函数名与旋钮参数。可用函数：\n' +
+            describeFunctions('factor-weight'),
+          properties: {
+            name: { type: 'string', description: '函数名，从上方名录中选择' },
+            params: { type: 'object', description: '该函数的旋钮参数，结构见名录' },
+          },
+          required: ['name'],
+        },
+        positionFn: {
+          type: 'object',
+          description:
+            '仓位函数（可选，缺省 = 常数比例等权）：每次调仓输出各候选股的目标买入金额（整手/现金由校验器修正）。' +
+            '注意"指数级均线定总仓位"属于大盘择时，不要用仓位函数表达。可用函数：\n' +
+            describeFunctions('position'),
+          properties: {
+            name: { type: 'string', description: '函数名，从上方名录中选择' },
+            params: { type: 'object', description: '该函数的旋钮参数，结构见名录' },
+          },
+          required: ['name'],
         },
         sellRules: {
           type: 'array',
@@ -392,15 +423,29 @@ const RUN_DAILY_SCREEN_SPEC = {
               table: { type: 'string', description: '数据表名' },
               field: { type: 'string', description: '字段名' },
               direction: { type: 'integer', enum: [1, -1], description: '1=值大优（默认）/ -1=值小优' },
-              weight: { type: 'number', description: '权重；全部因子都传才生效（缺省等权 1/N）' },
             },
             required: ['table', 'field', 'direction'],
           },
         },
+        weightFn: {
+          type: 'object',
+          description:
+            '权重函数（可选，缺省 = 常数比例等权）：与回测排序口径一致，每次选股求值因子权重。可用函数：\n' +
+            describeFunctions('factor-weight'),
+          properties: {
+            name: { type: 'string', description: '函数名，从上方名录选择' },
+            params: { type: 'object', description: '该函数的旋钮参数，结构见名录' },
+          },
+          required: ['name'],
+        },
         securityIds: {
           type: 'array',
           items: { type: 'string' },
-          description: '股票池（000002.XSHE 形态）；缺省 = 全市场',
+          description: '股票池（000002.XSHE 形态，用户点名少量股票）；缺省 = 全市场',
+        },
+        poolId: {
+          type: 'string',
+          description: '股票池句柄（可选）：screen_stock_pool 返回的池句柄，按查询日时点归属收窄选股域，再与 securityIds 取交集',
         },
         maxPositions: { type: 'integer', description: '入选只数，默认 10，上限 100' },
         date: { type: 'string', description: '查询日，纯数字 YYYYMMDD；缺省 = 最近交易日' },
@@ -410,6 +455,85 @@ const RUN_DAILY_SCREEN_SPEC = {
 } as const;
 
 /** 全部工具 schema：bindTools 一次绑定，顺序即 prompt 里的工具编号 */
+/** 工具 7：股票池筛选（ADR-0006）：多组条件交并 → 池句柄；成员清单不进对话，回测/选股以 poolId 引用 */
+export const SCREEN_STOCK_POOL_SPEC = {
+  type: 'function' as const,
+  function: {
+    name: 'screen_stock_pool',
+    description:
+      '股票池筛选：把定义固定的证券集合（行业/指数成分/点名清单）组合成可复用的股票池，返回池句柄（poolId）。' +
+      '组内并集、组间交集，如 [有色金属,黄金] ∩ 沪深300。回测或每日选股传 poolId 即在池内选股；' +
+      '成员清单不进入对话（回执只有条件摘要与成员数），向用户转述时同样只引用条件与数量。' +
+      '即查即得无需确认。用户点名少量股票时不必用本工具，直接在回测传 securityIds。',
+    parameters: {
+      type: 'object',
+      properties: {
+        groups: {
+          type: 'array',
+          minItems: 1,
+          maxItems: 5,
+          description: '筛选组数组：组内并集、组间交集',
+          items: {
+            type: 'object',
+            properties: {
+              kind: { type: 'string', enum: ['industry', 'index', 'list'], description: '来源类型' },
+              names: {
+                type: 'array',
+                items: { type: 'string' },
+                description:
+                  'kind=industry 时必填：申万一级行业名（共 31 个）：农林牧渔、基础化工、钢铁、有色金属、电子、汽车、家用电器、食品饮料、' +
+                  '纺织服饰、轻工制造、医药生物、公用事业、交通运输、房地产、商贸零售、社会服务、银行、非银金融、综合、' +
+                  '建筑材料、建筑装饰、电力设备、机械设备、国防军工、计算机、传媒、通信、煤炭、石油石化、环保、美容护理',
+              },
+              codes: {
+                type: 'array',
+                items: { type: 'string' },
+                description: 'kind=index 时必填：指数代码，常用 000300.SH（沪深300）/ 000905.SH（中证500）/ 000016.SH（上证50）',
+              },
+              ids: {
+                type: 'array',
+                items: { type: 'string' },
+                description: 'kind=list 时必填：证券代码数组（000002.XSHE 形态）',
+              },
+            },
+            required: ['kind'],
+          },
+        },
+      },
+      required: ['groups'],
+    },
+  },
+};
+
+/** 工具 9：长期记忆三操作（ADR-0007）：新增/更新/删除一条用户记忆 */
+export const SAVE_MEMORY_SPEC = {
+  type: 'function' as const,
+  function: {
+    name: 'save_memory',
+    description:
+      '长期记忆维护：把用户的稳定偏好、研究结论等值得跨会话记住的事实存入本地记忆库，' +
+      '下次对话自动可见。三种操作：add 新增（用户说"记住：XX"或陈述了值得长期记住的偏好/结论）；' +
+      'update 更新（偏好变了，引用既有条目的 slug 覆盖，不要新增重复条目）；' +
+      'delete 删除（用户说"忘掉 XX"）。' +
+      '写入后必须在回复里告知用户记了/改了/删了什么。只存稳定事实，单次对话的临时信息不要存。',
+    parameters: {
+      type: 'object',
+      properties: {
+        op: { type: 'string', enum: ['add', 'update', 'delete'], description: '操作类型' },
+        slug: {
+          type: 'string',
+          description:
+            '条目标识（小写英文短横线，如 prefer-momentum）。add 必填（新起一个不与记忆块重复的）；' +
+            'update/delete 必填且必须来自记忆块行首方括号内的既有 slug',
+        },
+        title: { type: 'string', description: '条目标题（一句话概括，中文）。add/update 必填' },
+        content: { type: 'string', description: '条目内容（一到两句事实，具体可执行，不写空话）。add/update 必填' },
+      },
+      required: ['op'],
+    },
+  },
+};
+
 export const AGENT_TOOL_SPECS = [
   LIST_FACTOR_TABLES_SPEC,
   LIST_FACTOR_FIELDS_SPEC,
@@ -418,6 +542,8 @@ export const AGENT_TOOL_SPECS = [
   RUN_RANK_ANALYSIS_SPEC,
   RUN_FACTOR_CORRELATION_SPEC,
   RUN_DAILY_SCREEN_SPEC,
+  SCREEN_STOCK_POOL_SPEC,
+  SAVE_MEMORY_SPEC,
 ] as const;
 
 /* ----- 工具入参形态（LLM 传入，字段均为未知形态，服务端归一化校验） ----- */
@@ -431,4 +557,11 @@ export interface ReadFactorDataArgs {
   fields?: unknown;
   date?: unknown;
   security?: unknown;
+}
+
+export interface SaveMemoryArgs {
+  op?: unknown;
+  slug?: unknown;
+  title?: unknown;
+  content?: unknown;
 }

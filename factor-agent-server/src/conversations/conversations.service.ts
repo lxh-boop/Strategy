@@ -21,6 +21,10 @@ export abstract class ConversationsService {
   abstract clear(userId: number, id: string): Promise<Conversation>;
   abstract getMessages(userId: number, id: string): Promise<ChatMessage[]>;
 
+  /** 该会话是否有仍在后端执行的轮次（在跑轮次查询）：轮次落库在整轮结束时一次性写入，
+   *  执行中的轮次在 list/getMessages 里都不可见——前端刷新后据此恢复"执行中"占位并轮询补齐 */
+  abstract getRunStatus(userId: number, id: string): Promise<{ running: boolean }>;
+
   /** 发消息：返回同一次请求的用户消息与智能体回复 */
   abstract sendMessage(userId: number, id: string, text: string): Promise<SendMessageResult>;
 

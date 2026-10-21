@@ -22,7 +22,7 @@ import { assertTimingOverlay, collectTimingRefs, StrategyTimingOverlay } from '.
    - 因子即取数规格：无 FactorDef，全部按 entryFilters/sortFactors/sellRules 引用的
      table.field 从白名单数据表读截面，引擎不在线计算任何因子；
    - 过滤/排序分参：同一因子既过滤又排序时两处重复传入，引擎不合并；
-   - 排序：截面分位数标准化（0~100）→ 加权合成（weight 缺省等权 1/N）→
+   - 排序：截面分位数标准化（0~100）→ 加权合成（权重由 weightFn 每调仓求值，缺省等权 1/N）→
      综合分降序取前 maxPositions；sortFactors 为空时兜底追加 20 日动量（值大优）；
    - 职责边界：引擎只执行单次给定参数的回测，参数自动寻优是 GLM 编排层职责。
    ========================================================== */
@@ -98,12 +98,11 @@ export function formatRuleCond(r: { table: string; field: string; op: FilterOp; 
 }
 
 /** 排序因子：direction 1=值大优（降序）/ -1=值小优（升序）。
- *  weight 全省略 = 等权 1/N；加权模式下全部因子必须都传（引擎按总和归一化） */
+ *  因子权重由 weightFn 函数每调仓求值（见 weight-functions.ts），本结构不再承载静态权重 */
 export interface StrategySortFactor {
   table: string;
   field: string;
   direction: 1 | -1;
-  weight?: number;
 }
 
 /** 卖出规则：持仓期每日收盘后检查，命中生成 T+1 卖出指令（全仓） */
@@ -143,6 +142,14 @@ export interface StrategyBacktestInput {
   entryFilters?: unknown;
   /** 排序因子（缺省 = 默认 20 日动量·值大优，弹窗如实展示） */
   sortFactors?: unknown;
+  /** 权重函数引用（{name, params}；缺省 = constant 等权） */
+  weightFn?: unknown;
+  /** 仓位函数引用（缺省 = constant 等权金额）。触发模式不支持 */
+  positionFn?: unknown;
+  /** 股票池句柄（screen_stock_pool 产物）：编排层解析成 pool 后传引擎；GLM 只见摘要不见清单 */
+  poolId?: unknown;
+  /** 编排层解析 poolId 后填充（引擎入参域，GLM 原始调用不含） */
+  pool?: unknown;
   /** 卖出规则（持仓期每日检查） */
   sellRules?: unknown;
   /** 不卖条件（可选）：命中的持仓跳过全部卖出检查（含调仓换出）；择时减仓不受保护 */
@@ -157,7 +164,30 @@ export interface StrategyBacktestInput {
   strategyType?: unknown;
 }
 
+/** 引擎侧池引用（ADR-0006）：编排层解析 poolId 后填充；summary/memberCount 随参走供卡片直读 */
+export interface EnginePoolRef {
+  groups: PoolGroup[];
+  /** 展示摘要（如 有色金属∩沪深300），筛选工具产物原样透传 */
+  summary: string;
+  /** 筛选时点成员数（当前时点口径，逐调仓日实际成员由引擎 PIT 解析） */
+  memberCount: number;
+}
+
+/** 池引用轻校验（结构由编排层构造，这里拦明显残缺；groups 结构本身由池引擎 resolvePoolSpec 校验） */
+function assertPoolRef(raw: unknown): EnginePoolRef | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  const r = raw as { groups?: unknown; summary?: unknown };
+  if (!Array.isArray(r.groups) || typeof r.summary !== 'string') {
+    throw new ApiException('INVALID_ARGUMENT', 400, 'pool 结构不合法：需要 { groups, summary, memberCount }（编排层解析 poolId 后填充）');
+  }
+  return raw as EnginePoolRef;
+}
+
 /** 归一化后的合法入参 */
+import { assertFunctionSpec } from './weight-functions';
+import type { PoolGroup } from './industry-engine';
+import type { FunctionSpec } from '../types';
+
 export interface NormalizedStrategyInput {
   /** null = 全市场 */
   securityIds: string[] | null;
@@ -174,6 +204,12 @@ export interface NormalizedStrategyInput {
   minPositionPct: number;
   entryFilters: StrategyFilterRule[];
   sortFactors: StrategySortFactor[];
+  /** 权重函数引用（缺省 = constant 等权；每调仓求值，替代静态 weight 列） */
+  weightFn?: FunctionSpec;
+  /** 仓位函数引用（缺省 = constant 等权金额；每调仓求值，输出每股目标金额） */
+  positionFn?: FunctionSpec;
+  /** 池引用（编排层解析 poolId 后填充；缺省 = 不筛池）：成员逐调仓日时点解析，与 securityIds 取交集 */
+  pool?: EnginePoolRef;
   sellRules: StrategySellRule[];
   /** 不卖条件（空数组 = 无） */
   keepRules: StrategyKeepRule[];
@@ -233,7 +269,7 @@ export function effectiveSortFactors(sortFactors: StrategySortFactor[]): {
 export function describeSortFactors(factors: StrategySortFactor[], sep = '；'): string {
   return factors
     .map((f) =>
-      `${f.table}.${f.field}（${f.direction === 1 ? '值大优' : '值小优'}，${f.weight !== undefined ? `权重 ${f.weight}` : '等权'}）`,
+      `${f.table}.${f.field}（${f.direction === 1 ? '值大优' : '值小优'}）`,
     )
     .join(sep);
 }
@@ -316,6 +352,16 @@ export function assertStrategyInput(raw: StrategyBacktestInput): NormalizedStrat
   }
   if (!/^\d{8}$/.test(startDate) || !/^\d{8}$/.test(endDate) || Number(startDate) >= Number(endDate)) {
     throw new ApiException('INVALID_ARGUMENT', 400, `回测区间非法：startDate/endDate 须为纯数字 YYYYMMDD 且 start 早于 end，当前 ${startDate} ~ ${endDate}`);
+  }
+
+  const parsedWeightFn = assertFunctionSpec(raw.weightFn, 'weightFn');
+  const parsedPositionFn = assertFunctionSpec(raw.positionFn, 'positionFn');
+  // 行业筛选：非空字符串数组去重；空数组视为不筛
+  const poolId = raw.poolId === undefined || raw.poolId === null || raw.poolId === ''
+    ? undefined
+    : String(raw.poolId).trim();
+  if (raw.poolId !== undefined && raw.poolId !== null && raw.poolId !== '' && !poolId) {
+    throw new ApiException('INVALID_ARGUMENT', 400, 'poolId 必须是 screen_stock_pool 返回的池句柄字符串');
   }
 
   // 股票池：缺省/空数组 = 全市场；给了必须全是 000002.XSHE 形态
@@ -440,6 +486,9 @@ export function assertStrategyInput(raw: StrategyBacktestInput): NormalizedStrat
     minPositionPct,
     entryFilters: assertFilters(raw.entryFilters),
     sortFactors: assertSortFactors(raw.sortFactors),
+    ...(parsedWeightFn ? { weightFn: parsedWeightFn } : {}),
+    ...(parsedPositionFn ? { positionFn: parsedPositionFn } : {}),
+    ...(assertPoolRef(raw.pool) ? { pool: assertPoolRef(raw.pool) } : {}),
     sellRules: assertSellRules(raw.sellRules),
     keepRules: assertKeepRules(raw.keepRules),
     excludeRanges: assertExcludeRanges(raw.excludeRanges, startDate, endDate),
@@ -590,14 +639,13 @@ function assertExcludeRanges(raw: unknown, startDate: string, endDate: string): 
 function assertSortFactors(rawFactors: unknown): StrategySortFactor[] {
   if (rawFactors === undefined || rawFactors === null || rawFactors === '') return [];
   if (!Array.isArray(rawFactors)) {
-    throw new ApiException('INVALID_ARGUMENT', 400, 'sortFactors 必须是数组，每项 {table, field, direction, weight?}');
+    throw new ApiException('INVALID_ARGUMENT', 400, 'sortFactors 必须是数组，每项 {table, field, direction}');
   }
   if (rawFactors.length > MAX_RULES) {
     throw new ApiException('INVALID_ARGUMENT', 400, `sortFactors 过多（${rawFactors.length} 个，最多 ${MAX_RULES} 个）`);
   }
   const factors: StrategySortFactor[] = [];
   const seen = new Set<string>();
-  let weightCount = 0;
   for (const item of rawFactors) {
     const o = (item ?? {}) as Record<string, unknown>;
     const table = String(o.table ?? '').trim();
@@ -612,22 +660,7 @@ function assertSortFactors(rawFactors: unknown): StrategySortFactor[] {
     const key = `${table}.${field}`;
     if (seen.has(key)) continue; // 重复因子忽略（同一因子过滤+排序两处传是合法的，列表内重复无意义）
     seen.add(key);
-    let weight: number | undefined;
-    if (o.weight !== undefined && o.weight !== null && o.weight !== '') {
-      weight = Number(o.weight);
-      if (!Number.isFinite(weight) || weight <= 0) {
-        throw new ApiException('INVALID_ARGUMENT', 400, `sortFactors[].weight 须为正数（引擎按总和归一化）: ${String(o.weight)}`);
-      }
-      weightCount++;
-    }
-    factors.push({ table, field, direction: direction as 1 | -1, ...(weight !== undefined ? { weight } : {}) });
-  }
-  if (weightCount > 0 && weightCount < factors.length) {
-    throw new ApiException(
-      'INVALID_ARGUMENT',
-      400,
-      `sortFactors 的 weight 只支持两种模式：全省略（等权 1/N）或全部传入（加权合成），当前 ${factors.length} 个因子只传了 ${weightCount} 个`,
-    );
+    factors.push({ table, field, direction: direction as 1 | -1 });
   }
   return factors;
 }
@@ -782,7 +815,7 @@ export function applyEntryFilters(
 
 /**
  * 排序合成：各排序因子在存活池上按值升序算分位数（(排名)/n），direction=1 直接用
- * （值大 → 分位高）、-1 取 1-分位数；标准化到 0~100 后加权平均（weight 缺省等权 1/N，
+ * （值大 → 分位高）、-1 取 1-分位数；标准化到 0~100 后加权平均（weights 由权重函数每调仓求值，
  * 只对该股有值的因子重归一化），全部因子都缺值的股票不入选。
  * @returns 综合分降序的候选列表
  */
@@ -790,8 +823,8 @@ export function rankUniverse(
   factors: StrategySortFactor[],
   sections: Map<string, number>[],
   pool: string[],
+  weights?: number[],
 ): { code: string; score: number }[] {
-  const weightTotal = factors.reduce((a, f) => a + (f.weight ?? 0), 0);
   const scoreSum = new Map<string, number>();
   factors.forEach((factor, i) => {
     const rows = pool
@@ -800,7 +833,7 @@ export function rankUniverse(
     if (!rows.length) return;
     rows.sort((a, b) => a.value - b.value);
     const n = rows.length;
-    const w = factor.weight ?? (weightTotal > 0 ? 0 : 1 / factors.length);
+    const w = weights?.[i] ?? 1 / factors.length;
     rows.forEach((row, idx) => {
       const pct = (idx + 1) / n;
       const score = (factor.direction === -1 ? 1 - pct : pct) * 100;
@@ -1250,6 +1283,12 @@ export interface DailyScreenInput {
   entryFilters?: unknown;
   /** 排序因子（缺省 = 默认 20 日动量） */
   sortFactors?: unknown;
+  /** 权重函数引用（结构同回测 weightFn）：与回测排序口径保持一致；缺省 = 等权 */
+  weightFn?: unknown;
+  /** 股票池句柄（同回测 poolId）：按查询日时点解析 */
+  poolId?: unknown;
+  /** 编排层解析 poolId 后填充（引擎入参域，GLM 原始调用不含） */
+  pool?: EnginePoolRef;
   /** 入选只数，默认 10 */
   maxPositions?: unknown;
   /** 查询日（纯数字 YYYYMMDD）；缺省 = 数据表内最近交易日 */
@@ -1261,6 +1300,9 @@ export interface DailyScreenNormalized {
   entryFilters: StrategyFilterRule[];
   /** 有效排序因子（空清单已兜底默认动量） */
   sortFactors: StrategySortFactor[];
+  /** 权重函数（缺省 = 等权；与回测排序口径一致） */
+  weightFn?: FunctionSpec;
+  pool?: EnginePoolRef;
   usedDefaultSort: boolean;
   maxPositions: number;
   /** YYYYMMDD 纯数字；未传为 null（由实现层解析最近交易日） */
@@ -1271,10 +1313,14 @@ export interface DailyScreenNormalized {
 export interface DailyScreenOutput {
   /** 实际查询交易日 YYYYMMDD */
   date: number;
+  /** 权重函数展示（未挂载 = 等权） */
+  权重函数?: string;
   /** 入选清单（综合分降序，≤ maxPositions）；factorValues 与 sortFactors 一一对应（缺值 null） */
   stocks: { code: string; score: number; factorValues: (number | null)[] }[];
   /** 有效排序因子（确认卡/卡片展示同源） */
   sortFactors: StrategySortFactor[];
+  /** 池摘要展示（未传 = 不筛池） */
+  poolSummary?: string;
   usedDefaultSort: boolean;
   /** 过滤条件（展示同源） */
   entryFilters: StrategyFilterRule[];
@@ -1321,6 +1367,8 @@ export function assertDailyScreenInput(raw: DailyScreenInput): DailyScreenNormal
     securityIds,
     entryFilters,
     sortFactors: effective.factors,
+    weightFn: assertFunctionSpec(raw.weightFn, 'weightFn'),
+    ...(assertPoolRef(raw.pool) ? { pool: assertPoolRef(raw.pool) } : {}),
     usedDefaultSort: effective.usedDefault,
     maxPositions,
     date,

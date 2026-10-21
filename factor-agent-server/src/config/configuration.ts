@@ -36,4 +36,14 @@ export default () => ({
     secret: (process.env.USER_JWT_SECRET ?? '').trim() || 'alphasage-dev-secret-change-me',
     expiresIn: (process.env.USER_JWT_EXPIRES ?? '').trim() || '7d',
   },
+  // 长期记忆与会话滚动摘要（ADR-0007）：md 文件落盘，dir 缺省 <运行目录>/memories（CoreModule 兜底拼接）
+  memories: {
+    dir: process.env.MEMORIES_DIR ?? '',
+    triggerChars: Number(process.env.MEMORY_TRIGGER_CHARS ?? 2000),
+    tailChars: Number(process.env.MEMORY_TAIL_CHARS ?? 800),
+    summaryChars: Number(process.env.MEMORY_SUMMARY_CHARS ?? 400),
+    maxEntries: Number(process.env.MEMORY_MAX_ENTRIES ?? 30),
+    budgetChars: Number(process.env.MEMORY_BUDGET_CHARS ?? 800),
+    refitCapChars: Number(process.env.MEMORY_REFIT_CAP_CHARS ?? 30_000),
+  },
 });

@@ -1,28 +1,16 @@
 import { useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
-import type { AgentCard, BacktestCard, ChatMessage, Conversation, MetricItem } from "../types";
+import type { AgentCard, BacktestCard, ChatMessage, Conversation } from "../types";
 import { CHAT_SUGGESTIONS } from "../data/mock";
-import { fmtConvDate } from "../utils/format";
+import { fmtYmd, fmtConvDate } from "../utils/format";
 import { IcChart, PerfChart, Sparkline } from "../components/charts";
-import { ConfirmModal, Modal, ParamsBlock } from "../components/ui";
+import { ConfirmModal, MetricGrid, Modal, ParamsBlock } from "../components/ui";
+import { PeriodHoldingsTable } from "../components/HoldingsTable";
 import { MiniMarkdown } from "../components/markdown";
 import { IconClose, IconLogo, IconPlus, IconSend, IconStop } from "../components/icons";
 import type { ConfirmGatePending } from "../hooks/useConversations";
 
 /* ----- 智能体卡片 ----- */
-
-function MetricGrid({ metrics }: { metrics: MetricItem[] }) {
-  return (
-    <div className="backtest-grid">
-      {metrics.map(m => (
-        <div className="bt-item" key={m.label}>
-          <div className="bt-label">{m.label}</div>
-          <div className={`bt-val ${m.cls ?? ""}`}>{m.value}</div>
-        </div>
-      ))}
-    </div>
-  );
-}
 
 /* 收益视图切换按钮（分段累计 / 多空净值）的内联样式 */
 const viewBtnStyle = (active: boolean): CSSProperties => ({
@@ -114,7 +102,7 @@ function AgentCardView({ card, saved, onSaveBacktest, onAskOptimize, onGotoStrat
         {latestPeriod && (
           <div style={{ marginTop: 12 }}>
             <div className="btp-title">
-              最近一期持仓（第 {latestPeriod.seq} 期 · {String(latestPeriod.startDate).replace(/^(\d{4})(\d{2})(\d{2})$/, "$1-$2-$3")} ~ {String(latestPeriod.endDate).replace(/^(\d{4})(\d{2})(\d{2})$/, "$1-$2-$3")}）
+              最近一期持仓（第 {latestPeriod.seq} 期 · {fmtYmd(latestPeriod.startDate)} ~ {fmtYmd(latestPeriod.endDate)}）
             </div>
             <div className="trade-scroll">
               <table className="mini-table">
@@ -149,7 +137,7 @@ function AgentCardView({ card, saved, onSaveBacktest, onAskOptimize, onGotoStrat
                     <tbody>
                       {card.latestOrders.map((t, i) => (
                         <tr key={i}>
-                          <td>{String(t.date).replace(/^(\d{4})(\d{2})(\d{2})$/, "$1-$2-$3")}</td>
+                          <td>{fmtYmd(t.date)}</td>
                           <td>{t.code}</td>
                           <td className={t.direction === "buy" ? "up" : "down"}>{t.direction === "buy" ? "买入" : "卖出"}</td>
                           <td className="num">{t.shares.toLocaleString("zh-CN")}</td>
@@ -293,7 +281,7 @@ function AgentCardView({ card, saved, onSaveBacktest, onAskOptimize, onGotoStrat
     body = (
       <>
         <div className="agent-card-text">
-          {String(card.date).replace(/^(\d{4})(\d{2})(\d{2})$/, "$1-$2-$3")} · 过滤前 {card.rawPoolSize} 只 →
+          {fmtYmd(card.date)} · 过滤前 {card.rawPoolSize} 只 →
           条件存活 {card.survivedCount} 只 · 入选前 {card.stocks.length} 只
           {card.usedDefaultSort ? " · 排序缺省（默认 20 日动量，值大优）" : ""}
         </div>
@@ -375,13 +363,14 @@ function MessageRow({ m, userInitial, saved, onSaveBacktest, onAskOptimize, onGo
   );
 }
 
-function TypingRow({ steps }: { steps?: { stage: string; ok?: boolean; detail?: string }[] }) {
+function TypingRow({ steps, note }: { steps?: { stage: string; ok?: boolean; detail?: string }[]; note?: string }) {
   return (
     <div className="msg agent">
       <div className="msg-avatar" aria-hidden="true"><IconLogo size={18} /></div>
       <div className="msg-content">
         <div className="msg-bubble" role="status" aria-label="智能体正在回复">
           <div className="typing" aria-hidden="true"><i /><i /><i /></div>
+          {note && <div className="chat-note">{note}</div>}
           {steps && steps.length > 0 && (
             <div className="chat-steps">
               {steps.map((s, i) => (
@@ -407,6 +396,8 @@ export function ChatPage(props: {
   typingId: string | null;
   /** 在途消息的流式过程步骤（SSE 节点级事件，见 useConversations 的 LiveProgress） */
   live?: { convId: string; steps: { stage: string; ok?: boolean; detail?: string }[] } | null;
+  /** 在跑轮次（后端仍在执行、尚未落库的会话，刷新后经运行状态接口恢复） */
+  backendBusyId?: string | null;
   /** 确认门挂起（confirm_pending 事件落地态，见 useConversations 的 ConfirmGatePending） */
   confirmGate?: ConfirmGatePending | null;
   loading: boolean;
@@ -428,7 +419,8 @@ export function ChatPage(props: {
   onDraftConsumed?: () => void;
 }) {
   const {
-    conversations, currentId, typingId, live, confirmGate, loading, savedCardIds, userNickname,
+    conversations, currentId, typingId, live, confirmGate, loading, backendBusyId,
+    savedCardIds, userNickname,
     onCreate, onSwitch, onDelete, onClear, onSubmit, onStop, onSaveBacktest, onGotoStrategies,
     draftInput, onDraftConsumed,
   } = props;
@@ -437,6 +429,8 @@ export function ChatPage(props: {
   const bodyRef = useRef<HTMLDivElement>(null);
   const typingHere = current ? typingId === current.id : false;
   const liveSteps = typingHere && live && live.convId === current?.id ? live.steps : undefined;
+  /* 在跑轮次占位：本轮无本地流（刷新后恢复），只有静态提示、无步骤、停止按钮不可用 */
+  const backendHere = !typingHere && current ? backendBusyId === current.id : false;
   const userInitial = userNickname.slice(0, 1) || "友";
   /* 确认门弹窗：唯一依据 = confirm_pending 事件（后端 confirm 节点 interrupt 挂起时经 SSE 发来）。
      不再对末条消息做文本反推——挂尾巴的旧提案/邀请话术刷新后一律静默。
@@ -587,7 +581,12 @@ export function ChatPage(props: {
                 onGotoStrategies={onGotoStrategies}
               />
             ))}
-            {typingHere && <TypingRow steps={liveSteps} />}
+            {(typingHere || backendHere) && (
+              <TypingRow
+                steps={liveSteps}
+                note={backendHere ? "上一条消息仍在后台执行中，结果即将出现在会话里…" : undefined}
+              />
+            )}
           </div>
         </div>
 
