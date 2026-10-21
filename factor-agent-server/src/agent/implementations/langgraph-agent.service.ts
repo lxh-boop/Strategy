@@ -35,6 +35,7 @@ import {
 } from '../../core/industry-engine';
 import { formatFnCall } from '../../core/weight-functions';
 import { UserStoreService } from '../../core/user-store.service';
+import { MemoryStoreService, ConversationSummary, renderMemoryLine, selectWithinBudget } from '../../core/memory-store.service';
 import { todayStr } from '../../common/time';
 import { assertAnalysisParams, FactorAnalysisService, FactorCorrelationInput, RankAnalysisInput } from '../../core/factor-analysis.service';
 import { describeTimingOverlay } from '../../core/timing';
@@ -47,7 +48,7 @@ import {
   loadTableFields,
 } from '../../core/factor-schema';
 import { AgentService } from '../agent.service';
-import { AGENT_TOOL_SPECS, ListFactorFieldsArgs, ReadFactorDataArgs } from './tool-specs';
+import { AGENT_TOOL_SPECS, ListFactorFieldsArgs, ReadFactorDataArgs, SaveMemoryArgs } from './tool-specs';
 
 /** 工具 → 进度事件里的阶段名（前端可直接展示的中文） */
 const TOOL_STAGE: Record<string, string> = {
@@ -59,6 +60,7 @@ const TOOL_STAGE: Record<string, string> = {
   run_factor_correlation: '因子相关性计算',
   run_daily_screen: '每日选股查询',
   screen_stock_pool: '股票池筛选',
+  save_memory: '记忆维护',
 };
 
 /* ==========================================================
@@ -115,6 +117,8 @@ interface ToolContext {
   delegated: boolean;
   /** 池句柄归属会话（screen 工具写入 / 回测选股校验归属） */
   conversationId: string;
+  /** 会话归属用户（JWT）：save_memory 按它落长期记忆目录（ADR-0007）；未携带时记忆工具报错 */
+  userId?: number;
   /** 过程事件出口：回测工具透传给引擎，长阶段（信号预计算/行情拉取）内部发进度 */
   onProgress?: AgentProgressSink;
 }
@@ -133,9 +137,12 @@ const StrategyGraphState = Annotation.Root({
   /* 会话 id：reply() 发起图执行时一次性写入（invoke 的初始状态里带上），图中节点只读——
      工具执行时用它定位会话，未来需要会话级数据时从这里取 */
   conversationId: Annotation<string>,
-  /* 当前用户消息原文：与 conversationId 同样入口写入一次、节点只读；
+  /** 当前用户消息原文：与 conversationId 同样入口写入一次、节点只读；
      独立成通道是为了把"用户说了什么"与消息流区分开，避免工具节点去 messages 里反查 */
   userText: Annotation<string>,
+  /** 会话归属用户（JWT）：reply() 入口随会话对象写入一次、节点只读——
+     save_memory 按它落长期记忆目录（ADR-0007）；理论必有（编排层 prepare 附加），undefined 仅为防御 */
+  userId: Annotation<number | undefined>,
   /** 回测交易频率：记录用户期望的调仓频率（如 "日频"、"每2周"），图中节点读写；无节点写入时为 undefined。
    *  注意：LangGraph state 只在一次图执行内存活，跨轮沿用需另接会话存储（暂未接线） */
   backtestFreq: Annotation<string>,
@@ -227,6 +234,18 @@ export class LangGraphAgentService extends AgentService {
   /** 保活帧间隔（前端空闲看门狗 90s 的 1/6，一个看门狗窗口喂 6 次；测试可调小） */
   private keepaliveMs = 15_000;
 
+  /** 长期记忆注入预算（ADR-0007 配置旋钮 memories.maxEntries/budgetChars，先到为准；测试可改） */
+  private memoryMaxEntries = 30;
+  private memoryBudgetChars = 800;
+
+  /** 会话滚动摘要阈值（ADR-0007 配置旋钮 memories.*，测试可改）：
+   *  总长超 triggerChars 触发压缩；压缩保留末尾约 tailChars 整条消息原文；
+   *  摘要目标 ≤summaryChars 字；原文超 refitCapChars 退化「旧摘要+增量」重炼防 prompt 无界 */
+  private memoryTriggerChars = 2000;
+  private memoryTailChars = 800;
+  private memorySummaryChars = 400;
+  private memoryRefitCapChars = 30_000;
+
   /** 轮次序号：thread_id = `${conversationId}:${时间戳}:${seq}`，保证进程内唯一 */
   private turnSeq = 0;
 
@@ -240,6 +259,7 @@ export class LangGraphAgentService extends AgentService {
     private readonly backtest: StrategyBacktestService,
     private readonly factorAnalysis: FactorAnalysisService,
     private readonly userStore: UserStoreService,
+    private readonly memoryStore: MemoryStoreService,
   ) {
     super();
     // 漂移检查（启动一次）：tables.md 已登记但 <表名>.md 字典缺失/无字段行的表，提醒补齐
@@ -281,6 +301,13 @@ export class LangGraphAgentService extends AgentService {
       this.llm = null;
       this.app = null;
     }
+    // 长期记忆注入预算旋钮（ADR-0007；get 不可用的测试构造走字段缺省）
+    this.memoryMaxEntries = Number(config.get<number>('memories.maxEntries') ?? 30);
+    this.memoryBudgetChars = Number(config.get<number>('memories.budgetChars') ?? 800);
+    this.memoryTriggerChars = Number(config.get<number>('memories.triggerChars') ?? 2000);
+    this.memoryTailChars = Number(config.get<number>('memories.tailChars') ?? 800);
+    this.memorySummaryChars = Number(config.get<number>('memories.summaryChars') ?? 400);
+    this.memoryRefitCapChars = Number(config.get<number>('memories.refitCapChars') ?? 30_000);
   }
 
   private buildGraph(agent: { invoke(messages: BaseMessage[]): Promise<unknown> }) {
@@ -302,8 +329,11 @@ export class LangGraphAgentService extends AgentService {
       })
       .addNode('tools', async (state: StrategyGraphStateType, config: RunnableConfig) => {
         const last = state.messages[state.messages.length - 1] as AIMessage;
-        // 会话门：任一工具调用（含失败重试）即证明是数据会话，后续轮注入表目录免探索
-        this.dataConversations.add(state.conversationId);
+        // 会话门：任一因子工具调用（含失败重试）即证明是数据会话，后续轮注入表目录免探索；
+        // save_memory 是记忆维护不是数据取用，不计入门（ADR-0007）
+        if ((last.tool_calls ?? []).some((c) => c.name !== 'save_memory')) {
+          this.dataConversations.add(state.conversationId);
+        }
         const additions: BaseMessage[] = [];
         let card: AgentCard | undefined;
         let backtestFreq: string | undefined;
@@ -325,6 +355,8 @@ export class LangGraphAgentService extends AgentService {
                   delegated: state.backtestDelegated === true || state.confirmedCalls.includes(call.id ?? ''),
                   // 池句柄的写入与归属校验都挂会话（ADR-0006）
                   conversationId: state.conversationId,
+                  // 长期记忆按会话归属用户落目录（ADR-0007）
+                  userId: state.userId,
                   // 过程事件出口：回测工具透传给引擎，长阶段内部发批次进度（防 90s 空闲看门狗误断）
                   onProgress: progressSink(config),
                 }),
@@ -464,12 +496,16 @@ export class LangGraphAgentService extends AgentService {
         {
           conversationId: conversation.id,
           userText,
+          userId: conversation.userId,
           ...(entryDelegated ? { backtestDelegated: true } : {}),
-          messages: this.prepareMessages(conversation, userText),
+          messages: await this.prepareMessages(conversation, userText),
         },
         { configurable: { thread_id: threadId, onProgress }, recursionLimit: 15 },
       );
-      return this.collectReply(state, conversation.id, threadId, onProgress);
+      const reply = this.collectReply(state, conversation.id, threadId, onProgress);
+      // 回复完成后滚动摘要维护（ADR-0007）：不挡响应、不抛，失败仅日志（无损不变式保证下轮仍正确）
+      this.maybeCompressInBackground(conversation);
+      return reply;
     } catch (error) {
       const reply = this.errorReply(error, conversation.id);
       onProgress?.({ type: 'error', message: reply.text });
@@ -508,7 +544,10 @@ export class LangGraphAgentService extends AgentService {
       configurable: { thread_id: threadId, onProgress },
       recursionLimit: 15,
     });
-    return this.collectReply(state, conversation.id, threadId, onProgress);
+    const reply = this.collectReply(state, conversation.id, threadId, onProgress);
+    // 确认门恢复也是完整一轮：滚动摘要维护同 runGraph（ADR-0007）
+    this.maybeCompressInBackground(conversation);
+    return reply;
   }
 
   /** invoke 结果收尾：中断 → 记挂起映射、发 confirm_pending 过程事件（前端据此弹确认窗）、
@@ -577,6 +616,8 @@ export class LangGraphAgentService extends AgentService {
     // 每日选股/股票池筛选：只读零副作用，不进 CONFIRMABLE（免确认，即查即得）
     run_daily_screen: async (args, ctx) => this.execRunDailyScreen(args as DailyScreenInput, ctx),
     screen_stock_pool: async (args, ctx) => this.execScreenStockPool(args as { groups?: unknown }, ctx),
+    // 长期记忆三操作（ADR-0007）：持久写入但用户拍板免确认门，防线是记忆留痕（回执双通道可见）
+    save_memory: async (args, ctx) => this.execSaveMemory(args as SaveMemoryArgs, ctx),
   };
 
   /** 统一兜底：澄清信号 → 指引模型向用户提问；ApiException → 原因给模型自纠；其他 → 通用失败并记日志。
@@ -593,6 +634,41 @@ export class LangGraphAgentService extends AgentService {
       if (!(error instanceof ApiException)) this.logger.warn(`工具执行异常: ${String(error)}`);
       return { result: { error: msg } };
     }
+  }
+
+  /** 长期记忆三操作（ADR-0007）：add/update/delete，回执带「已记住/已更新/已忘掉」文案——
+   *  模型据此在最终回复留痕（记忆留痕），进度事件经 toolEventDetail 同步可见。
+   *  slug 是唯一引用键：add 撞既有 slug 报错引导 update，update/delete 引用不存在的 slug 报错，防误覆盖 */
+  private async execSaveMemory(args: SaveMemoryArgs, ctx: ToolContext): Promise<ToolOutcome> {
+    if (typeof ctx.userId !== 'number') {
+      return { result: { error: '记忆功能不可用：会话未携带用户身份' } };
+    }
+    const op = String(args.op ?? '').trim();
+    const slug = String(args.slug ?? '').trim();
+    if (op === 'delete') {
+      if (!slug) return { result: { error: 'op=delete 需要 slug（记忆块行首方括号内的标识）' } };
+      const removed = await this.memoryStore.deleteEntry(ctx.userId, slug);
+      return removed
+        ? { result: { ok: true, 回执: `已忘掉：${slug}` } }
+        : { result: { error: `slug 不存在: ${slug}，无法删除（记忆块行首方括号内为可用 slug）` } };
+    }
+    if (op !== 'add' && op !== 'update') {
+      return { result: { error: 'op 不合法：只能是 add / update / delete' } };
+    }
+    const title = String(args.title ?? '').trim();
+    const content = String(args.content ?? '').trim();
+    if (!slug || !title || !content) {
+      return { result: { error: '参数不完整：add/update 需要 slug（小写英文短横线）、title（一句话标题）、content（一到两句事实）' } };
+    }
+    const existing = await this.memoryStore.listEntries(ctx.userId);
+    if (op === 'add' && existing.some((e) => e.slug === slug)) {
+      return { result: { error: `slug 已存在: ${slug}，这是偏好更新请改用 op=update，不要新增重复条目` } };
+    }
+    if (op === 'update' && !existing.some((e) => e.slug === slug)) {
+      return { result: { error: `slug 不存在: ${slug}，这是新偏好请改用 op=add（记忆块行首方括号内为可用 slug）` } };
+    }
+    const entry = await this.memoryStore.saveEntry(ctx.userId, { slug, title, content });
+    return { result: { ok: true, 回执: op === 'add' ? `已记住：${entry.title}` : `已更新：${entry.title}`, slug: entry.slug } };
   }
 
   private execListTables(): Record<string, unknown> {
@@ -1052,6 +1128,7 @@ export class LangGraphAgentService extends AgentService {
     }
     if (name === 'run_rank_analysis') return `IC均值 ${r.IC均值}，单调性 ${r.排列单调性}`;
     if (name === 'run_factor_correlation') return `${(r.相关系数 as unknown[])?.length ?? 0} 对因子相关`;
+    if (name === 'save_memory' && typeof r.回执 === 'string') return r.回执;
     if (name === 'run_daily_screen' && Array.isArray(r.入选清单)) return `${r.查询日} 入选 ${r.入选清单.length} 只`;
     if (name === 'list_factor_tables' && Array.isArray(r.tables)) return `${r.tables.length} 张表`;
     if (name === 'list_factor_fields' && Array.isArray(r.tables)) return `${r.tables.length} 张表的字段明细`;
@@ -1060,35 +1137,160 @@ export class LangGraphAgentService extends AgentService {
 
   /* ----- 消息构造 ----- */
 
-  private prepareMessages(conversation: Conversation, userText: string): BaseMessage[] {
-    const history = conversation.messages.slice(-6).map((m: ChatMessage) =>
+  private async prepareMessages(conversation: Conversation, userText: string): Promise<BaseMessage[]> {
+    const summary = await this.ensureSummary(conversation);
+    // 无损不变式的注入侧：coveredChars 之前的历史在摘要里，其后的原文照出；无摘要 → 全量原文。
+    // 会话不带 userId 的防御口径（理论不可达）取最近 triggerChars 内的原文，不读摘要不压缩
+    const recent = (typeof conversation.userId === 'number'
+      ? uncoveredSlice(conversation.messages, summary?.coveredChars ?? 0).msgs
+      : takeWithinChars(conversation.messages, this.memoryTriggerChars)
+    ).map((m: ChatMessage) =>
       m.role === 'agent' ? new AIMessage({ content: m.bubble }) : new HumanMessage({ content: m.bubble }),
     );
+    const summaryMsg = summary
+      ? [new SystemMessage(`【历史对话摘要】（此前对话的压缩要点，原始记录在库）\n${summary.summary}`)]
+      : [];
 
     return [
-      new SystemMessage({ content: this.buildSystemPrompt(conversation.id) }),
-      ...history,
+      new SystemMessage({ content: await this.buildSystemPrompt(conversation) }),
+      ...summaryMsg,
+      ...recent,
       new HumanMessage({ content: userText }),
     ];
   }
 
+  /* ----- 会话滚动摘要（ADR-0007 第 3 刀）-----
+     长度制：气泡总字符数超 triggerChars 才压缩（非条数）；摘要替换 coveredChars 之前的一段历史、
+     注入为一条 SystemMessage；原始 messages（只追加日志）永不覆盖，摘要随时可从原文重炼。 */
+
+  /** 摘要维护去重：同会话并发只跑一次（后台维护与 prepare 懒兜底可能同时触发） */
+  private readonly summaryJobs = new Map<string, Promise<void>>();
+
+  /** prepare 时摘要保障：
+   *  - 总长未超触发线 → 无需摘要（短会话全量原文注入，优于旧 6 条硬截断）；
+   *  - 超线且无摘要 → 内联压缩（懒兜底：首轮超线当轮炼，一次性延迟）；
+   *  - 有摘要但未覆盖原文超硬上限（后台连续失败）→ 内联压缩封顶注入长度；
+   *  - 仅超滞后带（trigger-tail）→ 交后台炼，本轮不挡（无损不变式保证本轮注入仍正确）。
+   *  开发模式（无 LLM）返回 null：炼不了摘要就宁多勿失，全量原文注入 */
+  private async ensureSummary(conversation: Conversation): Promise<ConversationSummary | null> {
+    if (!this.llm || typeof conversation.userId !== 'number') return null;
+    const total = bubbleChars(conversation.messages);
+    if (total <= this.memoryTriggerChars) return null;
+    let summary = await this.memoryStore.readSummary(conversation.userId, conversation.id);
+    const uncovered = uncoveredSlice(conversation.messages, summary?.coveredChars ?? 0).chars;
+    if (!summary) {
+      await this.maintainSummary(conversation, 'inline');
+      summary = await this.memoryStore.readSummary(conversation.userId, conversation.id);
+    } else if (uncovered > this.memoryTriggerChars) {
+      await this.maintainSummary(conversation, 'inline');
+      summary = (await this.memoryStore.readSummary(conversation.userId, conversation.id)) ?? summary;
+    } else if (uncovered > this.memoryTriggerChars - this.memoryTailChars) {
+      this.maintainSummary(conversation, 'background').catch(() => undefined);
+    }
+    return summary;
+  }
+
+  /** 回复完成后的后台维护入口（不 await、不抛）：仅当总长超线且未覆盖原文超滞后带才值得炼 */
+  private maybeCompressInBackground(conversation: Conversation): void {
+    if (!this.llm || typeof conversation.userId !== 'number') return;
+    const total = bubbleChars(conversation.messages);
+    if (total <= this.memoryTriggerChars) return;
+    void (async () => {
+      const summary = await this.memoryStore.readSummary(conversation.userId!, conversation.id);
+      const uncovered = uncoveredSlice(conversation.messages, summary?.coveredChars ?? 0).chars;
+      if (uncovered > this.memoryTriggerChars - this.memoryTailChars) {
+        await this.maintainSummary(conversation, 'background');
+      }
+    })().catch((e) => this.logger.warn(`滚动摘要后台维护失败 会话=${conversation.id}: ${String(e)}`));
+  }
+
+  /** 同会话去重：inline 等待在跑的任务复用其结果，background 撞车直接让路 */
+  private async maintainSummary(conversation: Conversation, mode: 'inline' | 'background'): Promise<void> {
+    const key = `${conversation.userId}:${conversation.id}`;
+    const inflight = this.summaryJobs.get(key);
+    if (inflight) {
+      if (mode === 'inline') await inflight.catch(() => undefined);
+      return;
+    }
+    const job = this.compressConversation(conversation).finally(() => this.summaryJobs.delete(key));
+    this.summaryJobs.set(key, job);
+    if (mode === 'inline') await job.catch(() => undefined);
+  }
+
+  /** 重炼一条会话摘要。覆盖边界收在整条消息边界：保留末尾约 tailChars 的最小整条后缀原文，
+   *  coveredChars = 其前的累计字符数。源文本优先全量原文重炼（无"摘要的摘要"失真）；
+   *  超 refitCap 退化「旧摘要 + 其后增量原文」。快照时机：回复完成即炼，此时本轮消息尚未落库，
+   *  差的一轮由下一轮维护自然收敛（coveredChars 是前缀坐标，不受影响） */
+  private async compressConversation(conversation: Conversation): Promise<void> {
+    const userId = conversation.userId as number;
+    const msgs = conversation.messages;
+    const total = bubbleChars(msgs);
+    if (total === 0) return;
+    const coveredChars = bubbleChars(msgs.slice(0, suffixStartIndex(msgs, this.memoryTailChars)));
+    const source = await this.summarySource(conversation, total);
+    const output = (await this.llm!.invoke([
+      new SystemMessage(
+        `你是对话摘要器。把输入的多因子选股对话历史压缩成不超过 ${this.memorySummaryChars} 字的要点：` +
+          '保留用户的偏好与结论、已确定的关键参数与决策、未完成的事项；丢弃寒暄与过程性描述；' +
+          '只输出摘要正文，不要任何评论或前后缀。',
+      ),
+      new HumanMessage(source),
+    ])) as AIMessage;
+    const text = extractText(output).trim();
+    if (!text) throw new Error('摘要输出为空');
+    await this.memoryStore.writeSummary(userId, conversation.id, text, coveredChars);
+    this.logger.log(`滚动摘要重炼 会话=${conversation.id} 覆盖 ${coveredChars}/${total} 字，摘要 ${text.length} 字`);
+  }
+
+  /** 摘要源文本：全量原文（缺省）；超 refitCap 退化为「旧摘要 + 其后增量」或近段原文截断 */
+  private async summarySource(conversation: Conversation, total: number): Promise<string> {
+    const transcript = conversation.messages
+      .map((m) => `${m.role === 'agent' ? '助手' : '用户'}：${m.bubble}`)
+      .join('\n');
+    if (total <= this.memoryRefitCapChars) return transcript;
+    const existing = await this.memoryStore.readSummary(conversation.userId as number, conversation.id);
+    if (!existing) return transcript.slice(-this.memoryRefitCapChars);
+    const delta = uncoveredSlice(conversation.messages, existing.coveredChars)
+      .msgs.map((m) => `${m.role === 'agent' ? '助手' : '用户'}：${m.bubble}`)
+      .join('\n');
+    return `【此前摘要】${existing.summary}\n【其后对话】${delta}`;
+  }
+
+  /** 长期记忆段（ADR-0007）：条目式事实全量注入、预算封顶；属用户上下文，闲聊会话也注入
+   *  （与数据会话门"闲聊零注入"的分界见 GLOSSARY「长期记忆」）。会话未带 userId（理论不可达，
+   *  编排层 prepare 必附加）或记忆为空 → 空串，prompt 与既往完全一致 */
+  private async buildMemoryBlock(conversation: Conversation): Promise<string> {
+    if (typeof conversation.userId !== 'number') return '';
+    const entries = await this.memoryStore.listEntries(conversation.userId);
+    const picked = selectWithinBudget(entries, this.memoryMaxEntries, this.memoryBudgetChars);
+    if (!picked.length) return '';
+    return [
+      '【用户长期记忆】（跨会话保存的用户偏好与研究结论，回答时恰当参考，不必复述；' +
+        '与用户最新表述冲突时以最新为准）',
+      ...picked.map(renderMemoryLine),
+    ].join('\n');
+  }
+
   /** system prompt：数据会话（执行过任一因子工具，见 dataConversations）在提示末尾注入表目录
    *  原文，模型免"看表"探索直达字段/读数/回测；目录现读现拼（微秒级读盘），字典更新即时生效；
-   *  纯闲聊会话或目录不可读 → 回退 list_factor_tables 探索指令（工具保留作兜底） */
-  private buildSystemPrompt(conversationId: string): string {
-    const catalog = this.dataConversations.has(conversationId) ? loadTableCatalog() : [];
+   *  纯闲聊会话或目录不可读 → 回退 list_factor_tables 探索指令（工具保留作兜底）。
+   *  记忆段（ADR-0007）插在工具流程之后、表目录之前——数据上下文（目录）仍居最末 */
+  private async buildSystemPrompt(conversation: Conversation): Promise<string> {
+    const catalog = this.dataConversations.has(conversation.id) ? loadTableCatalog() : [];
     const flow = catalog.length
       ? '工具流程：数据表目录已附在本提示末尾，直接从中选定数据表，再调 list_factor_fields 查看该表的因子字段' +
         '（表名只能来自目录，字段名只能来自 list_factor_fields 的返回，禁止凭记忆编造），' +
         '然后按需调用 read_factor_data 查单点数据、或 run_strategy_backtest 跑策略回测——各工具的参数含义与约束以工具 schema 为准。'
       : '工具流程：先 list_factor_tables 看有哪些表、list_factor_fields 看因子字段（表名/字段名只能来自这两个工具的返回，禁止凭记忆编造），' +
         '再按需调用 read_factor_data 查单点数据、或 run_strategy_backtest 跑策略回测——各工具的参数含义与约束以工具 schema 为准。';
+    const memoryBlock = await this.buildMemoryBlock(conversation);
     const system = [
       // 模型不知道当前时间："最近两年/今年/去年"等相对时间表达靠这行换算成具体日期，
       // 换算结果经确认门（interrupt 参数清单）展示给用户，错了用户可当场纠正
       todayLine(),
       '你是"因子智投（AlphaSage）"多因子选股智能体，面向专业投资者，基于本地因子数据库回答数据问题。',
       flow,
+      ...(memoryBlock ? [memoryBlock] : []),
       '回复规则：',
       '- 最终回复不超过 90 字，只能引用工具返回的数据，严禁编造数字或个股，不输出 JSON，结尾用短句提醒不构成投资建议；',
       '- 工具回执含"需要澄清"时，按其中"行动"指引向用户提问，不要当作错误转述；',
@@ -1144,6 +1346,10 @@ export class LangGraphAgentService extends AgentService {
         '给出优化建议后，结尾固定加一句：回复"授权调优"可按建议连续多组回测对比择优（前端会渲染授权按钮）；',
       '- 本回合跑了多次回测时，每份回执带「卡片编号」：按用户意图选最符合的一次（如优化场景选指标最优的），在回复最末尾单独一行写【展示卡片:card_N】指定展示哪次（该行不会展示给用户）；只回测了一次则不写；',
       '- 查询无数据行时如实告知，不要编造；',
+      '- 长期记忆维护（save_memory）：用户陈述值得跨会话记住的稳定偏好/研究结论（如"以后只用动量因子""我习惯万三手续费"）或明说"记住 XX"时，' +
+        '用 op=add 落一条（slug 起小写英文短横线名、title 一句话、content 一到两句具体事实）；' +
+        '偏好变化时用 op=update 引用记忆块里的 slug 覆盖旧条目，禁止新增重复条目；用户说"忘掉 XX"时用 op=delete；' +
+        '无论增改删，最终回复里必须告知用户动了哪条记忆（一句话即可）；',
       '- 与因子数据无关的问候或闲聊：直接简短回复（不超过 90 字），不要调用工具。',
     ].join('\n');
     return catalog.length ? `${system}\n\n${formatTableCatalog(catalog)}` : system;
@@ -1158,6 +1364,46 @@ export class LangGraphAgentService extends AgentService {
       .filter(Boolean)[0] ?? '未知错误';
     return `调用返回「${firstLine.length > 120 ? firstLine.slice(0, 120) + '…' : firstLine}」`;
   }
+}
+
+/* ----- 滚动摘要纯函数（ADR-0007 第 3 刀，导出供测试） ----- */
+
+/** 气泡文本总字符数（长度制度量；卡片不参与——卡片本就不进模型上下文） */
+export function bubbleChars(messages: ChatMessage[]): number {
+  return messages.reduce((sum, m) => sum + m.bubble.length, 0);
+}
+
+/** 无损不变式的注入侧：累计字符越过 coveredChars 边界的消息（边界落在整条消息上，
+ *  恰好压线时多注入一条原文——宁可多注入不可丢失） */
+export function uncoveredSlice(messages: ChatMessage[], coveredChars: number): { msgs: ChatMessage[]; chars: number } {
+  let cum = 0;
+  let start = messages.length;
+  for (let i = 0; i < messages.length; i++) {
+    if (cum + messages[i].bubble.length > coveredChars) {
+      start = i;
+      break;
+    }
+    cum += messages[i].bubble.length;
+  }
+  const msgs = messages.slice(start);
+  return { msgs, chars: msgs.reduce((s, m) => s + m.bubble.length, 0) };
+}
+
+/** 压缩覆盖边界：从尾部累计到 ≥ minChars 的最小整条后缀，返回其起始下标 */
+export function suffixStartIndex(messages: ChatMessage[], minChars: number): number {
+  let sum = 0;
+  let start = messages.length;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    sum += messages[i].bubble.length;
+    start = i;
+    if (sum >= minChars) break;
+  }
+  return start;
+}
+
+/** 防御口径（会话无 userId 时）：从尾部取 ≤ maxChars 的最近整条消息 */
+export function takeWithinChars(messages: ChatMessage[], maxChars: number): ChatMessage[] {
+  return messages.slice(suffixStartIndex(messages, maxChars));
 }
 
 /** 今天日期行（注入 system prompt）：模型没有当前时间感知，相对时间表达

@@ -280,6 +280,9 @@ export interface Conversation {
   title: string;
   messages: ChatMessage[];
   updatedAt: number;
+  /** 编排层（conversations.service.prepare）附加：来自 JWT 的用户 id，不信任请求入参。
+   *  智能体据此隔离长期记忆目录（ADR-0007）；存储层返回的会话不带此字段 */
+  userId?: number;
 }
 
 /* ----- 策略 ----- */

@@ -3,3 +3,5 @@ dist/
 .env
 *.log
 logs/
+# 长期记忆与滚动摘要（ADR-0007）：本地 md 文件，运行时数据不入库
+memories/

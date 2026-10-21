@@ -505,6 +505,35 @@ export const SCREEN_STOCK_POOL_SPEC = {
   },
 };
 
+/** 工具 9：长期记忆三操作（ADR-0007）：新增/更新/删除一条用户记忆 */
+export const SAVE_MEMORY_SPEC = {
+  type: 'function' as const,
+  function: {
+    name: 'save_memory',
+    description:
+      '长期记忆维护：把用户的稳定偏好、研究结论等值得跨会话记住的事实存入本地记忆库，' +
+      '下次对话自动可见。三种操作：add 新增（用户说"记住：XX"或陈述了值得长期记住的偏好/结论）；' +
+      'update 更新（偏好变了，引用既有条目的 slug 覆盖，不要新增重复条目）；' +
+      'delete 删除（用户说"忘掉 XX"）。' +
+      '写入后必须在回复里告知用户记了/改了/删了什么。只存稳定事实，单次对话的临时信息不要存。',
+    parameters: {
+      type: 'object',
+      properties: {
+        op: { type: 'string', enum: ['add', 'update', 'delete'], description: '操作类型' },
+        slug: {
+          type: 'string',
+          description:
+            '条目标识（小写英文短横线，如 prefer-momentum）。add 必填（新起一个不与记忆块重复的）；' +
+            'update/delete 必填且必须来自记忆块行首方括号内的既有 slug',
+        },
+        title: { type: 'string', description: '条目标题（一句话概括，中文）。add/update 必填' },
+        content: { type: 'string', description: '条目内容（一到两句事实，具体可执行，不写空话）。add/update 必填' },
+      },
+      required: ['op'],
+    },
+  },
+};
+
 export const AGENT_TOOL_SPECS = [
   LIST_FACTOR_TABLES_SPEC,
   LIST_FACTOR_FIELDS_SPEC,
@@ -514,6 +543,7 @@ export const AGENT_TOOL_SPECS = [
   RUN_FACTOR_CORRELATION_SPEC,
   RUN_DAILY_SCREEN_SPEC,
   SCREEN_STOCK_POOL_SPEC,
+  SAVE_MEMORY_SPEC,
 ] as const;
 
 /* ----- 工具入参形态（LLM 传入，字段均为未知形态，服务端归一化校验） ----- */
@@ -527,4 +557,11 @@ export interface ReadFactorDataArgs {
   fields?: unknown;
   date?: unknown;
   security?: unknown;
+}
+
+export interface SaveMemoryArgs {
+  op?: unknown;
+  slug?: unknown;
+  title?: unknown;
+  content?: unknown;
 }

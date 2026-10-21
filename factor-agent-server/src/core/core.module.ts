@@ -1,12 +1,15 @@
 import { Global, Module } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import * as path from 'node:path';
 import { FactorDataService } from './factor-data.service';
 import { StrategyBacktestService } from './strategy-backtest.service';
 import { BacktestExecutionService } from './backtest-execution.service';
 import { UserStoreService } from './user-store.service';
+import { MemoryStoreService } from './memory-store.service';
 import { MemoryUserStoreService } from './implementations/memory-user-store.service';
 import { MysqlFactorDataService } from './implementations/mysql-factor-data.service';
 import { MysqlUserStoreService } from './implementations/mysql-user-store.service';
+import { MemoryFileStoreService } from './implementations/memory-file-store.service';
 import { StrategyBacktestServiceImpl } from './implementations/strategy-backtest.service.impl';
 import { TriggerBacktestService } from './trigger-backtest.service';
 import { TriggerBacktestServiceImpl } from './implementations/trigger-backtest.service.impl';
@@ -35,11 +38,25 @@ import { AccountBacktestExecutionService } from './implementations/account-backt
       inject: [ConfigService],
     },
     { provide: FactorDataService, useClass: MysqlFactorDataService },
+    {
+      provide: MemoryStoreService,
+      // 长期记忆落本地 md 文件（ADR-0007，刻意不进数据库）：缺省 <运行目录>/memories
+      useFactory: (config: ConfigService) =>
+        new MemoryFileStoreService(config.get<string>('memories.dir') || path.join(process.cwd(), 'memories')),
+      inject: [ConfigService],
+    },
     { provide: StrategyBacktestService, useClass: StrategyBacktestServiceImpl },
     { provide: TriggerBacktestService, useClass: TriggerBacktestServiceImpl },
     { provide: BacktestExecutionService, useClass: AccountBacktestExecutionService },
     { provide: FactorAnalysisService, useClass: FactorAnalysisServiceImpl },
   ],
-  exports: [UserStoreService, FactorDataService, StrategyBacktestService, BacktestExecutionService, FactorAnalysisService],
+  exports: [
+    UserStoreService,
+    MemoryStoreService,
+    FactorDataService,
+    StrategyBacktestService,
+    BacktestExecutionService,
+    FactorAnalysisService,
+  ],
 })
 export class CoreModule {}
