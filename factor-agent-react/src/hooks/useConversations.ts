@@ -52,8 +52,6 @@ export function useConversations(notify?: (msg: string) => void) {
   /** 会话列表镜像：后台轮询回调里读最新消息数，避开 effect 闭包旧值 */
   const conversationsRef = useRef(conversations);
   conversationsRef.current = conversations;
-  /** 在跑轮次轮询的取消句柄：本地开始新一轮发送时作废轮询（本地流接管真相源） */
-  const busyPollCancel = useRef<null | (() => void)>(null);
 
   const failMsg = (e: unknown, fallback: string) =>
     notifyRef.current?.(e instanceof ApiError ? e.message : fallback);
@@ -85,12 +83,13 @@ export function useConversations(notify?: (msg: string) => void) {
     let cancelled = false;
     let timer: number | undefined;
     const sleep = (ms: number) => new Promise<void>(r => { timer = window.setTimeout(r, ms); });
-    const stop = () => { cancelled = true; window.clearTimeout(timer); };
-    busyPollCancel.current = stop;
 
     const mergeIfLonger = (fresh: ChatMessage[]): boolean => {
+      /* 本地有在途轮次时跳过合并：服务端历史还没有这轮，整段替换会冲掉乐观消息 */
+      if (inFlight.current.has(currentId)) return false;
       const local = conversationsRef.current.find(c => c.id === currentId);
       if (!local || fresh.length <= local.messages.length) return false;
+      fresh.forEach(m => { if (m.card) withCardId(m.card); });
       setConversations(prev => prev.map(c => (c.id === currentId ? { ...c, messages: fresh } : c)));
       return true;
     };
@@ -105,41 +104,45 @@ export function useConversations(notify?: (msg: string) => void) {
       if (cancelled) return;
       if (running) {
         setBackendBusyId(currentId);
-        /* 兜底：后端异常长跑最多等 5 分钟，避免无限轮询 */
-        const deadline = Date.now() + 5 * 60_000;
+        /* 轮询直到收尾，无时限——长跑（授权调优/长区间回测）是正常形态；
+         * 后端重启同样以 run=false 收敛 */
         while (!cancelled) {
-          if (Date.now() > deadline) {
-            setBackendBusyId(null);
-            notifyRef.current?.("后台执行时间较长，已停止等待；结果落库后刷新页面即可看到");
-            return;
-          }
           await sleep(2500);
           if (cancelled) return;
           try {
             if (!(await apiRunStatus(currentId)).running) break;
-          } catch {
-            return;
+          } catch (e) {
+            if (e instanceof ApiError && e.code === "NOT_FOUND") {
+              // 会话被删：占位失去意义；其余错误（网络抖动）继续等
+              setBackendBusyId(id => (id === currentId ? null : id));
+              return;
+            }
           }
         }
         if (cancelled) return;
       }
-      /* 收尾补拉：闸先删、persist 后写（毫秒级迟滞），观察到过在跑的容忍 3 次；无新行即放弃 */
-      const retries = running ? 3 : 1;
-      for (let i = 0; i < retries && !cancelled; i++) {
-        try {
-          if (mergeIfLonger(await apiMessages(currentId))) {
-            setBackendBusyId(id => (id === currentId ? null : id));
-            return;
-          }
-        } catch {
-          return;
+      /* 收尾补拉：闸先删、persist 后写（毫秒级迟滞），观察到过在跑的容忍 3 次空拉；
+       * 本地在途轮次期间跳过且不计次——等它收尾，下一轮合并自然成功 */
+      const maxMisses = running ? 3 : 1;
+      let misses = 0;
+      while (!cancelled) {
+        if (inFlight.current.has(currentId)) {
+          await sleep(1500);
+          continue;
         }
-        if (i < retries - 1) await sleep(1500);
+        try {
+          if (mergeIfLonger(await apiMessages(currentId))) break;
+        } catch {
+          return; // 会话被删/网络错误：停止等待
+        }
+        misses += 1;
+        if (misses >= maxMisses) break;
+        await sleep(1500);
       }
       if (!cancelled) setBackendBusyId(id => (id === currentId ? null : id));
     })();
 
-    return () => { stop(); busyPollCancel.current = null; };
+    return () => { cancelled = true; window.clearTimeout(timer); };
   }, [currentId]);
 
   const createConversation = async () => {
@@ -192,9 +195,6 @@ export function useConversations(notify?: (msg: string) => void) {
     if (!text) return;
     const convId = currentId;
     if (!convId || inFlight.current.has(convId)) return;
-    /* 本地新一轮接管真相源：作废在跑轮次的后台轮询与占位（避免补拉整段替换冲掉乐观消息） */
-    busyPollCancel.current?.();
-    setBackendBusyId(id => (id === convId ? null : id));
 
     /* 乐观插入：用户消息先上屏（保留对象引用，失败时按引用回滚） */
     const optimistic: ChatMessage = { role: "user", bubble: text, time: nowTime() };
