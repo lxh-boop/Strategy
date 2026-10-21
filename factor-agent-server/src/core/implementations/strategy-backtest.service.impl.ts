@@ -9,9 +9,9 @@ import {
   WeightFn,
 } from '../weight-functions';
 
-// [实验] 引擎 B 引用已禁用
+// 引擎 B 延迟 require：避免 DuckDB 原生模块在引擎 A 的测试/装载路径上被静态引入
 function industryEngine(): typeof import('../industry-engine') {
-  throw new Error('industry-engine disabled in experiment');
+  return require('../industry-engine');
 }
 
 import { ApiException } from '../../common/api.exception';
@@ -153,19 +153,22 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
 
   async runStrategyBacktest(input: StrategyBacktestInput, onProgress?: AgentProgressSink): Promise<StrategyBacktestOutput> {
     const p = assertStrategyInput(input);
-    if (p.rebalanceIntervalDays === 0 && (p.weightFn || p.positionFn)) {
+    if (p.rebalanceIntervalDays === 0 && (p.weightFn || p.positionFn || (p.industries?.length ?? 0) > 0)) {
       throw new ApiException(
         'INVALID_ARGUMENT',
         400,
-        '触发模式（模型 Ⅱ）暂不支持权重/仓位函数，请改用定期调仓模式',
+        '触发模式（模型 Ⅱ）暂不支持权重/仓位函数与行业筛选，请改用定期调仓模式',
       );
     }
-    // [实验] 行业名校验已禁用
+    // 行业名校验：未知行业 → 澄清信号附名录（模型自纠后重发）
+    if (p.industries?.length) {
+      const { unknown } = await industryEngine().resolveIndustrySecurities(p.industries, Number(p.startDate));
+      if (unknown.length) throw new ClarificationSignal(await industryEngine().industryClarificationGuide(unknown));
+    }
 
     // 函数解析（边界上一次）：未知函数名 → 400 附名录；参数不合法 → ClarificationSignal 引导模型修正
     const weightBinding = p.weightFn ? resolveWeightFn(p.weightFn) : null;
     const positionBinding = p.positionFn ? resolvePositionFn(p.positionFn) : null;
-    console.error('[DEBUG bind]', 'weightFn:', JSON.stringify(p.weightFn ?? null), 'positionFn:', JSON.stringify(p.positionFn ?? null), 'binding fn:', typeof (positionBinding?.fn));
     const industries = p.industries ?? [];
     // 触发模式（rebalanceIntervalDays=0）路由到模型 Ⅱ 独立引擎
     if (p.rebalanceIntervalDays === 0) {
@@ -240,7 +243,12 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
               ).map((r) => [r.securityId, r.value]),
             )
           : undefined;
-        const dayPool = p.securityIds;
+        // 行业筛选（PIT）：决策日 D 的时点归属并集，与显式股票池取交集
+        const dayPool = industries.length
+          ? (await industryEngine().resolveIndustrySecurities(industries, day)).securities.filter(
+              (c) => !p.securityIds || p.securityIds.includes(c),
+            )
+          : p.securityIds;
         const sig = await this.crossSectionSignal({
           entryFilters: p.entryFilters,
           sortFactors: sortFactors.factors,
@@ -528,7 +536,13 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
     const icByFactor = weightBinding?.icWindow
       ? await this.computeRollingIC(p.sortFactors, queryDate, weightBinding.icWindow)
       : undefined;
-    const industryPool = p.securityIds;
+    // 行业筛选（PIT）：查询日的时点归属并集，与显式股票池取交集；未知行业 → 澄清附名录（单次解析）
+    let industryPool = p.securityIds;
+    if (industries.length) {
+      const { securities, unknown } = await industryEngine().resolveIndustrySecurities(industries, queryDate);
+      if (unknown.length) throw new ClarificationSignal(await industryEngine().industryClarificationGuide(unknown));
+      industryPool = securities.filter((c) => !p.securityIds || p.securityIds.includes(c));
+    }
     const sig = await this.crossSectionSignal({
       entryFilters: p.entryFilters,
       sortFactors: p.sortFactors,

@@ -99,7 +99,18 @@ export const RUN_STRATEGY_BACKTEST_SPEC = {
           items: { type: 'string' },
           description:
             '股票池：证券代码数组（如 ["000002.XSHE"]，来自前置筛选或用户指定）。缺省/空 = 全市场。' +
-            '禁止在对话中手拼超长清单；需要行业/主题股票池时先用筛选手段得到代码清单',
+            '禁止在对话中手拼超长清单；行业股票池改用 industries 参数，不要手工拼行业成分清单',
+        },
+        industries: {
+          type: 'array',
+          items: { type: 'string' },
+          description:
+            '行业筛选：申万一级行业名数组（如 ["食品饮料"]），数量不设上限。' +
+            '股票池 = 所选行业在每个调仓日的时点归属成分并集（期内调入调出自动跟随），再与 securityIds 取交集。' +
+            '合法行业名（申万 2021 一级，共 31 个）：农林牧渔、基础化工、钢铁、有色金属、电子、汽车、家用电器、食品饮料、' +
+            '纺织服饰、轻工制造、医药生物、公用事业、交通运输、房地产、商贸零售、社会服务、银行、非银金融、综合、' +
+            '建筑材料、建筑装饰、电力设备、机械设备、国防军工、计算机、传媒、通信、煤炭、石油石化、环保、美容护理。' +
+            '用户按行业圈股票池时优先用本参数，禁止自行编造行业成分股清单；触发模式（rebalanceIntervalDays=0）不支持',
         },
         startDate: {
           type: 'string',
@@ -435,6 +446,12 @@ const RUN_DAILY_SCREEN_SPEC = {
           type: 'array',
           items: { type: 'string' },
           description: '股票池（000002.XSHE 形态）；缺省 = 全市场',
+        },
+        industries: {
+          type: 'array',
+          items: { type: 'string' },
+          description:
+            '行业筛选（可选）：申万一级行业名数组，名录同 run_strategy_backtest 的 industries；按查询日时点归属收窄股票池，再与 securityIds 取交集',
         },
         maxPositions: { type: 'integer', description: '入选只数，默认 10，上限 100' },
         date: { type: 'string', description: '查询日，纯数字 YYYYMMDD；缺省 = 最近交易日' },
