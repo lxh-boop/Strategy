@@ -147,6 +147,8 @@ export const createConversation = () => http<Conversation>("POST", "/conversatio
 export const deleteConversation = (id: string) => http<void>("DELETE", `/conversations/${id}`);
 export const clearConversation = (id: string) => http<Conversation>("POST", `/conversations/${id}/clear`);
 export const getMessages = (id: string) => http<ChatMessage[]>("GET", `/conversations/${id}/messages`);
+/** 在跑轮次查询：该会话是否有仍在后端执行的轮次（刷新后恢复"执行中"占位用） */
+export const getRunStatus = (id: string) => http<{ running: boolean }>("GET", `/conversations/${id}/run`);
 export const sendMessage = (id: string, text: string) =>
   http<SendMessageResult>("POST", `/conversations/${id}/messages`, { text });
 

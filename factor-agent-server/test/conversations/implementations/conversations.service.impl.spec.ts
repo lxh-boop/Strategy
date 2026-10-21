@@ -32,7 +32,7 @@ describe('B-INT-01 ConversationsServiceImpl（会话业务）', () => {
     appendMessages: jest.fn(),
     renameConversationFromFirstMessage: jest.fn(),
   };
-  const agent = { reply: jest.fn(), replyStream: jest.fn() };
+  const agent = { reply: jest.fn(), replyStream: jest.fn(), hasInflightRun: jest.fn() };
   let svc: ConversationsService;
 
   beforeEach(async () => {
@@ -99,6 +99,22 @@ describe('B-INT-01 ConversationsServiceImpl（会话业务）', () => {
 
     store.getConversation.mockResolvedValue(undefined);
     await expectApiError(() => svc.getMessages(USER, 'nope'), 404, 'NOT_FOUND');
+  });
+
+  /* ---------- getRunStatus：在跑轮次查询（刷新恢复"执行中"占位用） ---------- */
+
+  it('getRunStatus：透传 agent.hasInflightRun；会话不存在抛 404 且不查运行态', async () => {
+    store.getConversation.mockResolvedValue(conv('c1', []));
+    agent.hasInflightRun.mockReturnValue(true);
+    expect(await svc.getRunStatus(USER, 'c1')).toEqual({ running: true });
+    expect(agent.hasInflightRun).toHaveBeenCalledWith('c1');
+
+    agent.hasInflightRun.mockReturnValue(false);
+    expect(await svc.getRunStatus(USER, 'c1')).toEqual({ running: false });
+
+    store.getConversation.mockResolvedValue(undefined);
+    await expectApiError(() => svc.getRunStatus(USER, 'nope'), 404, 'NOT_FOUND');
+    expect(agent.hasInflightRun).not.toHaveBeenCalledWith('nope');
   });
 
   /* ---------- sendMessage：编排逻辑 ---------- */

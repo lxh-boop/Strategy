@@ -20,6 +20,13 @@ export abstract class AgentService {
   abstract reply(conversation: Conversation, userText: string, routeText: string): Promise<AgentReply>;
 
   /**
+   * 该会话是否有一轮仍在后端执行中（消息级并发闸的查询面）。
+   * 轮次落库在整轮结束时一次性写入，执行中的轮次在任何历史接口里都看不到——
+   * 前端刷新后据此恢复"执行中"占位并轮询补齐结果。
+   */
+  abstract hasInflightRun(conversationId: string): boolean;
+
+  /**
    * reply 的流式形态：执行过程经 onProgress 推送节点级事件
    * （看表/看字段/读数/回测的 tool_call 与 tool_result，见 AgentProgressEvent），
    * 返回值与 reply() 完全一致；事件只是附加推送，最终结果以返回值为准。

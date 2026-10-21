@@ -2,8 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import type { ChatMessage, Conversation } from "../types";
 import {
   ApiError, clearConversation as apiClear, createConversation as apiCreate,
-  deleteConversation as apiRemove, listConversations as apiList,
-  reportClientLog, sendMessageStream as apiSendStream, withCardId,
+  deleteConversation as apiRemove, getMessages as apiMessages, getRunStatus as apiRunStatus,
+  listConversations as apiList, reportClientLog, sendMessageStream as apiSendStream, withCardId,
 } from "../api";
 import { nowTime } from "../utils/format";
 
@@ -40,6 +40,8 @@ export function useConversations(notify?: (msg: string) => void) {
   const [live, setLive] = useState<LiveProgress | null>(null);
   const [confirmGate, setConfirmGate] = useState<ConfirmGatePending | null>(null);
   const [loading, setLoading] = useState(true);
+  /** 在跑轮次（后端仍在执行、尚未落库的会话）：刷新后据此显示"后台执行中"占位 */
+  const [backendBusyId, setBackendBusyId] = useState<string | null>(null);
 
   const notifyRef = useRef(notify);
   notifyRef.current = notify;
@@ -47,6 +49,11 @@ export function useConversations(notify?: (msg: string) => void) {
   const inFlight = useRef(new Set<string>());
   /** 在途消息的取消句柄（停止生成按钮用），convId → AbortController */
   const stops = useRef(new Map<string, AbortController>());
+  /** 会话列表镜像：后台轮询回调里读最新消息数，避开 effect 闭包旧值 */
+  const conversationsRef = useRef(conversations);
+  conversationsRef.current = conversations;
+  /** 在跑轮次轮询的取消句柄：本地开始新一轮发送时作废轮询（本地流接管真相源） */
+  const busyPollCancel = useRef<null | (() => void)>(null);
 
   const failMsg = (e: unknown, fallback: string) =>
     notifyRef.current?.(e instanceof ApiError ? e.message : fallback);
@@ -69,6 +76,71 @@ export function useConversations(notify?: (msg: string) => void) {
     })();
     return () => { cancelled = true; };
   }, []);
+
+  /* 在跑轮次恢复：轮次落库在整轮结束时一次性写入，刷新时正在执行的那轮不在任何
+   * 历史接口里。挂载/换会话时查一次运行状态——在跑则显示"后台执行中"占位并轮询，
+   * 收尾后把落库结果合并回会话（服务端为真相源，整段替换该会话消息） */
+  useEffect(() => {
+    if (!currentId) return;
+    let cancelled = false;
+    let timer: number | undefined;
+    const sleep = (ms: number) => new Promise<void>(r => { timer = window.setTimeout(r, ms); });
+    const stop = () => { cancelled = true; window.clearTimeout(timer); };
+    busyPollCancel.current = stop;
+
+    const mergeIfLonger = (fresh: ChatMessage[]): boolean => {
+      const local = conversationsRef.current.find(c => c.id === currentId);
+      if (!local || fresh.length <= local.messages.length) return false;
+      setConversations(prev => prev.map(c => (c.id === currentId ? { ...c, messages: fresh } : c)));
+      return true;
+    };
+
+    (async () => {
+      let running = false;
+      try {
+        ({ running } = await apiRunStatus(currentId));
+      } catch {
+        return; // 会话被删（404）/网络错误：无法判定，不占位（下次刷新自愈）
+      }
+      if (cancelled) return;
+      if (running) {
+        setBackendBusyId(currentId);
+        /* 兜底：后端异常长跑最多等 5 分钟，避免无限轮询 */
+        const deadline = Date.now() + 5 * 60_000;
+        while (!cancelled) {
+          if (Date.now() > deadline) {
+            setBackendBusyId(null);
+            notifyRef.current?.("后台执行时间较长，已停止等待；结果落库后刷新页面即可看到");
+            return;
+          }
+          await sleep(2500);
+          if (cancelled) return;
+          try {
+            if (!(await apiRunStatus(currentId)).running) break;
+          } catch {
+            return;
+          }
+        }
+        if (cancelled) return;
+      }
+      /* 收尾补拉：闸先删、persist 后写（毫秒级迟滞），观察到过在跑的容忍 3 次；无新行即放弃 */
+      const retries = running ? 3 : 1;
+      for (let i = 0; i < retries && !cancelled; i++) {
+        try {
+          if (mergeIfLonger(await apiMessages(currentId))) {
+            setBackendBusyId(id => (id === currentId ? null : id));
+            return;
+          }
+        } catch {
+          return;
+        }
+        if (i < retries - 1) await sleep(1500);
+      }
+      if (!cancelled) setBackendBusyId(id => (id === currentId ? null : id));
+    })();
+
+    return () => { stop(); busyPollCancel.current = null; };
+  }, [currentId]);
 
   const createConversation = async () => {
     try {
@@ -120,6 +192,9 @@ export function useConversations(notify?: (msg: string) => void) {
     if (!text) return;
     const convId = currentId;
     if (!convId || inFlight.current.has(convId)) return;
+    /* 本地新一轮接管真相源：作废在跑轮次的后台轮询与占位（避免补拉整段替换冲掉乐观消息） */
+    busyPollCancel.current?.();
+    setBackendBusyId(id => (id === convId ? null : id));
 
     /* 乐观插入：用户消息先上屏（保留对象引用，失败时按引用回滚） */
     const optimistic: ChatMessage = { role: "user", bubble: text, time: nowTime() };
@@ -231,6 +306,7 @@ export function useConversations(notify?: (msg: string) => void) {
     live,
     confirmGate,
     loading,
+    backendBusyId,
     createConversation,
     switchConversation,
     deleteConversation,

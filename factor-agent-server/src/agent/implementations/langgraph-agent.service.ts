@@ -381,6 +381,11 @@ export class LangGraphAgentService extends AgentService {
     return this.runGraph(conversation, userText, onProgress);
   }
 
+  /** 在跑轮次查询：直接读消息级并发闸（图收尾/失败即移除，见 inflightRuns 注释） */
+  hasInflightRun(conversationId: string): boolean {
+    return this.inflightRuns.has(conversationId);
+  }
+
   private async runGraph(conversation: Conversation, userText: string, onProgress?: AgentProgressSink): Promise<AgentReply> {
     // ① 未配置 Key：开发模式，纯文本提示
     if (!this.app || !this.llm) {

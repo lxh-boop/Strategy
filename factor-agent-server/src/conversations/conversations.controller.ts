@@ -38,6 +38,13 @@ export class ConversationsController {
     return this.conversations.getMessages(userId, id);
   }
 
+  /** 在跑轮次查询：该会话是否有仍在后端执行的轮次。轮次落库在整轮结束时一次性写入，
+   *  执行中的轮次在 list/messages 里不可见——刷新后前端据此恢复"执行中"占位并轮询补齐 */
+  @Get(':id/run')
+  async runStatus(@UserId() userId: number, @Param('id') id: string): Promise<{ running: boolean }> {
+    return this.conversations.getRunStatus(userId, id);
+  }
+
   @Post(':id/messages')
   async send(@UserId() userId: number, @Param('id') id: string, @Body() dto: SendMessageDto) {
     return this.conversations.sendMessage(userId, id, dto.text);

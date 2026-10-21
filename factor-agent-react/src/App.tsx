@@ -160,6 +160,7 @@ function MainApp({ user }: { user: UserPublic }) {
               live={conv.live}
               confirmGate={conv.confirmGate}
               loading={conv.loading}
+              backendBusyId={conv.backendBusyId}
               savedCardIds={savedCardIds}
               userNickname={user.nickname}
               onCreate={conv.createConversation}

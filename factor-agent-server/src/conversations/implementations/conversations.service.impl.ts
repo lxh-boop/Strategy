@@ -48,6 +48,13 @@ export class ConversationsServiceImpl extends ConversationsService {
     return conv.messages;
   }
 
+  /** 在跑轮次查询：归属校验同 getMessages，运行态来自智能体的消息级并发闸（进程内存） */
+  async getRunStatus(userId: number, id: string): Promise<{ running: boolean }> {
+    const conv = await this.users.getConversation(userId, id);
+    if (!conv) throw new ApiException('NOT_FOUND', 404, `会话不存在: ${id}`);
+    return { running: this.agent.hasInflightRun(id) };
+  }
+
   /** 发送消息：路由上下文取最近 3 条用户消息（含当前，与前端语义一致） */
   async sendMessage(userId: number, id: string, text: string): Promise<SendMessageResult> {
     const { conv, routeText } = await this.prepare(userId, id, text);

@@ -363,13 +363,14 @@ function MessageRow({ m, userInitial, saved, onSaveBacktest, onAskOptimize, onGo
   );
 }
 
-function TypingRow({ steps }: { steps?: { stage: string; ok?: boolean; detail?: string }[] }) {
+function TypingRow({ steps, note }: { steps?: { stage: string; ok?: boolean; detail?: string }[]; note?: string }) {
   return (
     <div className="msg agent">
       <div className="msg-avatar" aria-hidden="true"><IconLogo size={18} /></div>
       <div className="msg-content">
         <div className="msg-bubble" role="status" aria-label="智能体正在回复">
           <div className="typing" aria-hidden="true"><i /><i /><i /></div>
+          {note && <div className="chat-note">{note}</div>}
           {steps && steps.length > 0 && (
             <div className="chat-steps">
               {steps.map((s, i) => (
@@ -395,6 +396,8 @@ export function ChatPage(props: {
   typingId: string | null;
   /** 在途消息的流式过程步骤（SSE 节点级事件，见 useConversations 的 LiveProgress） */
   live?: { convId: string; steps: { stage: string; ok?: boolean; detail?: string }[] } | null;
+  /** 在跑轮次（后端仍在执行、尚未落库的会话，刷新后经运行状态接口恢复） */
+  backendBusyId?: string | null;
   /** 确认门挂起（confirm_pending 事件落地态，见 useConversations 的 ConfirmGatePending） */
   confirmGate?: ConfirmGatePending | null;
   loading: boolean;
@@ -416,7 +419,8 @@ export function ChatPage(props: {
   onDraftConsumed?: () => void;
 }) {
   const {
-    conversations, currentId, typingId, live, confirmGate, loading, savedCardIds, userNickname,
+    conversations, currentId, typingId, live, confirmGate, loading, backendBusyId,
+    savedCardIds, userNickname,
     onCreate, onSwitch, onDelete, onClear, onSubmit, onStop, onSaveBacktest, onGotoStrategies,
     draftInput, onDraftConsumed,
   } = props;
@@ -425,6 +429,8 @@ export function ChatPage(props: {
   const bodyRef = useRef<HTMLDivElement>(null);
   const typingHere = current ? typingId === current.id : false;
   const liveSteps = typingHere && live && live.convId === current?.id ? live.steps : undefined;
+  /* 在跑轮次占位：本轮无本地流（刷新后恢复），只有静态提示、无步骤、停止按钮不可用 */
+  const backendHere = !typingHere && current ? backendBusyId === current.id : false;
   const userInitial = userNickname.slice(0, 1) || "友";
   /* 确认门弹窗：唯一依据 = confirm_pending 事件（后端 confirm 节点 interrupt 挂起时经 SSE 发来）。
      不再对末条消息做文本反推——挂尾巴的旧提案/邀请话术刷新后一律静默。
@@ -575,7 +581,12 @@ export function ChatPage(props: {
                 onGotoStrategies={onGotoStrategies}
               />
             ))}
-            {typingHere && <TypingRow steps={liveSteps} />}
+            {(typingHere || backendHere) && (
+              <TypingRow
+                steps={liveSteps}
+                note={backendHere ? "上一条消息仍在后台执行中，结果即将出现在会话里…" : undefined}
+              />
+            )}
           </div>
         </div>
 
