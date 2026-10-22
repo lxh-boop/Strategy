@@ -810,6 +810,10 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
       }
     }
 
+    if (process.env.DEBUG_TRADES === '1') {
+      // eslint-disable-next-line no-console
+      console.log('[DEBUG_TRADES]', JSON.stringify({ trades: account.trades(), equities }));
+    }
     const finalEquity = equities[equities.length - 1] ?? p.initialCapital;
     // 每期持仓明细：重放交易流水（调仓模式按调仓期切；排除段内的调仓日不产生期行）
     const periodAgg = buildPeriodHoldings(account.trades(), tradeDates, periodStarts, (code, day) =>
