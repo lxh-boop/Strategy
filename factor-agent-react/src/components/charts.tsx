@@ -63,8 +63,8 @@ export function BacktestChart({ p, bench, dates, logScale = false, width = 640, 
     <svg viewBox={`0 0 ${width} ${height}`}>
       <defs>
         <linearGradient id={gid} x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0" stopColor="#d93a3f" stopOpacity=".14" />
-          <stop offset="1" stopColor="#d93a3f" stopOpacity="0" />
+          <stop offset="0" style={{ stopColor: "var(--chart-accent)", stopOpacity: 0.14 }} />
+          <stop offset="1" style={{ stopColor: "var(--chart-accent)", stopOpacity: 0 }} />
         </linearGradient>
       </defs>
       {[0, 1, 2, 3].map(i => {
@@ -96,7 +96,7 @@ export function BacktestChart({ p, bench, dates, logScale = false, width = 640, 
       <polygon points={`${padL},${height - padB} ${pts(p)} ${width - padR},${height - padB}`} fill={`url(#${gid})`} />
       <polyline points={pts(bench)} fill="none" stroke="var(--bench-line)" strokeWidth="1.8" strokeDasharray="5 4"
         pathLength={1} className="line-draw line-draw-bench" />
-      <polyline points={pts(p)} fill="none" stroke="var(--primary)" strokeWidth="2.2" strokeLinejoin="round" strokeLinecap="round"
+      <polyline points={pts(p)} fill="none" stroke="var(--chart-accent)" strokeWidth="2.2" strokeLinejoin="round" strokeLinecap="round"
         pathLength={1} className="line-draw" />
     </svg>
   );
@@ -221,9 +221,9 @@ export function RadarChart({ items }: { items: { name: string; value: number }[]
           </g>
         );
       })}
-      <polygon points={dataPts.map(fmt).join(" ")} fill="rgba(217,58,63,.12)" stroke="var(--primary)" strokeWidth="2" />
+      <polygon points={dataPts.map(fmt).join(" ")} style={{ fill: "var(--chart-accent-soft)" }} stroke="var(--chart-accent)" strokeWidth="2" />
       {dataPts.map((p, i) => (
-        <circle key={i} cx={p[0].toFixed(1)} cy={p[1].toFixed(1)} r="3" fill="var(--primary)" />
+        <circle key={i} cx={p[0].toFixed(1)} cy={p[1].toFixed(1)} r="3" fill="var(--chart-accent)" />
       ))}
     </svg>
   );

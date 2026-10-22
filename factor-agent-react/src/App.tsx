@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import type { BacktestCard, Strategy } from "./types";
 import {
   ApiError, backtestStrategy as apiBacktest,
@@ -12,7 +12,12 @@ import { StrategiesPage } from "./pages/StrategiesPage";
 import { ProfilePage } from "./pages/ProfilePage";
 import { AuthView } from "./components/AuthView";
 import { Toast } from "./components/ui";
-import { IconChat, IconGrid, IconLogo, IconUser } from "./components/icons";
+import { IconChat, IconGrid, IconLogo, IconMoon, IconSun, IconUser } from "./components/icons";
+
+/* ===== 配色主题（浅/深双主题）：缺省固定浅色，手动切换后 localStorage 持久化 ===== */
+type Theme = "light" | "dark";
+const THEME_KEY = "alphasage_theme_v1";
+const getInitialTheme = (): Theme => (localStorage.getItem(THEME_KEY) === "dark" ? "dark" : "light");
 
 type Page = "chat" | "strategies" | "profile";
 
@@ -23,6 +28,15 @@ function MainApp({ user }: { user: UserPublic }) {
   const [savedCardIds, setSavedCardIds] = useState<string[]>([]);
   const [health, setHealth] = useState<HealthInfo | null>(null);
   const [backendDown, setBackendDown] = useState(false);
+  const [theme, setTheme] = useState<Theme>(getInitialTheme);
+
+  /* useLayoutEffect：首次绘制前挂 data-theme，深色用户无浅色闪烁 */
+  useLayoutEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    localStorage.setItem(THEME_KEY, theme);
+  }, [theme]);
+
+  const toggleTheme = () => setTheme(t => (t === "dark" ? "light" : "dark"));
 
   /* Toast 轻提示 */
   const [toast, setToast] = useState<string | null>(null);
@@ -120,6 +134,13 @@ function MainApp({ user }: { user: UserPublic }) {
               <span className="logo-name">因子智投</span>
               <span className="logo-sub">AlphaSage Agent</span>
             </div>
+            <button
+              className="theme-toggle"
+              onClick={toggleTheme}
+              title={theme === "dark" ? "切换浅色" : "切换深色"}
+              aria-label={theme === "dark" ? "切换浅色" : "切换深色"}>
+              {theme === "dark" ? <IconSun size={15} /> : <IconMoon size={15} />}
+            </button>
           </div>
 
           <nav className="nav">

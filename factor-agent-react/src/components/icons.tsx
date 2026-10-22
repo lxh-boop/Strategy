@@ -28,3 +28,5 @@ export const IconFile = () => <IconDoc />;
 export const IconKey = () => <I><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4" /></I>;
 export const IconDatabase = () => <I><ellipse cx="12" cy="5" rx="9" ry="3" /><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3" /><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5" /></I>;
 export const IconShield = () => <I><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" /></I>;
+export const IconMoon = ({ size = 15 }) => <I size={size}><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" /></I>;
+export const IconSun = ({ size = 15 }) => <I size={size}><circle cx="12" cy="12" r="4" /><line x1="12" y1="2" x2="12" y2="5" /><line x1="12" y1="19" x2="12" y2="22" /><line x1="2" y1="12" x2="5" y2="12" /><line x1="19" y1="12" x2="22" y2="12" /><line x1="4.6" y1="4.6" x2="6.6" y2="6.6" /><line x1="17.4" y1="17.4" x2="19.4" y2="19.4" /><line x1="4.6" y1="19.4" x2="6.6" y2="17.4" /><line x1="17.4" y1="6.6" x2="19.4" y2="4.6" /></I>;
