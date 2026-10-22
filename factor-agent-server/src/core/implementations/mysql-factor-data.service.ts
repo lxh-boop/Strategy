@@ -217,8 +217,11 @@ export class MysqlFactorDataService extends FactorDataService {
       const conds: string[] = [`\`${field}\` IS NOT NULL`];
       const params: (string | number)[] = [];
       if (!staticTable) {
+        // 因子表 TRADE_DATE 为 BIGINT（yyyymmdd 整数）：必须用裸数字日期。
+        // dash 日期（'2025-01-01'）会被数值强转成 2025 → 区间恒空 → 字段类卖出
+        // 规则与不卖条件静默失效（2026-10-22 掘金对照实验定位）
         conds.push('TRADE_DATE BETWEEN ? AND ?');
-        params.push(toDashDate(start), toDashDate(end));
+        params.push(start, end);
       }
       if (chunk) {
         conds.push(`SECURITY_ID IN (${chunk.map(() => '?').join(', ')})`);
