@@ -105,7 +105,7 @@ export interface StrategyRunConfig {
   rebalanceIntervalDays: number;   // 每 N 个交易日调仓（0 = 触发模式）
   /** 仓位带宽 %：触发模式必传（5~50，总仓位偏离目标 ±带宽即再平衡）；调仓模式可选（择时拉回阈值，默认 1） */
   positionDeviatePct?: number;
-  executionTiming?: 0 | 1;         // 0=开盘价 1=收盘价
+  executionTiming?: 0 | 1 | 2;     // 0=次日开盘价成交（默认）1=次日收盘价成交 2=信号日当日收盘价成交（尾盘单，掘金对齐）
   maxPositions?: number;
   idealPositionPct?: number;
   minPositionPct?: number;

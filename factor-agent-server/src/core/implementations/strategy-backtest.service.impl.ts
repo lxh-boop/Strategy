@@ -633,8 +633,24 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
         continue;
       }
 
-      // ── 执行阶段：昨日盘后生成的指令 ──
-      if (i > 0) {
+      // ── 尾盘单（ADR-0008 executionTiming=2）：当日收盘出信号（用当日截面）→ 当日收盘价成交，
+      //    零滞后对齐掘金撮合；mode 0/1 则为 T 收盘出信号、T+1 执行 ──
+      if (p.executionTiming === 2) {
+        if (p.sellRules.length && account.size() > 0) {
+          for (const pos of account.allPositions()) {
+            if (pos.buyDayIdx >= i) continue; // T+1：当日买入不可卖
+            if (keepRules.length && matchKeepRule(pos, day, keepRules, keepFieldSeries, staticKeepRefs)) continue; // 不卖条件：跳过本轮卖出检查
+            const close = quoteOf(pos.code, day)?.close ?? account.lastCloseOf(pos.code);
+            if (close === undefined) continue;
+            const reason = matchSellRule(pos, close, i, day, p.sellRules, sellFieldSeries, staticSellRefs);
+            if (reason) pendingSells.set(pos.code, reason);
+          }
+        }
+        if (rebalanceIdxSet.has(i)) pendingRebalance = signals.get(i) ?? null;
+      }
+
+      // ── 执行阶段：昨日盘后生成的指令（尾盘单模式 = 当日收盘信号的同日收盘执行）──
+      if (i > 0 || p.executionTiming === 2) {
         // a. 卖出指令（卖出规则触发）：停牌/跌停顺延，T+1 保护
         for (const [code, reason] of pendingSells) {
           const pos = account.positionOf(code);
@@ -777,8 +793,9 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
       equities.push(account.settle((code) => quoteOf(code, day)?.close));
       turnoverByDay.push(account.takeDayTurnover());
 
-      // ── 信号阶段（D 日收盘后）：卖出规则逐持仓检查 + 调仓日落目标持仓，指令 D+1 执行 ──
-      if (p.sellRules.length && account.size() > 0) {
+      // ── 信号阶段（D 日收盘后）：卖出规则逐持仓检查 + 调仓日落目标持仓，指令 D+1 执行；
+      //    尾盘单模式（executionTiming=2）已在当日早前出过信号，此处跳过 ──
+      if (p.executionTiming !== 2 && p.sellRules.length && account.size() > 0) {
         for (const pos of account.allPositions()) {
           if (pos.buyDayIdx >= i) continue; // T+1：当日买入的明日才可能触发卖出
           if (keepRules.length && matchKeepRule(pos, day, keepRules, keepFieldSeries, staticKeepRefs)) continue; // 不卖条件：跳过本轮卖出检查
@@ -788,7 +805,7 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
           if (reason) pendingSells.set(pos.code, reason);
         }
       }
-      if (rebalanceIdxSet.has(i)) {
+      if (p.executionTiming !== 2 && rebalanceIdxSet.has(i)) {
         pendingRebalance = signals.get(i) ?? null;
       }
     }
@@ -1136,7 +1153,7 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
       卖出规则: describeSellRules(p.sellRules),
       ...(p.keepRules.length ? { 不卖条件: describeKeepRules(p.keepRules) } : {}),
       ...(p.excludeRanges.length ? { 排除时间段: describeExcludeRanges(p.excludeRanges) } : {}),
-      成交时点: p.executionTiming === 0 ? '开盘价' : '收盘价',
+      成交时点: p.executionTiming === 2 ? '当日收盘（尾盘单）' : p.executionTiming === 1 ? '收盘价' : '开盘价',
       初始资金: p.initialCapital,
       期末权益: +loop.finalEquity.toFixed(0),
       期末现金: +loop.cash.toFixed(0),

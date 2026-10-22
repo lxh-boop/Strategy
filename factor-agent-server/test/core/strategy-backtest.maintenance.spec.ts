@@ -175,3 +175,79 @@ describe('涨跌停顺延 limitUpDownSkip（ADR-0008：默认 false = 掘金对�
     expect((out.card.trades ?? []).filter((t) => t.reason === '调仓建仓')).toHaveLength(0);
   });
 });
+
+describe('executionTiming=2（尾盘单：信号日当日收盘成交，掘金对齐）', () => {
+  const cfg = (extra: Partial<StrategyBacktestInput> = {}): StrategyBacktestInput => ({
+    ...base,
+    ...extra,
+  });
+
+  it('首期建仓发生在信号日当日（20240102 收盘），而非次日开盘', async () => {
+    const svc = makeService({
+      revs20: {
+        20240102: { [CODE_A]: 1.5, [CODE_B]: 1.2 },
+      },
+      bias20: {
+        20240102: { [CODE_A]: 1.0, [CODE_B]: 1.0 },
+      },
+      quotes: [
+        ...quotesFor(CODE_A, [
+          [20240102, { o: 10, c: 10, pc: 10 }],
+          [20240103, { o: 10, c: 10, pc: 10 }],
+        ]),
+        ...quotesFor(CODE_B, [
+          [20240102, { o: 20, c: 20, pc: 20 }],
+          [20240103, { o: 20, c: 20, pc: 20 }],
+        ]),
+      ],
+    });
+    const out = await svc.runStrategyBacktest(
+      assertStrategyInput(cfg({ executionTiming: 2, maxPositions: 2, idealPositionPct: 50 })),
+    );
+    const buys = (out.card.trades ?? []).filter((t) => t.direction === 'buy');
+    expect(buys.length).toBe(2);
+    expect(buys.every((t) => t.date === 20240102)).toBe(true); // 当日收盘成交（mode 0/1 为 20240103）
+  });
+
+  it('BIAS20<0 卖出在信号日当日收盘成交（尾盘单），而非次日', async () => {
+    const svc = makeService({
+      revs20: {
+        20240102: { [CODE_A]: 1.5, [CODE_B]: 1.2 },
+        20240103: { [CODE_A]: 1.5, [CODE_B]: 1.2 },
+      },
+      bias20: {
+        20240102: { [CODE_A]: 1.0, [CODE_B]: 1.0 },
+        20240103: { [CODE_A]: -2.0, [CODE_B]: 1.0 },
+      },
+      quotes: [
+        ...quotesFor(CODE_A, [
+          [20240102, { o: 10, c: 10, pc: 10 }],
+          [20240103, { o: 10, c: 10, pc: 10 }],
+        ]),
+        ...quotesFor(CODE_B, [
+          [20240102, { o: 20, c: 20, pc: 20 }],
+          [20240103, { o: 20, c: 20, pc: 20 }],
+        ]),
+      ],
+      factorRanges: {
+        'equ_factor_obos.BIAS20': [
+          { securityId: CODE_A, tradeDate: '2024-01-03', value: -2 },
+          { securityId: CODE_B, tradeDate: '2024-01-03', value: 1 },
+        ],
+      },
+    });
+    const out = await svc.runStrategyBacktest(
+      assertStrategyInput({
+        ...cfg({
+          maxPositions: 2,
+          idealPositionPct: 50,
+          sellRules: [{ kind: 'field', table: 'equ_factor_obos', field: 'BIAS20', op: '<', value: 0 }],
+          executionTiming: 2,
+        }),
+      }),
+    );
+    const sellA = (out.card.trades ?? []).filter((t) => t.direction === 'sell' && t.code === CODE_A);
+    expect(sellA.length).toBe(1);
+    expect(sellA[0].date).toBe(20240103); // 信号日当日收盘成交（mode 0/1 为次日）
+  });
+});

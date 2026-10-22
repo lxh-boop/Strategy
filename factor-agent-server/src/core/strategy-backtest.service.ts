@@ -204,7 +204,7 @@ export interface NormalizedStrategyInput {
   rebalanceIntervalDays: number;
   /** 触发模式（=0）的仓位偏离带宽 %；日历模式无此字段 */
   positionDeviatePct?: number;
-  executionTiming: 0 | 1;
+  executionTiming: 0 | 1 | 2;
   maxPositions: number;
   idealPositionPct: number;
   minPositionPct: number;
@@ -458,8 +458,8 @@ export function assertStrategyInput(raw: StrategyBacktestInput): NormalizedStrat
   const executionTiming = raw.executionTiming === undefined || raw.executionTiming === null || raw.executionTiming === ''
     ? 0
     : Number(raw.executionTiming);
-  if (executionTiming !== 0 && executionTiming !== 1) {
-    throw new ApiException('INVALID_ARGUMENT', 400, `executionTiming 只允许 0（开盘价成交）或 1（收盘价成交）: ${raw.executionTiming}`);
+  if (executionTiming !== 0 && executionTiming !== 1 && executionTiming !== 2) {
+    throw new ApiException('INVALID_ARGUMENT', 400, `executionTiming 只允许 0（次日开盘价成交）、1（次日收盘价成交）或 2（信号日当日收盘价成交·尾盘单）: ${raw.executionTiming}`);
   }
 
   const maxPositions = raw.maxPositions === undefined || raw.maxPositions === null || raw.maxPositions === ''
@@ -491,7 +491,7 @@ export function assertStrategyInput(raw: StrategyBacktestInput): NormalizedStrat
     feeRate,
     rebalanceIntervalDays,
     ...(positionDeviatePct !== undefined ? { positionDeviatePct } : {}),
-    executionTiming: executionTiming as 0 | 1,
+    executionTiming: executionTiming as 0 | 1 | 2,
     maxPositions,
     idealPositionPct,
     minPositionPct,
