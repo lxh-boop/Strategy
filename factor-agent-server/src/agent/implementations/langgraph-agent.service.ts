@@ -802,6 +802,11 @@ export class LangGraphAgentService extends AgentService {
                 : '全市场',
             调仓间隔: `每 ${p.rebalanceIntervalDays} 个交易日`,
             每期持仓: `${p.maxPositions} 只 × ${p.idealPositionPct}%${isUserSet(call.args?.maxPositions) ? '' : '（默认）'}`,
+            成交时点: p.executionTiming === 2
+              ? '当日收盘价（尾盘单：当日收盘出信号当日成交，掘金对齐）'
+              : p.executionTiming === 1
+                ? '次日收盘价'
+                : '次日开盘价',
             排序因子: describeSortFactors(sort.factors) + (sort.usedDefault ? '【默认追加】' : ''),
             过滤因子: describeFilters(p.entryFilters),
             卖出规则: describeSellRules(p.sellRules),
