@@ -111,9 +111,8 @@ export const RUN_STRATEGY_BACKTEST_SPEC = {
         keepFullyInvested: {
           type: 'boolean',
           description:
-            '仓位维持（可选，默认 false=掘金对齐语义）：true 时每个交易日收盘后将总仓位维持在全额暴露' +
-            '（无择时叠加时=保持满仓，卖出规则的现金当日回补剩余持仓）；false 时卖出现金保留至下一调仓日。' +
-            '用户要求"始终保持满仓/卖出现金立即买回"时传 true',
+            '仓位维持（可选，默认不传=false=掘金对齐语义：卖出现金保留至下一调仓日，不自动回补）。' +
+            '仅在用户明确要求"始终保持满仓/卖出现金立即买回"时才传 true；用户未要求时禁止传本参数',
         },
         limitUpDownSkip: {
           type: 'boolean',
