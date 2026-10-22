@@ -150,8 +150,8 @@ export const RUN_STRATEGY_BACKTEST_SPEC = {
         },
         executionTiming: {
           type: 'integer',
-          enum: [0, 1],
-          description: '成交时点：0=开盘价成交（默认）/ 1=收盘价成交',
+          enum: [0, 1, 2],
+          description: '成交时点：0=次日开盘价成交（默认，果仁同款保守口径）/ 1=次日收盘价成交 / 2=信号日当日收盘价成交（尾盘单：当日收盘出信号、当日收盘价成交，零滞后，与掘金等平台当日撮合对齐，跨平台对照用）',
         },
         maxPositions: {
           type: 'integer',
