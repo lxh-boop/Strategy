@@ -136,7 +136,7 @@ function MainApp({ user }: { user: UserPublic }) {
           </nav>
 
           <div className="agent-status">
-            <div className="agent-status-dot" style={backendDown ? { background: "#e5484d" } : undefined} />
+            <div className="agent-status-dot" style={backendDown ? { background: "var(--danger)" } : undefined} />
             <div>
               <div className="agent-status-title">{statusTitle}</div>
               <div className="agent-status-sub">{statusSub}</div>
@@ -225,7 +225,7 @@ export default function App() {
 
   if (!authReady) {
     return (
-      <div style={{ position: "fixed", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", color: "#646e80", fontSize: 14 }}>
+      <div style={{ position: "fixed", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-3)", fontSize: 14 }}>
         正在连接…
       </div>
     );
