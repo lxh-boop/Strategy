@@ -127,6 +127,12 @@ export interface StrategyRunConfig {
   /** 股票池规格快照（ADR-0006）：保存策略时随 config 落库，重跑自包含不依赖池句柄存活；
    *  结构 = 引擎入参 EnginePoolRef（groups/summary/memberCount） */
   pool?: unknown;
+  /** 仓位维持（ADR-0008）：每交易日收盘后将总仓位维持在全额暴露（无择时叠加时=保持满仓，
+   *  卖出规则的现金当日回补剩余持仓）。缺省 false = 掘金对齐语义（卖出现金保留至下一调仓日） */
+  keepFullyInvested?: boolean;
+  /** 涨跌停顺延（ADR-0008）：执行价触及涨跌停时不成交（买入涨停价不追、卖出跌停价顺延）。
+   *  缺省 false = 掘金对齐语义（涨跌停价照常成交）。真实度增强项 */
+  limitUpDownSkip?: boolean;
 }
 
 /** 函数引用：统一函数字典条目的名称 + 策略旋钮参数（序列化形态，可持久化） */

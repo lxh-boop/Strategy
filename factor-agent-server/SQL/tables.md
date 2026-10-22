@@ -1,7 +1,7 @@
 # 通联数据字典 —— 表描述
 
 > 来源：通联离线数据字典 V1.6，以下文字均照录字典原文（仅 equ_factor_obos 条目的描述为按库表元数据自拟）。
-> 字段级说明见 [equ_factor_cf.md](equ_factor_cf.md)、[equ_factor_derive.md](equ_factor_derive.md)、[equ_factor_obos.md](equ_factor_obos.md) 与 [mkt_adjf.md](mkt_adjf.md)。
+> 字段级说明见 [equ_factor_cf.md](equ_factor_cf.md)、[equ_factor_derive.md](equ_factor_derive.md)、[equ_factor_obos.md](equ_factor_obos.md) 与 [mkt_adjf.md](mkt_adjf.md)。可转债因子库 cb_factors_table1~6 与 A股精品因子库 equ_fancy_factors_table1~10 的字段级说明见同名 <表名>.md。
 
 ## equ_factor_cf（股票因子_现金流指标）
 
@@ -18,6 +18,85 @@
 - 描述 : 这类因子由日K线价格序列运算得到，刻画股价的超买超卖与摆动状态，如乖离率、随机指标、相对强弱指标、价格动量与波动率等，反映短期价格偏离与反转特征，不依赖财报数据。
 - 唯一键 : SECURITY_ID_INT,TRADE_DATE
 
+## cb_factors_table1（可转债因子库数据表1）
+
+- 描述 : 记录了可转债因子库的30个可转债估值因子的每日数据。
+- 唯一键 : TICKER_SYMBOL,TRADE_DATE
+
+## cb_factors_table2（可转债因子库数据表2）
+
+- 描述 : 记录了可转债因子库的22个可转债日线量价因子的每日数据。
+- 唯一键 : TICKER_SYMBOL,TRADE_DATE
+
+## cb_factors_table3（可转债因子库数据表3）
+
+- 描述 : 记录了可转债因子库的30个正股转债结合日线量价因子的每日数据。
+- 唯一键 : TICKER_SYMBOL,TRADE_DATE
+
+## cb_factors_table4（可转债因子库数据表4）
+
+- 描述 : 记录了可转债因子库的20个可转债分钟线量价因子的每日数据。
+- 唯一键 : TICKER_SYMBOL,TRADE_DATE
+
+## cb_factors_table5（可转债因子库数据表5）
+
+- 描述 : 记录了可转债因子库的30个可转债分钟线量价因子的每日数据。
+- 唯一键 : TICKER_SYMBOL,TRADE_DATE
+
+## cb_factors_table6（可转债因子库数据表6）
+
+- 描述 : 记录了可转债因子库的32个可转债估值因子的每日数据。
+- 唯一键 : TICKER_SYMBOL,TRADE_DATE
+
+## equ_fancy_factors_table1（精品因子库数据表1）
+
+- 描述 : 记录了精品因子库的20个因子的每日数据。
+- 唯一键 : TICKER_SYMBOL,TRADE_DATE
+
+## equ_fancy_factors_table2（精品因子库数据表2）
+
+- 描述 : 记录了精品因子库的20个因子的每日数据。
+- 唯一键 : TICKER_SYMBOL,TRADE_DATE
+
+## equ_fancy_factors_table3（精品因子库数据表3）
+
+- 描述 : 记录了精品因子库的20个因子的每日数据。
+- 唯一键 : TICKER_SYMBOL,TRADE_DATE
+
+## equ_fancy_factors_table4（精品因子库数据表4）
+
+- 描述 : 记录了精品因子库的20个因子的每日数据。
+- 唯一键 : TICKER_SYMBOL,TRADE_DATE
+
+## equ_fancy_factors_table5（精品因子库数据表5）
+
+- 描述 : 记录了精品因子库的20个因子的每日数据。
+- 唯一键 : TICKER_SYMBOL,TRADE_DATE
+
+## equ_fancy_factors_table6（精品因子库数据表6）
+
+- 描述 : 记录了精品因子库的20个因子的每日数据。
+- 唯一键 : TICKER_SYMBOL,TRADE_DATE
+
+## equ_fancy_factors_table7（精品因子库数据表7）
+
+- 描述 : 记录了精品因子库的21个因子的每日数据。
+- 唯一键 : TICKER_SYMBOL,TRADE_DATE
+
+## equ_fancy_factors_table8（精品因子库数据表8）
+
+- 描述 : 记录了精品因子库的21个因子的每日数据。
+- 唯一键 : TICKER_SYMBOL,TRADE_DATE
+
+## equ_fancy_factors_table9（精品因子库数据表9）
+
+- 描述 : 记录了精品因子库的22个因子的每日数据。
+- 唯一键 : TICKER_SYMBOL,TRADE_DATE
+
+## equ_fancy_factors_table10（精品因子库数据表10）
+
+- 描述 : 记录了精品因子库的24个因子的每日数据。
+- 唯一键 : TICKER_SYMBOL,TRADE_DATE
 ## mkt_adjf（股票前复权因子）
 
 - 描述 : 获取沪深京股票用来调整历史行情的前复权因子数据，包含除权除息日、除权除息事项具体数据、本次复权因子、累积复权因子以及对应的生效日期区间。该因子用来调整历史行情，不作为预测使用，于除权除息日进行计算调整。只在发生分红、配股、股改事件的除权除息日才有复权因子记录。

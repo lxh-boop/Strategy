@@ -62,6 +62,8 @@ function triggerInput(overrides: Partial<NormalizedStrategyInput> = {}): Normali
     rebalanceIntervalDays: 0,
     positionDeviatePct: 10,
     executionTiming: 0,
+    keepFullyInvested: false,
+    limitUpDownSkip: false,
     maxPositions: 1,
     idealPositionPct: 50,
     minPositionPct: 1,

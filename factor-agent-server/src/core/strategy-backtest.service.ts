@@ -162,6 +162,12 @@ export interface StrategyBacktestInput {
   timingOverlay?: unknown;
   /** 策略类型标记（透传卡片/策略库；缺省 equal_weight = 等权特例形态） */
   strategyType?: unknown;
+  /** 仓位维持（ADR-0008）：每交易日收盘后将总仓位维持在全额暴露（无择时叠加时=保持满仓，
+   *  卖出规则的现金当日回补剩余持仓）。缺省 false = 掘金对齐语义（卖出现金保留至下一调仓日） */
+  keepFullyInvested?: unknown;
+  /** 涨跌停顺延（ADR-0008）：执行价触及涨跌停不成交（买入涨停价不追、卖出跌停价顺延）。
+   *  缺省 false = 掘金对齐语义（涨跌停价照常成交）。真实度增强项 */
+  limitUpDownSkip?: unknown;
 }
 
 /** 引擎侧池引用（ADR-0006）：编排层解析 poolId 后填充；summary/memberCount 随参走供卡片直读 */
@@ -218,6 +224,11 @@ export interface NormalizedStrategyInput {
   benchmark: BenchmarkKey;
   /** 大盘择时叠加（未传 = 不择时，全程满仓） */
   timingOverlay?: StrategyTimingOverlay;
+  /** 仓位维持（ADR-0008，缺省 false = 掘金对齐语义）：每交易日收盘后将总仓位维持在全额暴露。
+   *  仅在无择时叠加时生效；有择时叠加时择时块无条件运行（择时的仓位执行器） */
+  keepFullyInvested: boolean;
+  /** 涨跌停顺延（ADR-0008，缺省 false = 掘金对齐语义）：执行价触及涨跌停不成交 */
+  limitUpDownSkip: boolean;
   strategyType: string;
 }
 
@@ -494,6 +505,8 @@ export function assertStrategyInput(raw: StrategyBacktestInput): NormalizedStrat
     excludeRanges: assertExcludeRanges(raw.excludeRanges, startDate, endDate),
     benchmark: assertBenchmark(raw.benchmark),
     timingOverlay: assertTimingOverlay(raw.timingOverlay),
+    keepFullyInvested: raw.keepFullyInvested === true,
+    limitUpDownSkip: raw.limitUpDownSkip === true,
     strategyType: raw.strategyType === undefined || raw.strategyType === null || raw.strategyType === ''
       ? 'equal_weight'
       : String(raw.strategyType).trim(),

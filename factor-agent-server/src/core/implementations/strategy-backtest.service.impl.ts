@@ -643,7 +643,7 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
           const price = execPriceOf(code, day);
           const q = quoteOf(code, day);
           if (price === undefined || !q) continue; // 停牌：持仓顺延
-          if (price <= q.preClose * LIMIT_DOWN_RATIO) continue; // 跌停顺延
+          if (p.limitUpDownSkip && price <= q.preClose * LIMIT_DOWN_RATIO) continue; // 跌停顺延（ADR-0008 涨跌停顺延开启时）
           account.sellAll(pos, price, day, reason);
         }
         pendingSells = new Map();
@@ -651,24 +651,29 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
         // a′. 择时缩放块：目标总仓位（昨收状态）与当前持仓市值的偏差超 positionDeviatePct%（缺省 1）时拉回——
         // 独立于调仓日（候选为空也执行）；减仓按市值占比分摊、只卖未 T+1 锁定仓，停牌/涨跌停顺延。
         // 不查不卖条件（ADR-0003：择时是组合级仓位管理，不受单票保护）
-        account.rebalanceToTotal(
-          exposureByDay[i] ?? 100,
-          p.positionDeviatePct ?? 1,
-          day,
-          i,
-          { trim: '择时减仓', add: '择时加仓' },
-          {
-            priceOf: (code) => execPriceOf(code, day),
-            canSell: (code, price) => {
-              const q = quoteOf(code, day);
-              return !!q && price > q.preClose * LIMIT_DOWN_RATIO;
+        // 择时缩放块（ADR-0008）：有择时叠加时为择时的仓位执行器（exposure 变化靠它落地，无条件运行）；
+        // 无择时叠加时为"保持满仓"维持器——仅 keepFullyInvested=true 时运行（缺省 false = 掘金对齐语义，
+        // 卖出规则的现金保留至下一调仓日）
+        if (p.keepFullyInvested || p.timingOverlay) {
+          account.rebalanceToTotal(
+            exposureByDay[i] ?? 100,
+            p.positionDeviatePct ?? 1,
+            day,
+            i,
+            { trim: '择时减仓', add: '择时加仓' },
+            {
+              priceOf: (code) => execPriceOf(code, day),
+              canSell: (code, price) => {
+                const q = quoteOf(code, day);
+                return !!q && (!p.limitUpDownSkip || price > q.preClose * LIMIT_DOWN_RATIO);
+              },
+              canBuy: (code, price) => {
+                const q = quoteOf(code, day);
+                return !!q && (!p.limitUpDownSkip || price < q.preClose * LIMIT_UP_RATIO);
+              },
             },
-            canBuy: (code, price) => {
-              const q = quoteOf(code, day);
-              return !!q && price < q.preClose * LIMIT_UP_RATIO;
-            },
-          },
-        );
+          );
+        }
 
         // b. 调仓指令：先卖非目标/强制卖出，再按综合分序买入候选，最后已持有的调回目标仓位
         if (pendingRebalance) {
@@ -732,7 +737,7 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
               const price = execPriceOf(code, day);
               const q = quoteOf(code, day);
               if (price === undefined || !q) continue; // 停牌跳过
-              if (price >= q.preClose * LIMIT_UP_RATIO) continue; // 涨停跳过
+              if (p.limitUpDownSkip && price >= q.preClose * LIMIT_UP_RATIO) continue; // 涨停跳过（ADR-0008 涨跌停顺延开启时）
               const tv = tvOf(code, false);
               if (tv <= 0) continue; // 仓位函数给了 0 金额 = 本期不买（如 MA 下方）
               let shares = Math.floor(tv / (price * (1 + p.feeRate)) / LOT_SIZE) * LOT_SIZE;
@@ -1035,6 +1040,12 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
               },
             ]
           : []),
+        ...(p.keepFullyInvested
+          ? [{ label: '仓位维持', value: '保持满仓', hint: '每交易日收盘后将总仓位维持在全额暴露：卖出现金当日回补剩余持仓（缺省关闭=掘金对齐语义）' }]
+          : []),
+        ...(p.limitUpDownSkip
+          ? [{ label: '涨跌停顺延', value: '开启', hint: '买入价触及涨停不追、卖出价触及跌停顺延（真实市场约束；缺省关闭=掘金对齐语义）' }]
+          : []),
         {
           label: '初始资金/费用',
           value: `${(p.initialCapital / 10000).toFixed(0)} 万 · 单边 ${feePct}%`,
@@ -1067,6 +1078,8 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
         benchmark: p.benchmark,
         ...(timing ? { timingOverlay: timing } : {}),
         ...(p.pool ? { pool: p.pool } : {}),
+        ...(p.keepFullyInvested ? { keepFullyInvested: true } : {}),
+        ...(p.limitUpDownSkip ? { limitUpDownSkip: true } : {}),
       },
       // 逐点交易日（YYYYMMDD）：前端 x 轴按真实日期打刻度
       dates: tradeDates,

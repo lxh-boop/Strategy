@@ -108,6 +108,19 @@ export const RUN_STRATEGY_BACKTEST_SPEC = {
             '池成员按每个调仓日的时点归属解析（期内调样自动跟随），再与 securityIds 取交集；' +
             '句柄只在本会话内有效；触发模式（rebalanceIntervalDays=0）不支持',
         },
+        keepFullyInvested: {
+          type: 'boolean',
+          description:
+            '仓位维持（可选，默认 false=掘金对齐语义）：true 时每个交易日收盘后将总仓位维持在全额暴露' +
+            '（无择时叠加时=保持满仓，卖出规则的现金当日回补剩余持仓）；false 时卖出现金保留至下一调仓日。' +
+            '用户要求"始终保持满仓/卖出现金立即买回"时传 true',
+        },
+        limitUpDownSkip: {
+          type: 'boolean',
+          description:
+            '涨跌停顺延（可选，默认 false=掘金对齐语义）：true 时执行价触及涨停不买入、触及跌停不卖出（顺延至下一交易日），' +
+            '更接近真实市场约束；false 时涨跌停价照常成交。跨平台回测对照时两边都保持默认即可',
+        },
         startDate: {
           type: 'string',
           description: '回测开始日，纯数字 YYYYMMDD。用户说过的时间照传，相对时间按系统提示的今天日期换算；执行前会经用户确认，可被当场修改',
