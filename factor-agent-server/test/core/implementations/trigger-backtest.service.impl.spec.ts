@@ -58,6 +58,7 @@ function triggerInput(overrides: Partial<NormalizedStrategyInput> = {}): Normali
     startDate: '20240101',
     endDate: '20240108',
     initialCapital: 100_000,
+    slippageRate: 0,
     feeRate: 0,
     rebalanceIntervalDays: 0,
     positionDeviatePct: 10,

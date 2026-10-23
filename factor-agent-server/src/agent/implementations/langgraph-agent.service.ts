@@ -817,6 +817,9 @@ export class LangGraphAgentService extends AgentService {
             ...(p.limitUpDownSkip
               ? { 涨跌停判定: '开启（官方分档价：涨停不追/跌停不卖，触及不成交）' }
               : { 涨跌停判定: '关闭（对照模式：涨跌停价照常成交）' }),
+            ...(p.slippageRate > 0
+              ? { 滑点: `单边 ${(p.slippageRate * 100).toFixed(2)}%（成交价向不利方向滑，不越过涨跌停价）` }
+              : {}),
             ...(p.excludeRanges.length ? { 排除时间段: describeExcludeRanges(p.excludeRanges) } : {}),
             ...(p.timingOverlay ? { 择时规则: describeTimingOverlay(p.timingOverlay) } : {}),
             ...(p.rebalanceIntervalDays === 0

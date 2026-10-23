@@ -48,6 +48,9 @@ export interface AccountConfig {
   /** 官方涨跌停价解析（前复权口径）：返回 undefined = 该票当日无行情行（停牌/缺行，不判、计数）。
    *  开关开启时由引擎注入；缺省未注入 = 全部按缺行降级 */
   limitPricesOf?: (code: string, day: number) => Pick<Quote, 'limitUp' | 'limitDown'> | undefined;
+  /** 单边滑点比例（缺省 0）：买入成交价=执行价×(1+s)、卖出=执行价×(1−s)，
+   *  官方涨跌停价已知时钳住（成交价不越过涨停/跌停价）。估值不受影响（仍按未滑点收盘价） */
+  slippageRate?: number;
 }
 
 /** 价格解析回调：返回 undefined = 该标的当日不可交易（停牌/无行情） */
@@ -151,23 +154,38 @@ export class Account {
     return t;
   }
 
-  /** 买入记账：涨跌停闸 → 扣费入账、加权成本、T+1 锁定按最近买入日、成交明细一行 */
+  /** 滑点成交价：买入 = min(执行价×(1+s), 涨停价)、卖出 = max(执行价×(1−s), 跌停价)——
+   *  向不利方向滑，但成交不越过官方涨跌停价（官方价未知时不钳）。s=0 恒等于执行价 */
+  private slipPrice(code: string, day: number, price: number, side: 'buy' | 'sell'): number {
+    const s = this.config.slippageRate ?? 0;
+    if (!(s > 0)) return price;
+    const lp = this.config.limitPricesOf?.(code, day);
+    if (side === 'buy') {
+      const fill = price * (1 + s);
+      return lp && lp.limitUp !== null && lp.limitUp > 0 ? Math.min(fill, lp.limitUp) : fill;
+    }
+    const fill = price * (1 - s);
+    return lp && lp.limitDown !== null && lp.limitDown > 0 ? Math.max(fill, lp.limitDown) : fill;
+  }
+
+  /** 买入记账：涨跌停闸 → 滑点成交价 → 扣费入账、加权成本、T+1 锁定按最近买入日、成交明细一行 */
   buy(code: string, shares: number, price: number, day: number, dayIdx: number, reason: string): void {
     if (!this.passLimitGate(code, day, price, 'buy')) return;
-    const amount = shares * price;
+    const fill = this.slipPrice(code, day, price, 'buy');
+    const amount = shares * fill;
     const fee = amount * this.config.feeRate;
     this.cashValue -= amount + fee;
     this.dayTurnover += amount;
     const pos = this.book.get(code);
     if (pos) {
-      pos.entryPrice = (pos.entryPrice * pos.shares + price * shares) / (pos.shares + shares);
+      pos.entryPrice = (pos.entryPrice * pos.shares + fill * shares) / (pos.shares + shares);
       pos.shares += shares;
       pos.buyDayIdx = dayIdx;
-      pos.peakClose = Math.max(pos.peakClose, price);
+      pos.peakClose = Math.max(pos.peakClose, fill);
     } else {
-      this.book.set(code, { code, shares, entryPrice: price, buyDayIdx: dayIdx, peakClose: price });
+      this.book.set(code, { code, shares, entryPrice: fill, buyDayIdx: dayIdx, peakClose: fill });
     }
-    this.tradeLog.push({ date: day, code, direction: 'buy', price, shares, amount, fee, reason });
+    this.tradeLog.push({ date: day, code, direction: 'buy', price: fill, shares, amount, fee, reason });
     const limit = this.config.tradeLimit;
     if (limit && this.tradeLog.length > limit.max) {
       throw new ApiException('INVALID_ARGUMENT', 400, limit.message);
@@ -176,13 +194,14 @@ export class Account {
 
   sell(pos: Position, shares: number, price: number, day: number, reason: string): void {
     if (!this.passLimitGate(pos.code, day, price, 'sell')) return;
-    const amount = shares * price;
+    const fill = this.slipPrice(pos.code, day, price, 'sell');
+    const amount = shares * fill;
     const fee = amount * this.config.feeRate;
     this.cashValue += amount - fee;
     this.dayTurnover += amount;
     pos.shares -= shares;
     if (pos.shares <= 0) this.book.delete(pos.code);
-    this.tradeLog.push({ date: day, code: pos.code, direction: 'sell', price, shares, amount, fee, reason });
+    this.tradeLog.push({ date: day, code: pos.code, direction: 'sell', price: fill, shares, amount, fee, reason });
   }
 
   sellAll(pos: Position, price: number, day: number, reason: string): void {

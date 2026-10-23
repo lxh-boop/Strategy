@@ -605,6 +605,7 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
 
     const account = new Account(p.initialCapital, {
       feeRate: p.feeRate,
+      slippageRate: p.slippageRate,
       limitUpDownSkip: p.limitUpDownSkip,
       limitPricesOf: (code, day) => quotes.get(code)?.get(day),
     });
@@ -1066,8 +1067,10 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
         },
         {
           label: '初始资金/费用',
-          value: `${(p.initialCapital / 10000).toFixed(0)} 万 · 单边 ${feePct}%`,
-          hint: `整手（100 股）买卖；已计交易费用 ${totalFee.toFixed(0)} 元；空闲资金留存现金`,
+          value: `${(p.initialCapital / 10000).toFixed(0)} 万 · 单边 ${feePct}%${p.slippageRate > 0 ? ` · 滑点 ${(p.slippageRate * 100).toFixed(2)}%` : ''}`,
+          hint: p.slippageRate > 0
+            ? `整手（100 股）买卖；成交价含单边滑点 ${(p.slippageRate * 100).toFixed(2)}%（向不利方向，不越过涨跌停价）；已计交易费用 ${totalFee.toFixed(0)} 元；空闲资金留存现金`
+            : `整手（100 股）买卖；已计交易费用 ${totalFee.toFixed(0)} 元；空闲资金留存现金`,
         },
         {
           label: '业绩基准',
@@ -1098,6 +1101,7 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
         ...(p.pool ? { pool: p.pool } : {}),
         ...(p.keepFullyInvested ? { keepFullyInvested: true } : {}),
         ...(p.limitUpDownSkip ? {} : { limitUpDownSkip: false }),
+        ...(p.slippageRate > 0 ? { slippageRate: p.slippageRate } : {}),
       },
       // 逐点交易日（YYYYMMDD）：前端 x 轴按真实日期打刻度
       dates: tradeDates,
@@ -1155,6 +1159,7 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
       ...(p.keepRules.length ? { 不卖条件: describeKeepRules(p.keepRules) } : {}),
       ...(p.excludeRanges.length ? { 排除时间段: describeExcludeRanges(p.excludeRanges) } : {}),
       成交时点: p.executionTiming === 2 ? '当日收盘（尾盘单）' : p.executionTiming === 1 ? '收盘价' : '开盘价',
+      ...(p.slippageRate > 0 ? { 滑点: `单边 ${(p.slippageRate * 100).toFixed(2)}%（成交价向不利方向滑，不越过涨跌停价）` } : {}),
       涨跌停判定: p.limitUpDownSkip
         ? `开启（官方分档价，触及不成交${loop.limitNoData ? `；缺行降级 ${loop.limitNoData} 笔` : ''}）`
         : '关闭（对照模式，涨跌停价照常成交）',

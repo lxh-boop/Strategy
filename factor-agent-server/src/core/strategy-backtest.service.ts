@@ -126,6 +126,9 @@ export interface StrategyBacktestInput {
   initialCapital?: unknown;
   /** 单边费率（小数），默认 0.0003（万三），买卖双边计提 */
   feeRate?: unknown;
+  /** 单边滑点比例（小数），默认 0：买入成交价=执行价×(1+s)、卖出=执行价×(1−s)，
+   *  官方涨跌停价已知时钳住（成交价不越过涨停/跌停价） */
+  slippageRate?: unknown;
   /** 每 N 个交易日调仓（必填，无默认值，缺失触发向用户澄清） */
   rebalanceIntervalDays?: unknown;
   /** 触发模式（rebalanceIntervalDays=0）必填：仓位偏离带宽 %（5~50 整数） */
@@ -231,6 +234,8 @@ export interface NormalizedStrategyInput {
   /** 涨跌停总开关（ADR-0009，缺省 true=开启）：执行价触及官方涨停价不买、触及跌停价不卖；
    *  false=掘金对照模式（涨跌停价照常成交），跨平台对照时显式传 false */
   limitUpDownSkip: boolean;
+  /** 单边滑点比例（缺省 0）：成交价向不利方向滑 s，官方涨跌停价已知时钳住 */
+  slippageRate: number;
   strategyType: string;
 }
 
@@ -405,6 +410,13 @@ export function assertStrategyInput(raw: StrategyBacktestInput): NormalizedStrat
     throw new ApiException('INVALID_ARGUMENT', 400, `feeRate 须为 0~0.05 的小数（单边费率，如 0.0003 = 万三）: ${raw.feeRate}`);
   }
 
+  const slippageRate = raw.slippageRate === undefined || raw.slippageRate === null || raw.slippageRate === ''
+    ? 0
+    : Number(raw.slippageRate);
+  if (!Number.isFinite(slippageRate) || slippageRate < 0 || slippageRate > 0.05) {
+    throw new ApiException('INVALID_ARGUMENT', 400, `slippageRate 须为 0~0.05 的小数（单边滑点比例，如 0.001 = 10bp），缺省 0 = 按执行价精确成交: ${raw.slippageRate}`);
+  }
+
   // 调仓间隔：必填，无默认值；缺失抛澄清信号（由模型向用户追问），非法数值才是入参错误
   if (raw.rebalanceIntervalDays === undefined || raw.rebalanceIntervalDays === null || String(raw.rebalanceIntervalDays).trim() === '') {
     throw new ClarificationSignal({
@@ -505,6 +517,7 @@ export function assertStrategyInput(raw: StrategyBacktestInput): NormalizedStrat
     timingOverlay: assertTimingOverlay(raw.timingOverlay),
     keepFullyInvested: raw.keepFullyInvested === true,
     limitUpDownSkip: raw.limitUpDownSkip !== false,
+    slippageRate,
     strategyType: raw.strategyType === undefined || raw.strategyType === null || raw.strategyType === ''
       ? 'equal_weight'
       : String(raw.strategyType).trim(),

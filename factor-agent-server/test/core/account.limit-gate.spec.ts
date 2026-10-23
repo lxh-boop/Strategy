@@ -119,3 +119,43 @@ describe('Account.rebalanceToTotal 涨跌停闸内建（b1 清出/补仓同源�
     expect(acc.trades().some((t) => t.reason === '择时减仓')).toBe(true);
   });
 });
+
+/* ----- 滑点成交价（slippageRate，2026-10-23）：不利方向滑、官方涨跌停价钳住、缺省 0 精确成交 ----- */
+
+describe('Account 滑点成交价', () => {
+  const limits = () => ({ limitUp: 10.05, limitDown: 9.95 });
+
+  it('缺省 0：按执行价精确成交', () => {
+    const acc = new Account(100_000, { feeRate: 0 });
+    acc.buy('A', 1000, 10, 20240102, 0, '调仓建仓');
+    expect(acc.trades()[0].price).toBe(10);
+  });
+
+  it('买入上滑、卖出下滑（官方价未知时不钳）', () => {
+    const acc = new Account(100_000, { feeRate: 0, slippageRate: 0.001 });
+    acc.buy('A', 1000, 10, 20240102, 0, '调仓建仓');
+    expect(acc.trades()[0].price).toBeCloseTo(10.01, 10);
+    acc.sell(acc.positionOf('A')!, 1000, 10, 20240102, '调仓卖出');
+    expect(acc.trades()[1].price).toBeCloseTo(9.99, 10);
+  });
+
+  it('滑点不越过官方涨跌停价：买入钳在涨停价、卖出钳在跌停价', () => {
+    const acc = new Account(100_000, { feeRate: 0, slippageRate: 0.01, limitPricesOf: limits });
+    acc.buy('A', 1000, 10, 20240103, 1, '调仓建仓'); // 10×1.01=10.1 > 涨停 10.05 → 钳 10.05
+    expect(acc.trades()[0].price).toBeCloseTo(10.05, 10);
+    acc.sell(acc.positionOf('A')!, 1000, 10, 20240103, '调仓卖出'); // 10×0.99=9.9 < 跌停 9.95 → 钳 9.95
+    expect(acc.trades()[1].price).toBeCloseTo(9.95, 10);
+  });
+
+  it('闸基于原始执行价判定：触及涨停仍拒买（滑点不改变闸语义）', () => {
+    const acc = new Account(100_000, { feeRate: 0, slippageRate: 0.001, limitPricesOf: limits });
+    acc.buy('A', 1000, 10.05, 20240103, 1, '调仓建仓'); // 原始价触及涨停 → 拒
+    expect(acc.trades()).toHaveLength(0);
+  });
+
+  it('费用按滑点后成交额计提', () => {
+    const acc = new Account(100_000, { feeRate: 0.0003, slippageRate: 0.001 });
+    acc.buy('A', 1000, 10, 20240102, 0, '调仓建仓');
+    expect(acc.trades()[0].fee).toBeCloseTo(10.01 * 1000 * 0.0003, 10);
+  });
+});

@@ -719,3 +719,58 @@ describe('StrategyBacktestServiceImpl 涨跌停判定开关', () => {
     expect(out.summary.涨跌停判定).toContain('关闭');
   });
 });
+
+/* ----- 滑点参数（slippageRate，2026-10-23）：成交价接线/回显/摘要/校验 ----- */
+
+describe('StrategyBacktestServiceImpl 滑点参数', () => {
+  const momentum = { 20240102: { '000001.XSHE': 10, '000002.XSHE': 20 } };
+
+  it('slippageRate>0：买入成交价=执行价×(1+s)，config 回显、摘要含滑点', async () => {
+    const service = makeService({ momentum, quotes: defaultQuotes() });
+    const out = await service.runStrategyBacktest({
+      securityIds: [CODE_A, CODE_B],
+      startDate: '20240101',
+      endDate: '20240108',
+      initialCapital: 100_000,
+      feeRate: 0,
+      rebalanceIntervalDays: 2,
+      maxPositions: 1,
+      slippageRate: 0.001,
+    });
+    const buy = (out.card.trades ?? []).find((t) => t.direction === 'buy');
+    // 0102 收盘信号（B 综合分最高）→ 0103 开盘价 20 成交，滑点后 20×1.001
+    expect(buy!.price).toBeCloseTo(20 * 1.001, 10);
+    expect((out.card.config as { slippageRate?: number } | undefined)?.slippageRate).toBe(0.001);
+    expect(String(out.summary.滑点)).toContain('0.10%');
+  });
+
+  it('缺省 0：成交价精确', async () => {
+    const service = makeService({ momentum, quotes: defaultQuotes() });
+    const out = await service.runStrategyBacktest({
+      securityIds: [CODE_A, CODE_B],
+      startDate: '20240101',
+      endDate: '20240108',
+      initialCapital: 100_000,
+      feeRate: 0,
+      rebalanceIntervalDays: 2,
+      maxPositions: 1,
+    });
+    const buy = (out.card.trades ?? []).find((t) => t.direction === 'buy');
+    expect(buy!.price).toBe(20);
+    expect((out.card.config as { slippageRate?: number } | undefined)?.slippageRate).toBeUndefined();
+    expect(out.summary.滑点).toBeUndefined();
+  });
+
+  it('非法滑点：负数/超上限 → 400', async () => {
+    const service = makeService({ momentum, quotes: defaultQuotes() });
+    for (const bad of [-0.001, 0.06]) {
+      await expect(
+        service.runStrategyBacktest({
+          securityIds: [CODE_A], startDate: '20240101', endDate: '20240108',
+          initialCapital: 100_000, feeRate: 0, rebalanceIntervalDays: 2, maxPositions: 1,
+          slippageRate: bad,
+        }),
+      ).rejects.toThrow(/slippageRate/);
+    }
+  });
+});

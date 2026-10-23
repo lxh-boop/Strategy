@@ -244,6 +244,7 @@ export class TriggerBacktestServiceImpl extends TriggerBacktestService {
 
     const account = new Account(p.initialCapital, {
       feeRate: p.feeRate,
+      slippageRate: p.slippageRate,
       limitUpDownSkip: p.limitUpDownSkip,
       limitPricesOf: (code, day) => quotesByCode.get(code)?.get(day),
       tradeLimit: {
@@ -446,7 +447,7 @@ export class TriggerBacktestServiceImpl extends TriggerBacktestService {
       tag: `条件触发·偏离带 ${p.positionDeviatePct}%`,
       note:
         `模型 Ⅱ 触发引擎：entryFilters 逐日评估，满足即次日买入（${p.executionTiming === 0 ? '开盘价' : '收盘价'}成交）；` +
-        `持仓市值偏离目标总仓位 ±${p.positionDeviatePct}% 触发再平衡 ｜ 区间 ${p.startDate}~${p.endDate} ｜ 单边费率 ${feePct}%`,
+        `持仓市值偏离目标总仓位 ±${p.positionDeviatePct}% 触发再平衡 ｜ 区间 ${p.startDate}~${p.endDate} ｜ 单边费率 ${feePct}%${p.slippageRate > 0 ? ` · 滑点 ${(p.slippageRate * 100).toFixed(2)}%` : ''}`,
       curve: agg.curve,
       benchCurve: agg.benchCurve,
       benchName: bench.name,
@@ -476,7 +477,7 @@ export class TriggerBacktestServiceImpl extends TriggerBacktestService {
               },
             ]
           : []),
-        { label: '初始资金/费用', value: `${(p.initialCapital / 10000).toFixed(0)} 万 · 单边 ${feePct}%`, hint: `已计交易费用 ${totalFee.toFixed(0)} 元` },
+        { label: '初始资金/费用', value: `${(p.initialCapital / 10000).toFixed(0)} 万 · 单边 ${feePct}%${p.slippageRate > 0 ? ` · 滑点 ${(p.slippageRate * 100).toFixed(2)}%` : ''}`, hint: `已计交易费用 ${totalFee.toFixed(0)} 元` },
         { label: '业绩基准', value: bench.name },
       ],
       config: {
@@ -486,6 +487,7 @@ export class TriggerBacktestServiceImpl extends TriggerBacktestService {
         endDate: p.endDate,
         initialCapital: p.initialCapital,
         feeRate: p.feeRate,
+        ...(p.slippageRate > 0 ? { slippageRate: p.slippageRate } : {}),
         rebalanceIntervalDays: p.rebalanceIntervalDays,
         positionDeviatePct: p.positionDeviatePct,
         executionTiming: p.executionTiming,

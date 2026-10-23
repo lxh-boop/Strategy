@@ -149,6 +149,12 @@ export const RUN_STRATEGY_BACKTEST_SPEC = {
           type: 'number',
           description: '单边交易费率（小数，0.0003 = 万三，买卖双边各计提一次）。默认 0.0003；用户明确说不计费用时传 0',
         },
+        slippageRate: {
+          type: 'number',
+          description:
+            '单边滑点比例（小数，0.001 = 10bp，缺省 0 = 按执行价精确成交）：买入成交价向不利方向上滑、卖出下滑，但不越过涨跌停价。' +
+            '仅当用户明确要求"考虑滑点/更保守的回测/按实际成交估算"时才传（如用户说"加 10 个点滑点"传 0.001）；用户未提时禁止传本参数',
+        },
         executionTiming: {
           type: 'integer',
           enum: [0, 1, 2],

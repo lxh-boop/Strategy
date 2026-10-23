@@ -134,6 +134,8 @@ export interface StrategyRunConfig {
    *  档位为交易所官方价（自动涵盖主板±10%/ST±5%/创业板·科创板±20%/北交所±30%）。
    *  缺省 true=开启；false=掘金对照模式（涨跌停价照常成交） */
   limitUpDownSkip?: boolean;
+  /** 单边滑点比例（小数，缺省 0）：成交价向不利方向滑 s，不越过涨跌停价 */
+  slippageRate?: number;
 }
 
 /** 函数引用：统一函数字典条目的名称 + 策略旋钮参数（序列化形态，可持久化） */
