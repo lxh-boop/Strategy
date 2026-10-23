@@ -193,6 +193,7 @@ export class MysqlFactorDataService extends FactorDataService {
     }
     const staticTable = this.isStaticTable(table);
     const all: CrossSectionRow[] = [];
+    const keyCol = this.keyShape(table) === 'ticker' ? 'TICKER_SYMBOL' : 'SECURITY_ID';
     for (const chunk of this.chunkCodes(codes)) {
       const params: (string | number)[] = [];
       const conds: string[] = [`\`${field}\` IS NOT NULL`];
@@ -201,13 +202,15 @@ export class MysqlFactorDataService extends FactorDataService {
         params.push(this.tradeDateIsDateType(table) ? toDashDate(String(date)) : Number(date));
       }
       if (chunk) {
-        conds.push(`SECURITY_ID IN (${chunk.map(() => '?').join(', ')})`);
-        params.push(...chunk);
+        const keys = keyCol === 'TICKER_SYMBOL' ? chunk.map((c) => c.split('.')[0]) : chunk;
+        conds.push(`${keyCol} IN (${keys.map(() => '?').join(', ')})`);
+        params.push(...keys);
       }
-      const sql = `SELECT SECURITY_ID, \`${field}\` AS v FROM \`${table}\` WHERE ${conds.join(' AND ')}`;
+      const sql = `SELECT ${keyCol} AS sec, \`${field}\` AS v FROM \`${table}\` WHERE ${conds.join(' AND ')}`;
       const rows = await this.query(sql, params);
       for (const row of rows as Record<string, unknown>[]) {
-        all.push({ securityId: String(row.SECURITY_ID), value: toNum(row.v) });
+        const securityId = keyCol === 'TICKER_SYMBOL' ? this.tickerToFullCode(String(row.sec)) : String(row.sec);
+        all.push({ securityId, value: toNum(row.v) });
       }
     }
     return all;
@@ -219,6 +222,8 @@ export class MysqlFactorDataService extends FactorDataService {
     this.assertRange(start, end);
     const staticTable = this.isStaticTable(table);
     const all: FactorRangeRow[] = [];
+    const keyCol = this.keyShape(table) === 'ticker' ? 'TICKER_SYMBOL' : 'SECURITY_ID';
+    const secSelect = keyCol === 'TICKER_SYMBOL' ? 'TICKER_SYMBOL AS sec' : 'SECURITY_ID';
     for (const chunk of this.chunkCodes([...new Set(codes)])) {
       const conds: string[] = [`\`${field}\` IS NOT NULL`];
       const params: (string | number)[] = [];
@@ -230,14 +235,16 @@ export class MysqlFactorDataService extends FactorDataService {
         params.push(...(dateType ? [toDashDate(start), toDashDate(end)] : [start, end]));
       }
       if (chunk) {
-        conds.push(`SECURITY_ID IN (${chunk.map(() => '?').join(', ')})`);
-        params.push(...chunk);
+        const keys = keyCol === 'TICKER_SYMBOL' ? chunk.map((c) => c.split('.')[0]) : chunk;
+        conds.push(`${keyCol} IN (${keys.map(() => '?').join(', ')})`);
+        params.push(...keys);
       }
-      const sql = `SELECT SECURITY_ID${staticTable ? '' : ', TRADE_DATE'}, \`${field}\` AS v FROM \`${table}\` WHERE ${conds.join(' AND ')}`;
+      const sql = `SELECT ${secSelect}${staticTable ? '' : ', TRADE_DATE'}, \`${field}\` AS v FROM \`${table}\` WHERE ${conds.join(' AND ')}`;
       const rows = await this.query(sql, params);
       for (const row of rows as Record<string, unknown>[]) {
+        const securityId = keyCol === 'TICKER_SYMBOL' ? this.tickerToFullCode(String(row.sec)) : String(row.SECURITY_ID);
         all.push({
-          securityId: String(row.SECURITY_ID),
+          securityId,
           tradeDate: row.TRADE_DATE === undefined ? '' : String(row.TRADE_DATE),
           value: toNum(row.v),
         });
@@ -365,6 +372,22 @@ export class MysqlFactorDataService extends FactorDataService {
    *  （2026-10-23 run_daily_screen "自 NaN 起" 事故根因） */
   private tradeDateIsDateType(table: string): boolean {
     return /^date/.test(loadTableFieldDetails(table)?.find((d) => d.name === 'TRADE_DATE')?.type ?? '');
+  }
+
+  /** 键列形态：字典有 SECURITY_ID 列 → 按其过滤与返回（既有因子表，全码键）；
+   *  否则退化 TICKER_SYMBOL（精品因子库等，裸 6 位键），返回时按前缀还原完整代码 */
+  private keyShape(table: string): 'security_id' | 'ticker' {
+    const details = loadTableFieldDetails(table);
+    if (details?.some((d) => d.name === 'SECURITY_ID')) return 'security_id';
+    if (details?.some((d) => d.name === 'TICKER_SYMBOL')) return 'ticker';
+    return 'security_id';
+  }
+
+  /** 裸 6 位代码 → 完整代码：前缀还原交易所（60/68/9 沪、0/3 深、4/8/92 北，无歧义） */
+  private tickerToFullCode(ticker: string): string {
+    const t = String(ticker);
+    const exchange = /^(92|4|8)/.test(t) ? 'XBEI' : /^(0|2|3)/.test(t) ? 'XSHE' : 'XSHG';
+    return `${t}.${exchange}`;
   }
 
   private isStaticTable(table: string): boolean {
