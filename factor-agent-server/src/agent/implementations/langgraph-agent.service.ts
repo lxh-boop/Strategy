@@ -61,6 +61,7 @@ const TOOL_STAGE: Record<string, string> = {
   run_daily_screen: '每日选股查询',
   screen_stock_pool: '股票池筛选',
   list_backtest_runs: '查询回测存档',
+  get_backtest_run: '调取历史回测',
   save_memory: '记忆维护',
 };
 
@@ -357,8 +358,8 @@ export class LangGraphAgentService extends AgentService {
           if (outcome.card) {
             card = outcome.card; // 回测失败时无卡片，保持上一次的值也无妨（默认展示卡取最后一次成功）
             // 回测卡完成即入册：会话级持久编号 card_N = 本会话第 N 次回测（ADR-0010），
-            // 未展示的对比组同样保存；分析类卡（相关性/排名分析）不占号、不参与【展示卡片】择优
-            if (outcome.card.type === 'backtest') {
+            // 未展示的对比组同样保存；分析类卡（相关性/排名分析）不占号、不参与择优展示
+            if (call.name === 'run_strategy_backtest' && outcome.card.type === 'backtest') {
               const username = (await this.userStore.findUserById(state.userId ?? -1))?.username ?? '';
               const seq = await this.userStore.saveBacktestRun({
                 conversationId: state.conversationId,
@@ -582,16 +583,8 @@ export class LangGraphAgentService extends AgentService {
     const last = state.messages[state.messages.length - 1] as AIMessage;
     const text = extractText(last).trim();
     if (!text) throw new LlmTextError('返回内容为空');
-    // 多次回测择优：模型用【展示卡片:card_N】指定展示哪一次（编号 = 会话级持久 seq，跨轮稳定，
-    // 注册表从 runs 表装配，ADR-0010）；未指定/编号无效 → 最后一次成功的
-    const registry = await this.buildCardRegistry(conversationId);
-    const picked = applyCardSelection(text, registry, state.card);
-    if (picked.markerId) {
-      this.logger.log(
-        `最终展示卡片: ${picked.markerId}${picked.card ? '' : '（编号无效，回落默认）'}，文案标记行已剔除`,
-      );
-    }
-    return picked.card ? { text: picked.text, card: picked.card } : { text: picked.text };
+    // 展示卡 = card 通道最后写入（本轮最新回测，或模型经 get_backtest_run 调取的历史卡）
+    return { text, card: state.card };
   }
 
   /** GLM 失败 → 回复仅含失败原因（与前端展示约定一致），并同步记入会话日志 */
@@ -623,6 +616,7 @@ export class LangGraphAgentService extends AgentService {
     run_rank_analysis: async (args) => this.execRunRankAnalysis(args as Record<string, unknown>),
     run_factor_correlation: async (args) => this.execRunFactorCorrelation(args as Record<string, unknown>),
     list_backtest_runs: async (_args, ctx) => this.execListBacktestRuns(ctx.conversationId),
+    get_backtest_run: async (args, ctx) => this.execGetBacktestRun(String((args as { card?: string }).card ?? ''), ctx.conversationId),
     // 每日选股/股票池筛选：只读零副作用，不进 CONFIRMABLE（免确认，即查即得）
     run_daily_screen: async (args, ctx) => this.execRunDailyScreen(args as DailyScreenInput, ctx),
     screen_stock_pool: async (args, ctx) => this.execScreenStockPool(args as { groups?: unknown }, ctx),
@@ -1079,10 +1073,36 @@ export class LangGraphAgentService extends AgentService {
         ...(runs.length
           ? {
               回测存档: runs.map((r) => ({ 卡片编号: `card_${r.seq}`, 日期: r.createdDate, 标题: r.title })),
-              解读: '用户要求回看/调出某次回测时，在回复最末尾单独一行写【展示卡片:card_N】指定展示（该行不会展示给用户）',
+              解读: '用户要求回看/调出某次回测时，调用 get_backtest_run（传对应卡片编号）把该次结果调出展示',
             }
           : { 提示: '本会话还没有回测存档' }),
       },
+    };
+  }
+
+  /** 调取历史回测（ADR-0010）：按卡片编号从 runs 表取卡——摘要给模型，完整卡走 card 通道直达前端。
+   *  编号形如 card_2（也接受纯数字 2）；无效编号返回提示文本（不抛，模型可向用户澄清） */
+  private async execGetBacktestRun(card: string, conversationId: string): Promise<ToolOutcome> {
+    const seq = Number(/(\d+)\s*$/.exec(card)?.[1] ?? NaN);
+    if (!Number.isInteger(seq) || seq <= 0) {
+      return { result: { 提示: `卡片编号无效：${card}（形如 card_2）` } };
+    }
+    const run = await this.userStore.getBacktestRunBySeq(conversationId, seq);
+    if (!run) {
+      return { result: { 提示: `本会话没有 ${`card_${seq}`} 的回测存档；可用 list_backtest_runs 查看有效编号` } };
+    }
+    const cardObj = run.card as { title?: string; metrics?: Array<{ label: string; value: string }>; monthly?: unknown; params?: Array<{ label: string; value: string }>; trades?: unknown[] };
+    return {
+      result: {
+        卡片编号: `card_${seq}`,
+        标题: cardObj.title ?? '',
+        指标: cardObj.metrics ?? [],
+        月度收益: cardObj.monthly ?? [],
+        回测参数: (cardObj.params ?? []).map(({ label, value }) => ({ label, value })),
+        交易笔数: Array.isArray(cardObj.trades) ? cardObj.trades.length : 0,
+        解读: '以上为该次回测的摘要；完整卡片（净值曲线/交易明细/每期持仓）已在对话中展示，请只引用以上数字下结论',
+      },
+      card: run.card as AgentCard,
     };
   }
 
@@ -1380,11 +1400,11 @@ export class LangGraphAgentService extends AgentService {
         '首次仍会请用户确认，用户回复"授权调优"后本轮内免确认（回执含"授权模式"注明）；' +
         '连续多组时保持用户已确认的关键参数不变（securityIds 股票池、区间、资金、基准），只按建议调整要对比的维度；' +
         '因子阈值必须落在字段真实值域内（拿不准时先用 read_factor_data 抽样看值域再定阈值），禁止拍脑袋填大数；' +
-        '结束时对比各次指标择优推荐，用【展示卡片:card_N】指定展示最优的一次；' +
+        '结束时对比各次指标，确定最优的一组后调用 get_backtest_run（传该组回执的卡片编号，如 card_4）把最优组调出展示；' +
         '给出优化建议后，结尾固定加一句：回复"授权调优"可按建议连续多组回测对比择优（前端会渲染授权按钮）；',
-      '- 每次回测的回执带「卡片编号」（card_N = 本会话第 N 次回测，编号跨轮稳定、永不重置）：按用户意图选最符合的一次（如优化场景选指标最优的），在回复最末尾单独一行写【展示卡片:card_N】指定展示哪次（该行不会展示给用户）；只回测了一次则不写；' +
-        'card_N 必须原样引用回执或 list_backtest_runs 查询结果里标注的编号，禁止按"第 N 组=card_N"自行推算；' +
-        '用户要求回看/列出/调出某次历史回测时，先调 list_backtest_runs 查清单再按编号引用；本轮新回测择优一律用本轮回执的编号；',
+      '- 每次回测的回执带「卡片编号」（card_N = 本会话第 N 次回测，编号跨轮稳定、永不重置）：card_N 必须原样引用回执或 list_backtest_runs 查询结果，禁止按"第 N 组=card_N"自行推算；' +
+        '用户要求回看/列出/调出某次历史回测时，先调 list_backtest_runs 查清单，再调 get_backtest_run（传卡片编号）把该次结果调出展示；' +
+        '本轮多组对比确定最优后，同样调 get_backtest_run 把最优组调出展示；',
       '- 查询无数据行时如实告知，不要编造；',
       '- 长期记忆维护（save_memory）：用户陈述值得跨会话记住的稳定偏好/研究结论（如"以后只用动量因子""我习惯万三手续费"）或明说"记住 XX"时，' +
         '用 op=add 落一条（slug 起小写英文短横线名、title 一句话、content 一到两句具体事实）；' +
@@ -1498,21 +1518,6 @@ export function formatTableCatalog(catalog: FactorTableInfo[]): string {
     return `- ${t.table}（${t.title}）：${t.description}${key}`;
   });
   return ['【数据表目录】（与 list_factor_tables 返回一致，无需再调用该工具）', ...lines].join('\n');
-}
-
-/** 多次回测择优：从最终文案解析【展示卡片:card_N】标记（兼容全角/半角冒号与空格）——
- *  命中注册表 → 用该卡并剔除标记行（不展示给用户）；编号无效 → 落回默认卡但同样剔除；
- *  未标记 → 原样返回默认卡（= 最后一次成功的回测）。标记行剔除失败不存在的情形不存在：
- *  正则命中才剔除。markerId 供日志观测（选了哪张/是否回落） */
-export function applyCardSelection(
-  text: string,
-  registry: Record<string, AgentCard>,
-  defaultCard?: AgentCard,
-): { text: string; card?: AgentCard; markerId?: string } {
-  const marker = /【\s*展示卡片\s*[:：]\s*(card_\d+)\s*】/.exec(text);
-  if (!marker) return { text, card: defaultCard };
-  const markerId = marker[1];
-  return { text: text.replace(marker[0], '').trim(), card: registry[markerId] ?? defaultCard, markerId };
 }
 
 /** AIMessage.content 兼容 string / 内容块数组；正文为空时兜底退回推理模型的思考内容 */

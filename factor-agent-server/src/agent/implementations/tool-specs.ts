@@ -553,7 +553,7 @@ export const SAVE_MEMORY_SPEC = {
 };
 
 /** 会话回测存档清单：编号/日期/标题索引（ADR-0010 F7）——模型据此跨轮回看，
- *  按编号写【展示卡片:card_N】指定展示；只给索引级摘要，完整卡片绕过 LLM（只信卡片） */
+ *  目标确认后用 get_backtest_run 调出展示；只给索引级摘要，完整卡片绕过 LLM（只信卡片） */
 const LIST_BACKTEST_RUNS_SPEC = {
   type: 'function' as const,
   function: {
@@ -561,8 +561,26 @@ const LIST_BACKTEST_RUNS_SPEC = {
     description:
       '查询本会话的历史回测存档清单（卡片编号/日期/标题）——' +
       '用户要求"列出做过的回测/回看某次回测/把上次的调出来"时使用；' +
-      '查到目标后，在回复最末尾单独一行写【展示卡片:card_N】指定展示（该行不会展示给用户）。用户没提历史回测时禁止调用',
+      '查到目标后调 get_backtest_run（传对应卡片编号）把该次结果调出展示。用户没提历史回测时禁止调用',
     parameters: { type: 'object', properties: {} },
+  },
+} as const;
+
+/** 调取历史回测：按卡片编号取存档，完整卡片直达前端（摘要给模型） */
+const GET_BACKTEST_RUN_SPEC = {
+  type: 'function' as const,
+  function: {
+    name: 'get_backtest_run',
+    description:
+      '调取本会话某次历史回测的完整结果（净值曲线/交易明细/每期持仓在对话中展示）——' +
+      '用户要求"回看/调出某次回测"时，先 list_backtest_runs 查清单再调本工具；多组对比场景把指标最优的一组调出展示',
+    parameters: {
+      type: 'object',
+      properties: {
+        card: { type: 'string', description: '卡片编号，原样照抄回执或清单里的值（如 card_2）' },
+      },
+      required: ['card'],
+    },
   },
 } as const;
 
@@ -576,6 +594,7 @@ export const AGENT_TOOL_SPECS = [
   RUN_DAILY_SCREEN_SPEC,
   SCREEN_STOCK_POOL_SPEC,
   LIST_BACKTEST_RUNS_SPEC,
+  GET_BACKTEST_RUN_SPEC,
   SAVE_MEMORY_SPEC,
 ] as const;
 
