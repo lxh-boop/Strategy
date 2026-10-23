@@ -81,3 +81,81 @@ describe('MysqlFactorDataService 白名单检验', () => {
     await expectApiError(() => makeService().readTable(baseQuery), 'DATA_SOURCE_ERROR', 'MySQL 未配置');
   });
 });
+
+/* ----- date 类型列适配（ADR-0010 配套，2026-10-23 NaN 修复）-----
+   精品因子库 equ_fancy_factors_table1~10 的 TRADE_DATE 是 date 类型（连接 dateStrings:true
+   返回 'YYYY-MM-DD'），与既有 BIGINT yyyymmdd 表口径不同——查询参数与返回值须按列类型分流 */
+
+describe('readTradeDates/readFactorSection/readFactorRange 的 date 类型列适配', () => {
+  const DATE_TYPE_TABLE = 'equ_fancy_factors_table2'; // 字典 md 里 TRADE_DATE 类型为 date（真实文件）
+  const BIGINT_TABLE = 'equ_factor_obos';
+
+  const makeSvcWithPool = (rowsByMarker: Array<{ match: RegExp; rows: Record<string, unknown>[] }>) => {
+    const captured: Array<{ sql: string; params: unknown[] }> = [];
+    const fakePool = {
+      query: async (sql: string, params: unknown[] = []) => {
+        captured.push({ sql, params });
+        for (const m of rowsByMarker) if (m.match.test(sql)) return [m.rows];
+        return [[]];
+      },
+      execute: async (sql: string, params: unknown[] = []) => {
+        captured.push({ sql, params });
+        for (const m of rowsByMarker) if (m.match.test(sql)) return [m.rows];
+        return [[]];
+      },
+    };
+    const svc = new MysqlFactorDataService({
+      getOrThrow: () => ({ host: '', port: 0, user: '', password: '', database: '', connectionLimit: 0 }),
+    } as never);
+    (svc as unknown as { pool: unknown }).pool = fakePool;
+    return { svc, captured };
+  };
+
+  it('date 类型表 readTradeDates：区间参数转 dash、返回值转 yyyymmdd 数字', async () => {
+    const { svc, captured } = makeSvcWithPool([
+      { match: /MIN\(TRADE_DATE\)/, rows: [{ mn: '2021-05-01', mx: '2026-09-19' }] },
+      { match: /DISTINCT TRADE_DATE/, rows: [{ d: '2021-05-01' }, { d: '2021-05-03' }] },
+    ]);
+    const cov = await svc.readTradeDates(DATE_TYPE_TABLE, '20250101', '20251231');
+    expect(cov.min).toBe(20210501);
+    expect(cov.max).toBe(20260919);
+    expect(cov.dates).toEqual([20210501, 20210503]);
+    const between = captured.find((c) => c.sql.includes('BETWEEN'));
+    expect(between!.params).toEqual(['2025-01-01', '2025-12-31']);
+  });
+
+  it('BIGINT 表 readTradeDates：裸数字口径不变', async () => {
+    const { svc, captured } = makeSvcWithPool([
+      { match: /MIN\(TRADE_DATE\)/, rows: [{ mn: 20210506, mx: 20260918 }] },
+      { match: /DISTINCT TRADE_DATE/, rows: [{ d: 20210506 }, { d: 20210508 }] },
+    ]);
+    const cov = await svc.readTradeDates(BIGINT_TABLE, '20250101', '20251231');
+    expect(cov.min).toBe(20210506);
+    expect(cov.max).toBe(20260918);
+    expect(cov.dates).toEqual([20210506, 20210508]);
+    const between = captured.find((c) => c.sql.includes('BETWEEN'));
+    expect(between!.params).toEqual([20250101, 20251231]);
+  });
+
+  it('date 类型表 readFactorSection：日期参数转 dash', async () => {
+    const { svc, captured } = makeSvcWithPool([
+      { match: /ROE_TTM/, rows: [{ SECURITY_ID: '000001.XSHE', v: '0.08' }] },
+    ]);
+    const rows = await svc.readFactorSection(DATE_TYPE_TABLE, 'ROE_TTM', '20250102', null);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].value).toBe(0.08);
+    const sectionCall = captured.find((c) => c.sql.includes('TRADE_DATE = ?'));
+    expect(sectionCall!.params[0]).toBe('2025-01-02');
+  });
+
+  it('date 类型表 readFactorRange：BETWEEN 参数转 dash、返回 tradeDate 保真', async () => {
+    const { svc, captured } = makeSvcWithPool([
+      { match: /TRADE_DATE BETWEEN/, rows: [{ SECURITY_ID: '000001.XSHE', TRADE_DATE: '2025-01-02', v: '0.1' }] },
+    ]);
+    const rows = await svc.readFactorRange(DATE_TYPE_TABLE, 'ROE_TTM', ['000001.XSHE'], '20250101', '20250131');
+    expect(rows).toHaveLength(1);
+    expect(rows[0].tradeDate).toBe('2025-01-02');
+    const rangeCall = captured.find((c) => c.sql.includes('BETWEEN'));
+    expect(rangeCall!.params.slice(0, 2)).toEqual(['2025-01-01', '2025-01-31']);
+  });
+});

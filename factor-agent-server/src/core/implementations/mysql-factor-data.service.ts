@@ -166,18 +166,23 @@ export class MysqlFactorDataService extends FactorDataService {
   async readTradeDates(table: string, start: string, end: string): Promise<TradeDateCoverage> {
     this.assertTable(table);
     this.assertRange(start, end);
+    // date 类型列（dateStrings 连接返回 'YYYY-MM-DD'）→ 统一转 yyyymmdd 数字；区间参数用 dash 字符串
+    const dateType = this.tradeDateIsDateType(table);
+    const from = dateType ? toDashDate(start) : Number(start);
+    const to = dateType ? toDashDate(end) : Number(end);
+    const toYyyymmdd = (v: unknown): number => Number(String(v).replaceAll('-', ''));
     const rangeRows = await this.query(`SELECT MIN(TRADE_DATE) AS mn, MAX(TRADE_DATE) AS mx FROM \`${table}\``, []);
-    const range = rangeRows[0] as { mn: number | null; mx: number | null };
+    const range = rangeRows[0] as { mn: string | number | null; mx: string | number | null };
     if (range.mn === null || range.mx === null) {
       throw new ApiException('DATA_SOURCE_ERROR', 502, `表 ${table} 无数据，无法确定可用区间`);
     }
     const rows = await this.query(
       `SELECT DISTINCT TRADE_DATE AS d FROM \`${table}\` WHERE TRADE_DATE BETWEEN ? AND ? ORDER BY TRADE_DATE`,
-      [Number(start), Number(end)],
+      [from, to],
     );
-    const dates = rows.map((r) => Number((r as { d: number }).d));
-    this.logger.log(`${table} 交易日 ${start}~${end}: ${dates.length} 天（全表 ${range.mn}~${range.mx}）`);
-    return { dates, min: Number(range.mn), max: Number(range.mx) };
+    const dates = rows.map((r) => toYyyymmdd((r as { d: string | number }).d));
+    this.logger.log(`${table} 交易日 ${start}~${end}: ${dates.length} 天（全表 ${toYyyymmdd(range.mn)}~${toYyyymmdd(range.mx)}）`);
+    return { dates, min: toYyyymmdd(range.mn), max: toYyyymmdd(range.mx) };
   }
 
   async readFactorSection(table: string, field: string, date: string, codes: string[] | null): Promise<CrossSectionRow[]> {
@@ -193,7 +198,7 @@ export class MysqlFactorDataService extends FactorDataService {
       const conds: string[] = [`\`${field}\` IS NOT NULL`];
       if (!staticTable) {
         conds.push('TRADE_DATE = ?');
-        params.push(Number(date));
+        params.push(this.tradeDateIsDateType(table) ? toDashDate(String(date)) : Number(date));
       }
       if (chunk) {
         conds.push(`SECURITY_ID IN (${chunk.map(() => '?').join(', ')})`);
@@ -218,11 +223,11 @@ export class MysqlFactorDataService extends FactorDataService {
       const conds: string[] = [`\`${field}\` IS NOT NULL`];
       const params: (string | number)[] = [];
       if (!staticTable) {
-        // 因子表 TRADE_DATE 为 BIGINT（yyyymmdd 整数）：必须用裸数字日期。
-        // dash 日期（'2025-01-01'）会被数值强转成 2025 → 区间恒空 → 字段类卖出
-        // 规则与不卖条件静默失效（2026-10-22 掘金对照实验定位）
+        // BIGINT 表（yyyymmdd 整数）必须用裸数字日期——dash 日期会被数值强转成 2025 → 区间恒空
+        // （2026-10-22 掘金对照实验定位）；date 类型表（精品因子库）则须用 dash 字符串（ADR-0010 配套）
+        const dateType = this.tradeDateIsDateType(table);
         conds.push('TRADE_DATE BETWEEN ? AND ?');
-        params.push(start, end);
+        params.push(...(dateType ? [toDashDate(start), toDashDate(end)] : [start, end]));
       }
       if (chunk) {
         conds.push(`SECURITY_ID IN (${chunk.map(() => '?').join(', ')})`);
@@ -354,6 +359,14 @@ export class MysqlFactorDataService extends FactorDataService {
   }
 
   /** 静态表：字段字典里没有 TRADE_DATE 列（md_security 等主表）——截面/序列查询忽略日期条件 */
+  /** 日期列口径：TRADE_DATE 为 date 类型（如精品因子库 equ_fancy_factors_table1~10）时，
+   *  查询参数用 'YYYY-MM-DD'、返回值统一转 yyyymmdd 数字；其余表（BIGINT yyyymmdd）维持裸数字。
+   *  date 类型 + dateStrings 连接的原始返回是 'YYYY-MM-DD' 字符串，Number() 直转会 NaN
+   *  （2026-10-23 run_daily_screen "自 NaN 起" 事故根因） */
+  private tradeDateIsDateType(table: string): boolean {
+    return /^date/.test(loadTableFieldDetails(table)?.find((d) => d.name === 'TRADE_DATE')?.type ?? '');
+  }
+
   private isStaticTable(table: string): boolean {
     return !(loadTableFields(table)?.has('TRADE_DATE') ?? false);
   }
