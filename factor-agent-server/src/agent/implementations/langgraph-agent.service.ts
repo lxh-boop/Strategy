@@ -150,14 +150,6 @@ const StrategyGraphState = Annotation.Root({
    *  AgentReply——卡片绕过 LLM 直达前端，模型只拿指标摘要写文案。
    *  last-write-wins：同一次图执行内多次回测以最后一次为准（作"未指定展示哪次"时的默认卡） */
   card: Annotation<AgentCard | undefined>,
-  /** 回合内卡片登记表：card_N → 卡片。tools 节点每成功一次回测登记一张并把编号写进回执；
-   *  模型可在最终文案末尾用【展示卡片:card_N】指定展示哪一次（多次回测择优，runGraph 收尾
-   *  解析选择，标记行剔除后不展示给用户）；未标记/编号无效 → 落回 card 通道的默认卡。
-   *  信任边界：注册表只存后端产出的真卡，模型仅能引用编号，无法注入或篡改卡片内容 */
-  cardRegistry: Annotation<Record<string, AgentCard>>({
-    reducer: (a, b) => ({ ...a, ...b }),
-    default: () => ({}),
-  }),
   /** 参数授权标记：用户在确认门回复"授权调优"后置 true，本轮（本次图执行）内后续回测免确认——
    *  用户已把参数决定权交给 AI。授权只活一轮，图执行结束即收回，
    *  下一轮回测重新走确认门 */
@@ -337,8 +329,6 @@ export class LangGraphAgentService extends AgentService {
         const additions: BaseMessage[] = [];
         let card: AgentCard | undefined;
         let backtestFreq: string | undefined;
-        // 回合内卡片登记表：编号 = 既有张数 + 1，跨多次 tools 节点执行经 reducer 累积
-        const registry = { ...(state.cardRegistry ?? {}) };
         for (const call of last.tool_calls ?? []) {
           // 确认门拒绝的调用（feedback / 参数快检不过）不进引擎：回执已由 confirm 节点生成，原样转给模型
           const rejected = state.rejectedCalls?.[call.id ?? ''];
@@ -365,10 +355,18 @@ export class LangGraphAgentService extends AgentService {
           additions.push(new ToolMessage({ content: JSON.stringify(outcome.result), tool_call_id: call.id ?? '' }));
           if (outcome.card) {
             card = outcome.card; // 回测失败时无卡片，保持上一次的值也无妨（默认展示卡取最后一次成功）
-            const cardId = `card_${Object.keys(registry).length + 1}`;
-            registry[cardId] = outcome.card;
-            // 回执带编号：模型可在最终文案用【展示卡片:card_N】择优指定展示哪一次（多次回测场景）
-            outcome.result['卡片编号'] = cardId;
+            // 回测卡完成即入册：会话级持久编号 card_N = 本会话第 N 次回测（ADR-0010），
+            // 未展示的对比组同样保存；分析类卡（相关性/排名分析）不占号、不参与【展示卡片】择优
+            if (outcome.card.type === 'backtest') {
+              const username = (await this.userStore.findUserById(state.userId ?? -1))?.username ?? '';
+              const seq = await this.userStore.saveBacktestRun({
+                conversationId: state.conversationId,
+                username,
+                title: outcome.card.title,
+                card: outcome.card,
+              });
+              outcome.result['卡片编号'] = `card_${seq}`;
+            }
           }
           if (outcome.backtestFreq) backtestFreq = outcome.backtestFreq;
           const line = `tools节点 ${call.name}(${toLogPreview(call.args)}) => ${this.toolResultPreview(call.name, outcome.result)}`;
@@ -386,7 +384,6 @@ export class LangGraphAgentService extends AgentService {
           messages: additions,
           ...(card ? { card } : {}),
           ...(backtestFreq ? { backtestFreq } : {}),
-          cardRegistry: registry,
         };
       })
       .addNode('confirm', async (state: StrategyGraphStateType) => this.execConfirmBacktest(state))
@@ -502,7 +499,7 @@ export class LangGraphAgentService extends AgentService {
         },
         { configurable: { thread_id: threadId, onProgress }, recursionLimit: 15 },
       );
-      const reply = this.collectReply(state, conversation.id, threadId, onProgress);
+      const reply = await this.collectReply(state, conversation.id, threadId, onProgress);
       // 回复完成后滚动摘要维护（ADR-0007）：不挡响应、不抛，失败仅日志（无损不变式保证下轮仍正确）
       this.maybeCompressInBackground(conversation);
       return reply;
@@ -544,20 +541,29 @@ export class LangGraphAgentService extends AgentService {
       configurable: { thread_id: threadId, onProgress },
       recursionLimit: 15,
     });
-    const reply = this.collectReply(state, conversation.id, threadId, onProgress);
+    const reply = await this.collectReply(state, conversation.id, threadId, onProgress);
     // 确认门恢复也是完整一轮：滚动摘要维护同 runGraph（ADR-0007）
     this.maybeCompressInBackground(conversation);
     return reply;
   }
 
+  /** 择优注册表：从 runs 表装配（card_N → 卡片对象）。编号 = 会话级持久 seq（ADR-0010），
+   *  跨轮稳定；仅回测卡入册，分析卡不占号。数据库为唯一事实，无内存缓存 */
+  private async buildCardRegistry(conversationId: string): Promise<Record<string, AgentCard>> {
+    const runs = await this.userStore.listBacktestRuns(conversationId);
+    const registry: Record<string, AgentCard> = {};
+    for (const r of runs) registry[`card_${r.seq}`] = r.card as AgentCard;
+    return registry;
+  }
+
   /** invoke 结果收尾：中断 → 记挂起映射、发 confirm_pending 过程事件（前端据此弹确认窗）、
    *  返回参数确认文案；正常 → 卡片择优出回复并清挂起映射 */
-  private collectReply(
+  private async collectReply(
     state: StrategyGraphStateType,
     conversationId: string,
     threadId: string,
     onProgress?: AgentProgressSink,
-  ): AgentReply {
+  ): Promise<AgentReply> {
     const interrupted = (
       state as { __interrupt__?: Array<{ value: { type?: string; params?: Record<string, string> } }> }
     ).__interrupt__;
@@ -575,8 +581,10 @@ export class LangGraphAgentService extends AgentService {
     const last = state.messages[state.messages.length - 1] as AIMessage;
     const text = extractText(last).trim();
     if (!text) throw new LlmTextError('返回内容为空');
-    // 多次回测择优：模型用【展示卡片:card_N】指定展示哪一次；未指定/编号无效 → 最后一次成功的
-    const picked = applyCardSelection(text, state.cardRegistry ?? {}, state.card);
+    // 多次回测择优：模型用【展示卡片:card_N】指定展示哪一次（编号 = 会话级持久 seq，跨轮稳定，
+    // 注册表从 runs 表装配，ADR-0010）；未指定/编号无效 → 最后一次成功的
+    const registry = await this.buildCardRegistry(conversationId);
+    const picked = applyCardSelection(text, registry, state.card);
     if (picked.markerId) {
       this.logger.log(
         `最终展示卡片: ${picked.markerId}${picked.card ? '' : '（编号无效，回落默认）'}，文案标记行已剔除`,
@@ -1356,7 +1364,9 @@ export class LangGraphAgentService extends AgentService {
         '因子阈值必须落在字段真实值域内（拿不准时先用 read_factor_data 抽样看值域再定阈值），禁止拍脑袋填大数；' +
         '结束时对比各次指标择优推荐，用【展示卡片:card_N】指定展示最优的一次；' +
         '给出优化建议后，结尾固定加一句：回复"授权调优"可按建议连续多组回测对比择优（前端会渲染授权按钮）；',
-      '- 本回合跑了多次回测时，每份回执带「卡片编号」：按用户意图选最符合的一次（如优化场景选指标最优的），在回复最末尾单独一行写【展示卡片:card_N】指定展示哪次（该行不会展示给用户）；只回测了一次则不写；',
+      '- 每次回测的回执带「卡片编号」（card_N = 本会话第 N 次回测，编号跨轮稳定、永不重置）：按用户意图选最符合的一次（如优化场景选指标最优的），在回复最末尾单独一行写【展示卡片:card_N】指定展示哪次（该行不会展示给用户）；只回测了一次则不写；' +
+        'card_N 必须原样引用回执或【会话回测档案】里标注的编号，禁止按"第 N 组=card_N"自行推算；' +
+        '仅当用户要求回看/调出某次历史回测时，才引用非本轮的编号（档案里有清单），本轮新回测择优一律用本轮回执的编号；',
       '- 查询无数据行时如实告知，不要编造；',
       '- 长期记忆维护（save_memory）：用户陈述值得跨会话记住的稳定偏好/研究结论（如"以后只用动量因子""我习惯万三手续费"）或明说"记住 XX"时，' +
         '用 op=add 落一条（slug 起小写英文短横线名、title 一句话、content 一到两句具体事实）；' +
@@ -1364,7 +1374,20 @@ export class LangGraphAgentService extends AgentService {
         '无论增改删，最终回复里必须告知用户动了哪条记忆（一句话即可）；',
       '- 与因子数据无关的问候或闲聊：直接简短回复（不超过 90 字），不要调用工具。',
     ].join('\n');
-    return catalog.length ? `${system}\n\n${formatTableCatalog(catalog)}` : system;
+
+    // 会话回测档案（ADR-0010 F7）：card_N = 本会话第 N 次回测，编号跨轮稳定——
+    // 模型据此跨轮回看（引用【展示卡片:card_N】）；只给索引级摘要，完整卡片绕过 LLM
+    let prompt = catalog.length ? `${system}\n\n${formatTableCatalog(catalog)}` : system;
+    try {
+      const runs = await this.userStore.listBacktestRuns(conversation.id);
+      if (runs.length) {
+        const lines = runs.map((r) => `card_${r.seq} | ${r.createdDate} | ${r.title}`);
+        prompt += `\n\n【会话回测档案】（card_N = 本会话第 N 次回测，编号跨轮稳定；用户要求回看某次回测时，在回复最末尾单独一行写【展示卡片:card_N】指定展示，该行不会展示给用户）\n${lines.join('\n')}`;
+      }
+    } catch {
+      /* 档案读取失败不挡对话（索引缺失只影响跨轮回看） */
+    }
+    return prompt;
   }
 
   /** 从 LangChain 异常中提取上游可读原因（首行，截断到 120 字），如 "429 余额不足或无可用资源包,请充值." */

@@ -243,7 +243,8 @@ export class MysqlUserStoreService extends UserStoreService {
   }
 
   async deleteConversation(userId: number, id: string): Promise<boolean> {
-    // messages 由 ON DELETE CASCADE 一并删除
+    // messages 由 ON DELETE CASCADE 一并删除；回测卡存档随会话级联清理（ADR-0010）
+    await this.deleteBacktestRunsByConversation(id);
     const result = await this.exec(
       'DELETE FROM conversations WHERE user_id = ? AND id = ?',
       [userId, id],
@@ -252,7 +253,51 @@ export class MysqlUserStoreService extends UserStoreService {
     return result.affectedRows > 0;
   }
 
+  /* ----- 回测卡存档（ADR-0010）：会话级持久编号，seq = MAX+1 单调分配（同会话回测经消息级并发闸单飞，无竞态） ----- */
+
+  async saveBacktestRun(input: { conversationId: string; username: string; title: string; card: unknown }): Promise<number> {
+    return this.withConn(async (conn) => {
+      await conn.execute(
+        'INSERT INTO backtest_runs (conversation_id, username, seq, title, card) ' +
+          'SELECT ?, ?, COALESCE(MAX(seq), 0) + 1, ?, ? FROM backtest_runs WHERE conversation_id = ?',
+        [input.conversationId, input.username, input.title, JSON.stringify(input.card), input.conversationId],
+      );
+      const [rows] = await conn.query('SELECT MAX(seq) AS seq FROM backtest_runs WHERE conversation_id = ?', [input.conversationId]);
+      return Number((rows as Array<{ seq: number }>)[0]?.seq ?? 0);
+    });
+  }
+
+  async listBacktestRuns(conversationId: string): Promise<Array<{ seq: number; title: string; createdDate: string; card: unknown }>> {
+    const rows = await this.selectRows<{ seq: number; title: string; createdDate: string; card: string }>(
+      "SELECT seq, title, DATE_FORMAT(created_at, '%Y-%m-%d') AS createdDate, card FROM backtest_runs WHERE conversation_id = ? ORDER BY seq",
+      [conversationId],
+      '查询回测存档失败',
+    );
+    return rows.map((r) => ({
+      seq: Number(r.seq),
+      title: r.title,
+      createdDate: r.createdDate,
+      card: typeof r.card === 'string' ? JSON.parse(r.card) : r.card,
+    }));
+  }
+
+  async getBacktestRunBySeq(conversationId: string, seq: number): Promise<{ seq: number; card: unknown } | undefined> {
+    const rows = await this.selectRows<{ card: string }>(
+      'SELECT card FROM backtest_runs WHERE conversation_id = ? AND seq = ?',
+      [conversationId, seq],
+      '查询回测存档失败',
+    );
+    const row = rows[0];
+    if (!row) return undefined;
+    return { seq, card: typeof row.card === 'string' ? JSON.parse(row.card) : row.card };
+  }
+
+  async deleteBacktestRunsByConversation(conversationId: string): Promise<void> {
+    await this.exec('DELETE FROM backtest_runs WHERE conversation_id = ?', [conversationId], '删除回测存档失败');
+  }
+
   async clearConversation(userId: number, id: string): Promise<Conversation | undefined> {
+    // 清空只清聊天记录，不清 backtest_runs——seq 永不重置（ADR-0010），清空前的回测档案仍可按编号回看
     const conv = await this.readConversation(userId, id);
     if (!conv) return undefined;
     const username = await this.usernameOf(userId);

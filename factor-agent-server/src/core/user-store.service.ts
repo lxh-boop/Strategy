@@ -68,6 +68,13 @@ export abstract class UserStoreService {
   abstract getSettings(userId: number): Promise<UserSettingsRow>;
   abstract updateSetting(userId: number, key: SettingKey, patch: { on?: boolean; value?: string }): Promise<void>;
 
+  /* ----- 回测卡存档（ADR-0010）：会话级持久编号 card_N = 本会话第 N 次回测，完成即入册；
+   *  未展示的对比组同样保存；删除会话级联清理 ----- */
+  abstract saveBacktestRun(input: { conversationId: string; username: string; title: string; card: unknown }): Promise<number>;
+  abstract listBacktestRuns(conversationId: string): Promise<Array<{ seq: number; title: string; createdDate: string; card: unknown }>>;
+  abstract getBacktestRunBySeq(conversationId: string, seq: number): Promise<{ seq: number; card: unknown } | undefined>;
+  abstract deleteBacktestRunsByConversation(conversationId: string): Promise<void>;
+
   /* ----- 池句柄（ADR-0006）：唯一的会话维度数据（不带 userId 的约定例外，隔离靠会话归属链） ----- */
   abstract savePoolRef(ref: { id: string; conversationId: string; spec: unknown; summary: string; memberCount: number }): Promise<void>;
   abstract findPoolRef(id: string): Promise<PoolRefRow | undefined>;

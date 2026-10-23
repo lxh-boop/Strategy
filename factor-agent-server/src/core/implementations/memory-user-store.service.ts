@@ -158,11 +158,35 @@ export class MemoryUserStoreService extends UserStoreService {
   /* ----- 池句柄 ----- */
   private readonly poolRefs = new Map<string, PoolRefRow>();
 
+  /* ----- 回测卡存档（ADR-0010）：内存桩，形态与 MySQL 实现一致 ----- */
+  private readonly backtestRuns = new Map<string, Array<{ seq: number; title: string; card: unknown }>>();
+
   async savePoolRef(ref: { id: string; conversationId: string; spec: unknown; summary: string; memberCount: number }): Promise<void> {
     this.poolRefs.set(ref.id, { ...ref, createdAt: fmtNow() });
   }
 
   async findPoolRef(id: string): Promise<PoolRefRow | undefined> {
     return this.poolRefs.get(id);
+  }
+
+  async saveBacktestRun(input: { conversationId: string; username: string; title: string; card: unknown }): Promise<number> {
+    const list = this.backtestRuns.get(input.conversationId) ?? [];
+    const seq = list.length + 1;
+    list.push({ seq, title: input.title, card: input.card });
+    this.backtestRuns.set(input.conversationId, list);
+    return seq;
+  }
+
+  async listBacktestRuns(conversationId: string): Promise<Array<{ seq: number; title: string; createdDate: string; card: unknown }>> {
+    return (this.backtestRuns.get(conversationId) ?? []).map((r) => ({ seq: r.seq, title: r.title, createdDate: '', card: r.card }));
+  }
+
+  async getBacktestRunBySeq(conversationId: string, seq: number): Promise<{ seq: number; card: unknown } | undefined> {
+    const run = (this.backtestRuns.get(conversationId) ?? []).find((x) => x.seq === seq);
+    return run ? { seq: run.seq, card: run.card } : undefined;
+  }
+
+  async deleteBacktestRunsByConversation(conversationId: string): Promise<void> {
+    this.backtestRuns.delete(conversationId);
   }
 }
