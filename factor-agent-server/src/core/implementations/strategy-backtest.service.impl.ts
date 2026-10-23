@@ -41,8 +41,6 @@ import {
   INDEX_VALUE_KEY,
   indexFilterCode,
   isIndexFilterRule,
-  LIMIT_DOWN_RATIO,
-  LIMIT_UP_RATIO,
   LOT_SIZE,
   MAX_CANDIDATE_UNIVERSE,
   MAX_REBALANCES,
@@ -87,7 +85,7 @@ import { todayStr } from '../../common/time';
    前复权日线与 field 类卖出规则的区间序列，然后跑主循环。
    全市场 × 全区间的行情面板从不进入内存。
 
-   主循环（逐交易日）：执行（昨日指令：先卖后买，整手/费用/T+1/停牌顺延/涨跌停顺延）
+   主循环（逐交易日）：执行（昨日指令：先卖后买，整手/费用/T+1/停牌顺延/涨跌停闸[ADR-0009]）
    → 结算（权益 = 现金 + Σ持仓×收盘，停牌用最近有效收盘估值）→ 信号（卖出规则逐持仓
    检查、调仓日落目标持仓），指令次日执行——无未来函数。
    ========================================================== */
@@ -330,6 +328,8 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
         open: row.open !== null && row.open > 0 ? row.open : null,
         close: row.close,
         preClose: row.preClose,
+        limitUp: row.limitUp ?? null,
+        limitDown: row.limitDown ?? null,
       });
     }
     const sellFieldSeries = await this.fetchFieldSeries(fieldSellRules, [...involved], p);
@@ -603,7 +603,11 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
       keepRules.map((r) => `${r.table}.${r.field}`).filter((key) => !this.isDateTable(key.split('.')[0])),
     );
 
-    const account = new Account(p.initialCapital, { feeRate: p.feeRate });
+    const account = new Account(p.initialCapital, {
+      feeRate: p.feeRate,
+      limitUpDownSkip: p.limitUpDownSkip,
+      limitPricesOf: (code, day) => quotes.get(code)?.get(day),
+    });
     const equities: number[] = [];
     const turnoverByDay: number[] = [];
     let pendingSells = new Map<string, string>(); // code → 触发原因
@@ -651,21 +655,19 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
 
       // ── 执行阶段：昨日盘后生成的指令（尾盘单模式 = 当日收盘信号的同日收盘执行）──
       if (i > 0 || p.executionTiming === 2) {
-        // a. 卖出指令（卖出规则触发）：停牌/跌停顺延，T+1 保护
+        // a. 卖出指令（卖出规则触发）：停牌顺延、涨跌停闸内建（ADR-0009），T+1 保护
         for (const [code, reason] of pendingSells) {
           const pos = account.positionOf(code);
           if (!pos) continue;
           if (pos.buyDayIdx >= i) continue; // T+1：当日买入不可卖
           const price = execPriceOf(code, day);
-          const q = quoteOf(code, day);
-          if (price === undefined || !q) continue; // 停牌：持仓顺延
-          if (p.limitUpDownSkip && price <= q.preClose * LIMIT_DOWN_RATIO) continue; // 跌停顺延（ADR-0008 涨跌停顺延开启时）
-          account.sellAll(pos, price, day, reason);
+          if (price === undefined) continue; // 停牌：持仓顺延
+          account.sellAll(pos, price, day, reason); // 跌停拒卖在闸内（ADR-0009）
         }
         pendingSells = new Map();
 
         // a′. 择时缩放块：目标总仓位（昨收状态）与当前持仓市值的偏差超 positionDeviatePct%（缺省 1）时拉回——
-        // 独立于调仓日（候选为空也执行）；减仓按市值占比分摊、只卖未 T+1 锁定仓，停牌/涨跌停顺延。
+        // 独立于调仓日（候选为空也执行）；减仓按市值占比分摊、只卖未 T+1 锁定仓，停牌顺延、涨跌停闸内建。
         // 不查不卖条件（ADR-0003：择时是组合级仓位管理，不受单票保护）
         // 择时缩放块（ADR-0008）：有择时叠加时为择时的仓位执行器（exposure 变化靠它落地，无条件运行）；
         // 无择时叠加时为"保持满仓"维持器——仅 keepFullyInvested=true 时运行（缺省 false = 掘金对齐语义，
@@ -679,14 +681,6 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
             { trim: '择时减仓', add: '择时加仓' },
             {
               priceOf: (code) => execPriceOf(code, day),
-              canSell: (code, price) => {
-                const q = quoteOf(code, day);
-                return !!q && (!p.limitUpDownSkip || price > q.preClose * LIMIT_DOWN_RATIO);
-              },
-              canBuy: (code, price) => {
-                const q = quoteOf(code, day);
-                return !!q && (!p.limitUpDownSkip || price < q.preClose * LIMIT_UP_RATIO);
-              },
             },
           );
         }
@@ -739,21 +733,18 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
               }
               if (pos.buyDayIdx >= i) continue; // T+1 保护
               const price = execPriceOf(pos.code, day);
-              const q = quoteOf(pos.code, day);
-              if (price === undefined || !q) continue; // 停牌顺延：明日重试
-              if (price <= q.preClose * LIMIT_DOWN_RATIO) continue; // 跌停顺延
-              account.sellAll(pos, price, day, forced ? '排名跌出' : '调仓卖出');
+              if (price === undefined) continue; // 停牌顺延：明日重试
+              account.sellAll(pos, price, day, forced ? '排名跌出' : '调仓卖出'); // 跌停拒卖在闸内（ADR-0009）
             }
 
             // b2. 按综合分序买入未持有的候选：整手向下取整，现金不足缩股，低于最小建仓仓位放弃（顺延下一候选）。
-            //     持仓数达 maxPositions 即停止买入——不卖条件保住的持仓占坑（ADR-0003：保 2 买 8）
+            //     持仓数达 maxPositions 即停止买入——不卖条件保住的持仓占坑（ADR-0003：保 2 买 8）；
+            //     涨停拒买在闸内（ADR-0009，闸拒单等效顺延下一候选）
             for (const code of candidates) {
               if (account.positionOf(code)) continue;
               if (account.size() >= p.maxPositions) break;
               const price = execPriceOf(code, day);
-              const q = quoteOf(code, day);
-              if (price === undefined || !q) continue; // 停牌跳过
-              if (p.limitUpDownSkip && price >= q.preClose * LIMIT_UP_RATIO) continue; // 涨停跳过（ADR-0008 涨跌停顺延开启时）
+              if (price === undefined) continue; // 停牌跳过
               const tv = tvOf(code, false);
               if (tv <= 0) continue; // 仓位函数给了 0 金额 = 本期不买（如 MA 下方）
               let shares = Math.floor(tv / (price * (1 + p.feeRate)) / LOT_SIZE) * LOT_SIZE;
@@ -827,6 +818,8 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
       turnoverByDay,
       finalEquity,
       sizingViolations,
+      limitBlocked: account.limitBlockedCount(),
+      limitNoData: account.limitNoDataCount(),
       lastClose: account.lastCloseMap(),
       periodHoldings: periodAgg.periodHoldings,
       latestOrders: periodAgg.latestOrders,
@@ -970,7 +963,7 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
       tag: `策略回测·每${p.rebalanceIntervalDays}个交易日`,
       note:
         `日频事件内核：T 日收盘出信号 T+1 执行（${p.executionTiming === 0 ? '开盘价' : '收盘价'}成交），T+1/整手/停牌顺延，` +
-        `触及涨跌停顺延（±10% 简化口径） ｜ 区间 ${p.startDate}~${p.endDate} ｜ ` +
+        `涨跌停判定${p.limitUpDownSkip ? '开启（官方分档价，触及不成交）' : '关闭（对照模式）'} ｜ 区间 ${p.startDate}~${p.endDate} ｜ ` +
         `单边费率 ${feePct}% 双边计提 ｜ 排序因子${sortFactors.usedDefault ? '缺省，默认 ' : '：'}${sortExpr}` +
         `${sortFactors.usedDefault ? '（值大优）' : ''}` +
         `${timing ? ` ｜ 大盘择时：字段条件逐日投票，熊市仓位 ${timing.bearPositionPct}%` : ''}`,
@@ -1064,9 +1057,13 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
         ...(p.keepFullyInvested
           ? [{ label: '仓位维持', value: '保持满仓', hint: '每交易日收盘后将总仓位维持在全额暴露：卖出现金当日回补剩余持仓（缺省关闭=掘金对齐语义）' }]
           : []),
-        ...(p.limitUpDownSkip
-          ? [{ label: '涨跌停顺延', value: '开启', hint: '买入价触及涨停不追、卖出价触及跌停顺延（真实市场约束；缺省关闭=掘金对齐语义）' }]
-          : []),
+        {
+          label: '涨跌停判定',
+          value: p.limitUpDownSkip ? '开启' : '关闭',
+          hint: p.limitUpDownSkip
+            ? '执行价触及官方涨停价不买、触及跌停价不卖；档位为交易所官方价自动分档（主板±10%/ST±5%/创业板·科创板±20%/北交所±30%）；官方价缺行降级照常成交'
+            : '对照模式：涨跌停价照常成交（与掘金等平台默认撮合对齐；跨平台对照时两边都关）',
+        },
         {
           label: '初始资金/费用',
           value: `${(p.initialCapital / 10000).toFixed(0)} 万 · 单边 ${feePct}%`,
@@ -1100,7 +1097,7 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
         ...(timing ? { timingOverlay: timing } : {}),
         ...(p.pool ? { pool: p.pool } : {}),
         ...(p.keepFullyInvested ? { keepFullyInvested: true } : {}),
-        ...(p.limitUpDownSkip ? { limitUpDownSkip: true } : {}),
+        ...(p.limitUpDownSkip ? {} : { limitUpDownSkip: false }),
       },
       // 逐点交易日（YYYYMMDD）：前端 x 轴按真实日期打刻度
       dates: tradeDates,
@@ -1158,6 +1155,9 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
       ...(p.keepRules.length ? { 不卖条件: describeKeepRules(p.keepRules) } : {}),
       ...(p.excludeRanges.length ? { 排除时间段: describeExcludeRanges(p.excludeRanges) } : {}),
       成交时点: p.executionTiming === 2 ? '当日收盘（尾盘单）' : p.executionTiming === 1 ? '收盘价' : '开盘价',
+      涨跌停判定: p.limitUpDownSkip
+        ? `开启（官方分档价，触及不成交${loop.limitNoData ? `；缺行降级 ${loop.limitNoData} 笔` : ''}）`
+        : '关闭（对照模式，涨跌停价照常成交）',
       初始资金: p.initialCapital,
       期末权益: +loop.finalEquity.toFixed(0),
       期末现金: +loop.cash.toFixed(0),

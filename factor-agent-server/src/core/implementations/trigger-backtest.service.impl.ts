@@ -16,8 +16,6 @@ import {
   INDEX_VALUE_KEY,
   indexFilterCode,
   isIndexFilterRule,
-  LIMIT_DOWN_RATIO,
-  LIMIT_UP_RATIO,
   LOT_SIZE,
   NormalizedStrategyInput,
   rankUniverse,
@@ -246,6 +244,8 @@ export class TriggerBacktestServiceImpl extends TriggerBacktestService {
 
     const account = new Account(p.initialCapital, {
       feeRate: p.feeRate,
+      limitUpDownSkip: p.limitUpDownSkip,
+      limitPricesOf: (code, day) => quotesByCode.get(code)?.get(day),
       tradeLimit: {
         max: MAX_TRADES,
         message: `交易笔数过多（超 ${MAX_TRADES} 笔）：请放宽触发条件、加大偏离带宽或缩短区间`,
@@ -276,6 +276,8 @@ export class TriggerBacktestServiceImpl extends TriggerBacktestService {
           open: row.open !== null && row.open > 0 ? row.open : null,
           close: row.close,
           preClose: row.preClose,
+          limitUp: row.limitUp ?? null,
+          limitDown: row.limitDown ?? null,
         });
       }
     };
@@ -293,20 +295,19 @@ export class TriggerBacktestServiceImpl extends TriggerBacktestService {
 
       // ── 执行阶段 ──
       if (i > 0) {
-        // a. 卖出指令（T+1/停牌/跌停顺延）
+        // a. 卖出指令（T+1/停牌顺延；跌停拒卖在闸内 ADR-0009）
         for (const [code, reason] of pendingSells) {
           const pos = account.positionOf(code);
           if (!pos) continue;
           if (pos.buyDayIdx >= i) continue;
           const price = execPriceOf(code, day);
-          const q = quoteOf(code, day);
-          if (price === undefined || !q) continue;
-          if (price <= q.preClose * LIMIT_DOWN_RATIO) continue;
+          if (price === undefined) continue;
           account.sellAll(pos, price, day, reason);
         }
         pendingSells = new Map();
 
-        // b. 触发买入（按昨日综合分序；持仓数上限 + 单日买入笔数上限 + 现金缩股 + 最小建仓仓位）
+        // b. 触发买入（按昨日综合分序；持仓数上限 + 单日买入笔数上限 + 现金缩股 + 最小建仓仓位；
+        //    涨停拒买在闸内 ADR-0009，闸拒单等效顺延下一候选）
         const equity0 = account.equity((code) => execPriceOf(code, day));
         const targetMv = (equity0 * p.idealPositionPct) / 100 * (exposure / 100);
         const minMv = (equity0 * p.minPositionPct) / 100;
@@ -316,9 +317,7 @@ export class TriggerBacktestServiceImpl extends TriggerBacktestService {
           if (account.size() >= p.maxPositions) break;
           if (account.positionOf(code)) continue;
           const price = execPriceOf(code, day);
-          const q = quoteOf(code, day);
-          if (price === undefined || !q) continue; // 停牌
-          if (price >= q.preClose * LIMIT_UP_RATIO) continue; // 涨停
+          if (price === undefined) continue; // 停牌
           let shares = Math.floor(targetMv / (price * (1 + p.feeRate)) / LOT_SIZE) * LOT_SIZE;
           const affordable = account.affordableShares(price);
           if (shares > affordable) shares = affordable;
@@ -328,7 +327,7 @@ export class TriggerBacktestServiceImpl extends TriggerBacktestService {
         }
         pendingBuys = [];
 
-        // c. 仓位偏离带再平衡：总仓位偏离目标超带宽才动作（择时目标仓位即目标总仓位）
+        // c. 仓位偏离带再平衡：总仓位偏离目标超带宽才动作（择时目标仓位即目标总仓位）；涨跌停闸内建
         account.rebalanceToTotal(
           totalTargetPct * (exposure / 100),
           band,
@@ -337,14 +336,6 @@ export class TriggerBacktestServiceImpl extends TriggerBacktestService {
           { trim: '偏离带减仓', add: '偏离带加仓' },
           {
             priceOf: (code) => execPriceOf(code, day),
-            canSell: (code, price) => {
-              const q = quoteOf(code, day);
-              return !!q && price > q.preClose * LIMIT_DOWN_RATIO;
-            },
-            canBuy: (code, price) => {
-              const q = quoteOf(code, day);
-              return !!q && price < q.preClose * LIMIT_UP_RATIO;
-            },
           },
         );
       }

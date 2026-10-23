@@ -814,7 +814,9 @@ export class LangGraphAgentService extends AgentService {
             ...(p.positionFn ? { 仓位函数: formatFnCall('position', p.positionFn) } : {}),
             ...(p.keepRules.length ? { 不卖条件: describeKeepRules(p.keepRules) } : {}),
             ...(p.keepFullyInvested ? { 仓位维持: '保持满仓（每交易日收盘维持全额暴露）' } : {}),
-            ...(p.limitUpDownSkip ? { 涨跌停顺延: '开启（涨停不追/跌停顺延）' } : {}),
+            ...(p.limitUpDownSkip
+              ? { 涨跌停判定: '开启（官方分档价：涨停不追/跌停不卖，触及不成交）' }
+              : { 涨跌停判定: '关闭（对照模式：涨跌停价照常成交）' }),
             ...(p.excludeRanges.length ? { 排除时间段: describeExcludeRanges(p.excludeRanges) } : {}),
             ...(p.timingOverlay ? { 择时规则: describeTimingOverlay(p.timingOverlay) } : {}),
             ...(p.rebalanceIntervalDays === 0

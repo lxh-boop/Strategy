@@ -668,3 +668,54 @@ describe('股票池筛选入卡（pool 摘要即参数，回测卡不再误报�
     ).rejects.toThrow(ClarificationSignal);
   });
 });
+
+/* ----- 涨跌停总开关（ADR-0009）：引擎级开关两态（官方价随 QuoteRow 注入，缺行降级不判） ----- */
+
+describe('StrategyBacktestServiceImpl 涨跌停判定开关', () => {
+  /** 行情：B 在执行日 0103 开盘触及涨停（官方涨停价=22，昨收 20） */
+  function limitQuotes(): QuoteRow[] {
+    return [
+      ...defaultQuotes(),
+      // 覆盖 B 的 0103：open 22 = 官方涨停价（+10% 于昨收 20）
+      quoteRow('000002', 20240103, { o: 22, c: 22, pc: 20 }),
+    ].map((r) => (r.ticker === '000002' && r.tradeDate === '2024-01-03' ? { ...r, limitUp: 22, limitDown: 18 } : r));
+  }
+
+  const momentum = {
+    20240102: { '000001.XSHE': 10, '000002.XSHE': 20 }, // → 候选 [B]，0103 开盘执行
+    20240104: { '000001.XSHE': 30, '000002.XSHE': 5 },
+  };
+
+  it('默认开启：执行价触及官方涨停价 → 该笔买入被拒（缺官方价的日子照常）', async () => {
+    const service = makeService({ momentum, quotes: limitQuotes() });
+    const out = await service.runStrategyBacktest({
+      securityIds: [CODE_A, CODE_B],
+      startDate: '20240101',
+      endDate: '20240108',
+      initialCapital: 100_000,
+      feeRate: 0,
+      rebalanceIntervalDays: 2,
+      maxPositions: 1,
+    });
+    const bBuys = (out.card.trades ?? []).filter((t) => t.direction === 'buy' && t.code === CODE_B);
+    expect(bBuys).toHaveLength(0); // 0103 涨停拒买；maxPositions=1 后续期只买 A
+    expect(out.summary.涨跌停判定).toContain('开启');
+  });
+
+  it('显式关闭（对照模式）：同面板涨停价照常成交', async () => {
+    const service = makeService({ momentum, quotes: limitQuotes() });
+    const out = await service.runStrategyBacktest({
+      securityIds: [CODE_A, CODE_B],
+      startDate: '20240101',
+      endDate: '20240108',
+      initialCapital: 100_000,
+      feeRate: 0,
+      rebalanceIntervalDays: 2,
+      maxPositions: 2,
+      limitUpDownSkip: false,
+    });
+    const bBuys = (out.card.trades ?? []).filter((t) => t.direction === 'buy' && t.code === CODE_B);
+    expect(bBuys.length).toBeGreaterThan(0); // 涨停价 22 照常买入
+    expect(out.summary.涨跌停判定).toContain('关闭');
+  });
+});

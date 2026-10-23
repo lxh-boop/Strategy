@@ -165,8 +165,9 @@ export interface StrategyBacktestInput {
   /** 仓位维持（ADR-0008）：每交易日收盘后将总仓位维持在全额暴露（无择时叠加时=保持满仓，
    *  卖出规则的现金当日回补剩余持仓）。缺省 false = 掘金对齐语义（卖出现金保留至下一调仓日） */
   keepFullyInvested?: unknown;
-  /** 涨跌停顺延（ADR-0008）：执行价触及涨跌停不成交（买入涨停价不追、卖出跌停价顺延）。
-   *  缺省 false = 掘金对齐语义（涨跌停价照常成交）。真实度增强项 */
+  /** 涨跌停总开关（ADR-0009）：执行价触及官方涨停价不买入、触及跌停价不卖出；
+   *  档位为交易所官方价（自动涵盖主板±10%/ST±5%/创业板·科创板±20%/北交所±30%）。
+   *  缺省 true=开启；false=掘金对照模式（涨跌停价照常成交） */
   limitUpDownSkip?: unknown;
 }
 
@@ -227,7 +228,8 @@ export interface NormalizedStrategyInput {
   /** 仓位维持（ADR-0008，缺省 false = 掘金对齐语义）：每交易日收盘后将总仓位维持在全额暴露。
    *  仅在无择时叠加时生效；有择时叠加时择时块无条件运行（择时的仓位执行器） */
   keepFullyInvested: boolean;
-  /** 涨跌停顺延（ADR-0008，缺省 false = 掘金对齐语义）：执行价触及涨跌停不成交 */
+  /** 涨跌停总开关（ADR-0009，缺省 true=开启）：执行价触及官方涨停价不买、触及跌停价不卖；
+   *  false=掘金对照模式（涨跌停价照常成交），跨平台对照时显式传 false */
   limitUpDownSkip: boolean;
   strategyType: string;
 }
@@ -252,10 +254,6 @@ export const SECURITY_IDS_MAX = 5000;
 export const MAX_CANDIDATE_UNIVERSE = 1500;
 /** 每手股数（A 股整手） */
 export const LOT_SIZE = 100;
-/** 涨跌停判定容差：执行价相对昨收涨过 9.99% 视为涨停（买不进）、跌过 9.99% 视为跌停（卖不出）。
- *  一期简化：统一按 ±10% 主板口径，ST/创业板/科创板的差异档不做区分 */
-export const LIMIT_UP_RATIO = 1.0999;
-export const LIMIT_DOWN_RATIO = 0.9001;
 
 /** 默认排序因子（sortFactors 为空时兜底追加）：20 日价格动量（equ_factor_obos.REVS20，
  *  字典口径"过去 20 个交易日区间收益率"），方向定死值大优（涨得多优先），不提供反转配置 */
@@ -506,7 +504,7 @@ export function assertStrategyInput(raw: StrategyBacktestInput): NormalizedStrat
     benchmark: assertBenchmark(raw.benchmark),
     timingOverlay: assertTimingOverlay(raw.timingOverlay),
     keepFullyInvested: raw.keepFullyInvested === true,
-    limitUpDownSkip: raw.limitUpDownSkip === true,
+    limitUpDownSkip: raw.limitUpDownSkip !== false,
     strategyType: raw.strategyType === undefined || raw.strategyType === null || raw.strategyType === ''
       ? 'equal_weight'
       : String(raw.strategyType).trim(),

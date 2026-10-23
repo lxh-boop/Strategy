@@ -1,6 +1,6 @@
 # ADR-0009：涨跌停判定全局收口、默认开启与官方分档价
 
-Status: accepted（2026-10-22 grill 定案；实施未开工，规格见 docs/涨跌停总开关与分档判定方案.md）
+Status: accepted（2026-10-22 grill 定案；同日已实施：全量 283 测试绿、真库冒烟通过）
 
 ## Context
 

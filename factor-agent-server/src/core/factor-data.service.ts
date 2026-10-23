@@ -108,6 +108,28 @@ export interface QuoteRow {
   close: number;
   /** 前复权昨收盘（涨跌停判定基准） */
   preClose: number;
+  /** 前复权口径官方涨停价（mkt_limit 按同日调整因子换算；缺省/null = 官方表缺行，判定降级跳过） */
+  limitUp?: number | null;
+  /** 前复权口径官方跌停价（同上） */
+  limitDown?: number | null;
+}
+
+/** 官方涨跌停价（未复权）→ 前复权口径：同日所有价格共用同一调整因子，
+ *  factor = 前复权昨收 / 原始昨收（mkt_equd.PRE_CLOSE_PRICE，已验证与 mkt_limit.PRE_CLOSE_PRICE 一致）。
+ *  数学上等价于把执行价换回未复权再比官方价（ADR-0009）。
+ *  侧价格为 null 或无原始昨收可换算 → 该侧 null（引擎缺行降级：不判、计数） */
+export function scaleLimitPrices(
+  adjPreClose: number,
+  rawPreClose: number | null,
+  limitUpRaw: number | null,
+  limitDownRaw: number | null,
+): { limitUp: number | null; limitDown: number | null } {
+  if (rawPreClose === null || !(rawPreClose > 0) || !(adjPreClose > 0)) return { limitUp: null, limitDown: null };
+  const k = adjPreClose / rawPreClose;
+  return {
+    limitUp: limitUpRaw === null ? null : limitUpRaw * k,
+    limitDown: limitDownRaw === null ? null : limitDownRaw * k,
+  };
 }
 
 /** 指数日线一行 */

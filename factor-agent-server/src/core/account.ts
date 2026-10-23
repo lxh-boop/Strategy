@@ -1,8 +1,6 @@
 import { ApiException } from '../common/api.exception';
 import {
   evalRuleCond,
-  LIMIT_DOWN_RATIO,
-  LIMIT_UP_RATIO,
   LOT_SIZE,
   type StrategyKeepRule,
   type StrategySellRule,
@@ -15,11 +13,14 @@ import {
       策略语义（目标市值、最小建仓仓位、候选排序）仍属引擎。
    ========================================================== */
 
-/** 个股行情（引擎装载/懒加载后查表用） */
+/** 个股行情（引擎装载/懒加载后查表用）；limitUp/limitDown 为前复权口径官方涨跌停价，
+ *  null = 官方表缺行（判定降级：不判、计数） */
 export interface Quote {
   open: number | null;
   close: number;
   preClose: number;
+  limitUp: number | null;
+  limitDown: number | null;
 }
 
 export interface Position {
@@ -41,6 +42,12 @@ export interface AccountConfig {
   feeRate: number;
   /** 交易笔数护栏（触达即抛；触发引擎用） */
   tradeLimit?: { max: number; message: string };
+  /** 涨跌停总开关（ADR-0009，缺省 true）：开启=所有买卖动作过官方分档涨跌停闸
+   *  （执行价≥涨停价不买、≤跌停价不卖）；false=对照模式，涨跌停价照常成交 */
+  limitUpDownSkip?: boolean;
+  /** 官方涨跌停价解析（前复权口径）：返回 undefined = 该票当日无行情行（停牌/缺行，不判、计数）。
+   *  开关开启时由引擎注入；缺省未注入 = 全部按缺行降级 */
+  limitPricesOf?: (code: string, day: number) => Pick<Quote, 'limitUp' | 'limitDown'> | undefined;
 }
 
 /** 价格解析回调：返回 undefined = 该标的当日不可交易（停牌/无行情） */
@@ -52,9 +59,43 @@ export class Account {
   private readonly tradeLog: StrategyTrade[] = [];
   private readonly lastCloseBook = new Map<string, number>();
   private dayTurnover = 0;
+  /** 涨跌停闸拒成交笔数（触及涨停拒买/触及跌停拒卖） */
+  private limitBlocked = 0;
+  /** 涨跌停缺行降级笔数（官方价缺行，该笔未判照常成交） */
+  private limitNoData = 0;
 
   constructor(initialCapital: number, private readonly config: AccountConfig) {
     this.cashValue = initialCapital;
+  }
+
+  /** 涨跌停闸（ADR-0009）：开关开启时，执行价触及官方涨停价拒买、触及跌停价拒卖。
+   *  官方价缺行（无行情行/该侧价格 null）→ 该笔不判照常成交并计入缺行计数。
+   *  返回 false = 拒绝该笔成交（调用方顺延/跳过，与既有停牌顺延同型） */
+  private passLimitGate(code: string, day: number, price: number, side: 'buy' | 'sell'): boolean {
+    if (this.config.limitUpDownSkip === false) return true;
+    const lp = this.config.limitPricesOf?.(code, day);
+    if (!lp) {
+      this.limitNoData += 1;
+      return true;
+    }
+    const limit = side === 'buy' ? lp.limitUp : lp.limitDown;
+    if (limit === null || limit === undefined || !(limit > 0)) {
+      this.limitNoData += 1;
+      return true;
+    }
+    if (side === 'buy' ? price >= limit : price <= limit) {
+      this.limitBlocked += 1;
+      return false;
+    }
+    return true;
+  }
+
+  limitBlockedCount(): number {
+    return this.limitBlocked;
+  }
+
+  limitNoDataCount(): number {
+    return this.limitNoData;
   }
 
   cash(): number {
@@ -110,8 +151,9 @@ export class Account {
     return t;
   }
 
-  /** 买入记账：扣费入账、加权成本、T+1 锁定按最近买入日、成交明细一行 */
+  /** 买入记账：涨跌停闸 → 扣费入账、加权成本、T+1 锁定按最近买入日、成交明细一行 */
   buy(code: string, shares: number, price: number, day: number, dayIdx: number, reason: string): void {
+    if (!this.passLimitGate(code, day, price, 'buy')) return;
     const amount = shares * price;
     const fee = amount * this.config.feeRate;
     this.cashValue -= amount + fee;
@@ -133,6 +175,7 @@ export class Account {
   }
 
   sell(pos: Position, shares: number, price: number, day: number, reason: string): void {
+    if (!this.passLimitGate(pos.code, day, price, 'sell')) return;
     const amount = shares * price;
     const fee = amount * this.config.feeRate;
     this.cashValue += amount - fee;
@@ -165,7 +208,7 @@ export class Account {
   /**
    * 总仓位拉回：目标总仓位 = 权益 × targetPct%，偏离超 bandPct% 才动作。
    * 减仓按市值占比分摊、只卖未 T+1 锁定仓；加仓按市值占比整手、现金封顶；
-   * 停牌/涨跌停顺延。模型 Ⅰ 择时缩放块与模型 Ⅱ 偏离带再平衡同源于此。
+   * 停牌顺延、涨跌停闸内建（ADR-0009）。模型 Ⅰ 择时缩放块与模型 Ⅱ 偏离带再平衡同源于此。
    */
   rebalanceToTotal(
     targetPct: number,
@@ -175,10 +218,6 @@ export class Account {
     labels: { trim: string; add: string },
     ctx: {
       priceOf: PriceOf;
-      /** 可卖判定（跌停为 false） */
-      canSell: (code: string, price: number) => boolean;
-      /** 可买判定（涨停为 false） */
-      canBuy: (code: string, price: number) => boolean;
     },
   ): void {
     const equity0 = this.equity(ctx.priceOf);
@@ -196,7 +235,7 @@ export class Account {
       for (const pos of unlocked) {
         const price = ctx.priceOf(pos.code);
         if (price === undefined) continue; // 停牌顺延
-        if (!ctx.canSell(pos.code, price)) continue; // 跌停顺延
+        if (!this.passLimitGate(pos.code, day, price, 'sell')) continue; // 跌停拒卖（闸内建）
         const mv = pos.shares * price;
         let shares = Math.floor(((mv / (unlockMv || 1)) * need) / price / LOT_SIZE) * LOT_SIZE;
         if (shares > pos.shares) shares = pos.shares; // 最后一仓允许整仓卖出
@@ -210,7 +249,7 @@ export class Account {
       for (const pos of this.allPositions()) {
         const price = ctx.priceOf(pos.code);
         if (price === undefined) continue; // 停牌顺延
-        if (!ctx.canBuy(pos.code, price)) continue; // 涨停顺延
+        if (!this.passLimitGate(pos.code, day, price, 'buy')) continue; // 涨停拒买（闸内建）
         const mv = pos.shares * price;
         let shares = Math.floor(((mv / invested) * add) / price / LOT_SIZE) * LOT_SIZE;
         const affordable = this.affordableShares(price);

@@ -14,6 +14,7 @@ import {
   IndexDailyRow,
   IndexFieldRow,
   QuoteRow,
+  scaleLimitPrices,
   SECURITY_RE,
   TradeDateCoverage,
 } from '../factor-data.service';
@@ -261,18 +262,30 @@ export class MysqlFactorDataService extends FactorDataService {
       const params: (string | number)[] = [startDash, endDash];
       for (const c of chunk) params.push(c.ticker, c.exchange);
       const sql =
-        `SELECT TICKER_SYMBOL, EXCHANGE_CD, TRADE_DATE, OPEN_PRICE_1, CLOSE_PRICE_1, PRE_CLOSE_PRICE_1 FROM \`${QUOTE_TABLE}\` ` +
-        `WHERE TRADE_DATE BETWEEN ? AND ? AND CLOSE_PRICE_1 IS NOT NULL AND PRE_CLOSE_PRICE_1 IS NOT NULL ` +
-        `AND (TICKER_SYMBOL, EXCHANGE_CD) IN (${placeholders}) ORDER BY TRADE_DATE`;
+        `SELECT a.TICKER_SYMBOL, a.EXCHANGE_CD, a.TRADE_DATE, a.OPEN_PRICE_1, a.CLOSE_PRICE_1, a.PRE_CLOSE_PRICE_1, ` +
+        `m.LIMIT_UP_PRICE, m.LIMIT_DOWN_PRICE, r.PRE_CLOSE_PRICE AS RAW_PRE_CLOSE FROM \`${QUOTE_TABLE}\` a ` +
+        `LEFT JOIN mkt_equd r ON r.TICKER_SYMBOL = a.TICKER_SYMBOL AND r.EXCHANGE_CD = a.EXCHANGE_CD AND r.TRADE_DATE = a.TRADE_DATE ` +
+        `LEFT JOIN mkt_limit m ON m.TICKER_SYMBOL = a.TICKER_SYMBOL AND m.EXCHANGE_CD = a.EXCHANGE_CD AND m.TRADE_DATE = a.TRADE_DATE ` +
+        `WHERE a.TRADE_DATE BETWEEN ? AND ? AND a.CLOSE_PRICE_1 IS NOT NULL AND a.PRE_CLOSE_PRICE_1 IS NOT NULL ` +
+        `AND (a.TICKER_SYMBOL, a.EXCHANGE_CD) IN (${placeholders}) ORDER BY a.TRADE_DATE`;
       const rows = await this.query(sql, params);
       for (const row of rows as Record<string, unknown>[]) {
+        const adjPreClose = toNum(row.PRE_CLOSE_PRICE_1);
+        const { limitUp, limitDown } = scaleLimitPrices(
+          adjPreClose,
+          row.RAW_PRE_CLOSE === null || row.RAW_PRE_CLOSE === undefined ? null : toNum(row.RAW_PRE_CLOSE),
+          row.LIMIT_UP_PRICE === null || row.LIMIT_UP_PRICE === undefined ? null : toNum(row.LIMIT_UP_PRICE),
+          row.LIMIT_DOWN_PRICE === null || row.LIMIT_DOWN_PRICE === undefined ? null : toNum(row.LIMIT_DOWN_PRICE),
+        );
         all.push({
           ticker: String(row.TICKER_SYMBOL),
           exchange: String(row.EXCHANGE_CD),
           tradeDate: String(row.TRADE_DATE),
           open: row.OPEN_PRICE_1 === null ? null : toNum(row.OPEN_PRICE_1),
           close: toNum(row.CLOSE_PRICE_1),
-          preClose: toNum(row.PRE_CLOSE_PRICE_1),
+          preClose: adjPreClose,
+          limitUp,
+          limitDown,
         });
       }
     }

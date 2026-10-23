@@ -132,14 +132,13 @@ describe('仓位维持 keepFullyInvested（ADR-0008：默认 false = 掘金对�
         sellRules: [{ kind: 'field', table: 'equ_factor_obos', field: 'BIAS20', op: '<', value: 0 }],
       }),
     );
-    console.log('DEBUG trades:', JSON.stringify(out.card.trades));
     const adds = (out.card.trades ?? []).filter((t) => t.reason === '择时加仓');
     expect(adds.length).toBeGreaterThanOrEqual(1);
     expect(adds.every((t) => t.code === CODE_B)).toBe(true);
   });
 });
 
-describe('涨跌停顺延 limitUpDownSkip（ADR-0008：默认 false = 掘金对齐语义）', () => {
+describe('涨跌停判定 limitUpDownSkip（ADR-0009：缺省 true=开启，官方分档价随行情行注入）', () => {
   const limitUpFixture = (): Fixture => ({
     revs20: {
       20240102: { [CODE_A]: 1.5 },
@@ -153,26 +152,35 @@ describe('涨跌停顺延 limitUpDownSkip（ADR-0008：默认 false = 掘金对�
       20240104: { [CODE_A]: 1.0 },
       20240105: { [CODE_A]: 1.0 },
     },
-    quotes: [
-      ...quotesFor(CODE_A, [
-        [20240102, { o: 10, c: 10, pc: 10 }],
-        [20240103, { o: 11.1, c: 11.1, pc: 10 }], // 开盘涨停（≥10×1.0999）
-        [20240104, { o: 11.1, c: 11.1, pc: 11.1 }],
-        [20240105, { o: 11.1, c: 11.1, pc: 11.1 }],
-      ]),
-    ],
+    quotes: quotesFor(CODE_A, [
+      [20240102, { o: 10, c: 10, pc: 10 }],
+      [20240103, { o: 11.1, c: 11.1, pc: 10 }], // 开盘即官方涨停价（limitUp=11.1，触及不成交）
+      [20240104, { o: 11.1, c: 11.1, pc: 11.1 }],
+      [20240105, { o: 11.1, c: 11.1, pc: 11.1 }],
+    ]).map((r) => (r.tradeDate === '2024-01-03' ? { ...r, limitUp: 11.1, limitDown: 9 } : r)),
   });
 
-  it('缺省 false：涨停价照常成交（掘金对齐语义）', async () => {
+  it('缺省 true：触及官方涨停价不追（跳过该候选）', async () => {
     const svc = makeService(limitUpFixture());
     const out = await svc.runStrategyBacktest(assertStrategyInput(base));
+    expect((out.card.trades ?? []).filter((t) => t.reason === '调仓建仓')).toHaveLength(0);
+  });
+
+  it('limitUpDownSkip=false（对照模式）：涨停价照常成交', async () => {
+    const svc = makeService(limitUpFixture());
+    const out = await svc.runStrategyBacktest(assertStrategyInput({ ...base, limitUpDownSkip: false }));
     expect((out.card.trades ?? []).filter((t) => t.reason === '调仓建仓')).toHaveLength(1);
   });
 
-  it('limitUpDownSkip=true：涨停价不追（跳过该候选）', async () => {
+  it('官方价缺行降级：开关开启但行情行无 limitUp → 照常成交并计数', async () => {
     const svc = makeService(limitUpFixture());
-    const out = await svc.runStrategyBacktest(assertStrategyInput({ ...base, limitUpDownSkip: true }));
-    expect((out.card.trades ?? []).filter((t) => t.reason === '调仓建仓')).toHaveLength(0);
+    const out = await svc.runStrategyBacktest(assertStrategyInput(base));
+    // 上面同款面板已含官方价——这里构造无官方价版本验证降级
+    const noLimitFixture = limitUpFixture();
+    noLimitFixture.quotes = noLimitFixture.quotes.map((r) => ({ ...r, limitUp: null, limitDown: null }));
+    const svc2 = makeService(noLimitFixture);
+    const out2 = await svc2.runStrategyBacktest(assertStrategyInput(base));
+    expect((out2.card.trades ?? []).filter((t) => t.reason === '调仓建仓')).toHaveLength(1);
   });
 });
 
