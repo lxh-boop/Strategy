@@ -500,7 +500,7 @@ export class LangGraphAgentService extends AgentService {
           ...(entryDelegated ? { backtestDelegated: true } : {}),
           messages: await this.prepareMessages(conversation, userText),
         },
-        { configurable: { thread_id: threadId, onProgress }, recursionLimit: 15 },
+        { configurable: { thread_id: threadId, onProgress }, recursionLimit: 30 },
       );
       const reply = await this.collectReply(state, conversation.id, threadId, onProgress);
       // 回复完成后滚动摘要维护（ADR-0007）：不挡响应、不抛，失败仅日志（无损不变式保证下轮仍正确）
@@ -542,7 +542,7 @@ export class LangGraphAgentService extends AgentService {
     onProgress?.({ type: 'start' });
     const state = await this.app!.invoke(new Command({ resume: decision }), {
       configurable: { thread_id: threadId, onProgress },
-      recursionLimit: 15,
+      recursionLimit: 30,
     });
     const reply = await this.collectReply(state, conversation.id, threadId, onProgress);
     // 确认门恢复也是完整一轮：滚动摘要维护同 runGraph（ADR-0007）
@@ -1359,9 +1359,9 @@ export class LangGraphAgentService extends AgentService {
     const flow = catalog.length
       ? '工具流程：数据表目录已附在本提示末尾，直接从中选定数据表，再调 list_factor_fields 查看该表的因子字段' +
         '（表名只能来自目录，字段名只能来自 list_factor_fields 的返回，禁止凭记忆编造），' +
-        '然后按需调用 read_factor_data 查单点数据、或 run_strategy_backtest 跑策略回测——各工具的参数含义与约束以工具 schema 为准。'
+        '然后按需调用 read_factor_data 查单点数据、或 run_strategy_backtest 跑策略回测——各工具的参数含义与约束以工具 schema 为准。无依赖的调用合并到一条消息批量发起（如同时查多张表的字段、同时抽多个日期的值域）。'
       : '工具流程：先 list_factor_tables 看有哪些表、list_factor_fields 看因子字段（表名/字段名只能来自这两个工具的返回，禁止凭记忆编造），' +
-        '再按需调用 read_factor_data 查单点数据、或 run_strategy_backtest 跑策略回测——各工具的参数含义与约束以工具 schema 为准。';
+        '再按需调用 read_factor_data 查单点数据、或 run_strategy_backtest 跑策略回测——各工具的参数含义与约束以工具 schema 为准。无依赖的调用合并到一条消息批量发起（如同时查多张表的字段、同时抽多个日期的值域）。';
     const memoryBlock = await this.buildMemoryBlock(conversation);
     const system = [
       // 模型不知道当前时间："最近两年/今年/去年"等相对时间表达靠这行换算成具体日期，
