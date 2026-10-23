@@ -158,10 +158,10 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
         '触发模式（模型 Ⅱ）暂不支持权重/仓位函数与股票池筛选，请改用定期调仓模式',
       );
     }
-    // 池规格预检：未知行业/指数 → 澄清信号附名录（模型自纠后重发）
+    // 池规格预检：未知字段值/指数 → 澄清信号指路去重读（模型自纠后重发，ADR-0011）
     if (p.pool) {
-      const { unknownIndustry, unknownIndex } = await industryEngine().resolvePoolSpec(p.pool.groups, Number(p.startDate));
-      if (unknownIndustry.length) throw new ClarificationSignal(await industryEngine().industryClarificationGuide(unknownIndustry));
+      const { unknownField, unknownIndex } = await industryEngine().resolvePoolSpec(p.pool.groups, Number(p.startDate));
+      if (unknownField.length) throw new ClarificationSignal(industryEngine().fieldClarificationGuide(unknownField));
       if (unknownIndex.length) throw new ClarificationSignal(await industryEngine().indexClarificationGuide(unknownIndex));
     }
 
@@ -537,11 +537,11 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
     const icByFactor = weightBinding?.icWindow
       ? await this.computeRollingIC(p.sortFactors, queryDate, weightBinding.icWindow)
       : undefined;
-    // 池规格（PIT）：查询日组内并集、组间交集，与显式股票池取交集；未知行业/指数 → 澄清附名录
+    // 池规格（PIT）：查询日组内并集、组间交集，与显式股票池取交集；未知字段值/指数 → 澄清指路去重读
     let industryPool = p.securityIds;
     if (poolGroups.length) {
-      const { securities, unknownIndustry, unknownIndex } = await industryEngine().resolvePoolSpec(poolGroups, queryDate);
-      if (unknownIndustry.length) throw new ClarificationSignal(await industryEngine().industryClarificationGuide(unknownIndustry));
+      const { securities, unknownField, unknownIndex } = await industryEngine().resolvePoolSpec(poolGroups, queryDate);
+      if (unknownField.length) throw new ClarificationSignal(industryEngine().fieldClarificationGuide(unknownField));
       if (unknownIndex.length) throw new ClarificationSignal(await industryEngine().indexClarificationGuide(unknownIndex));
       industryPool = securities.filter((c) => !p.securityIds || p.securityIds.includes(c));
     }

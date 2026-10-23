@@ -18,12 +18,15 @@ import { StrategyBacktestServiceImpl } from '../../../src/core/implementations/s
 
 // 行业/池引擎 stub：不触 DuckDB（factory 内字面量，hoist 作用域限制不引外部变量）
 jest.mock('../../../src/core/industry-engine', () => ({
-  resolvePoolSpec: async (groups: Array<{ kind: string; names?: string[] }>) => ({
+  resolvePoolSpec: async (groups: Array<{ kind: string; values?: string[] }>) => ({
     securities: ['000001.XSHE', '000002.XSHE'],
-    unknownIndustry: groups.filter((g) => g.kind === 'industry').flatMap((g) => g.names ?? []).filter((n) => n === '不存在行业'),
+    unknownField: groups
+      .filter((g) => g.kind === 'field')
+      .map((g) => ({ table: 'sw_member', field: 'l1_name', values: (g.values ?? []).filter((n) => n === '不存在行业') }))
+      .filter((u) => u.values.length),
     unknownIndex: [] as string[],
   }),
-  industryClarificationGuide: async () => ({ 请从申万一级行业名录重选: true }),
+  fieldClarificationGuide: () => ({ 请用去重读核对字段可用值: true }),
   indexClarificationGuide: async () => ({ 请修正指数代码: true }),
 }));
 
@@ -624,7 +627,7 @@ describe('股票池筛选入卡（pool 摘要即参数，回测卡不再误报�
   it('池模式：卡片与摘要股票池 = 筛选摘要+成员数，全文不再出现"全市场"', async () => {
     const service = makeService({ momentum, quotes: defaultQuotes() });
     const out = await service.runStrategyBacktest({
-      pool: { groups: [{ kind: 'industry', names: ['有色金属'] }], summary: '有色金属', memberCount: 2 },
+      pool: { groups: [{ kind: 'field', table: 'sw_member', field: 'l1_name', values: ['有色金属'] }], summary: '有色金属', memberCount: 2 },
       startDate: '20240101',
       endDate: '20240108',
       initialCapital: 100_000,
@@ -642,7 +645,7 @@ describe('股票池筛选入卡（pool 摘要即参数，回测卡不再误报�
     const service = makeService({ momentum, quotes: defaultQuotes() });
     const out = await service.runStrategyBacktest({
       securityIds: ['000001.XSHE', '000002.XSHE'],
-      pool: { groups: [{ kind: 'industry', names: ['有色金属'] }], summary: '有色金属', memberCount: 2 },
+      pool: { groups: [{ kind: 'field', table: 'sw_member', field: 'l1_name', values: ['有色金属'] }], summary: '有色金属', memberCount: 2 },
       startDate: '20240101',
       endDate: '20240108',
       initialCapital: 100_000,
@@ -653,11 +656,11 @@ describe('股票池筛选入卡（pool 摘要即参数，回测卡不再误报�
     expect(out.summary.股票池).toBe('有色金属（2 只）∩2 只清单');
   });
 
-  it('未知行业 → ClarificationSignal（预检语义不回归）', async () => {
+  it('未知字段值 → ClarificationSignal（预检语义不回归）', async () => {
     const service = makeService({ momentum, quotes: defaultQuotes() });
     await expect(
       service.runStrategyBacktest({
-        pool: { groups: [{ kind: 'industry', names: ['不存在行业'] }], summary: '不存在行业', memberCount: 0 },
+        pool: { groups: [{ kind: 'field', table: 'sw_member', field: 'l1_name', values: ['不存在行业'] }], summary: '不存在行业', memberCount: 0 },
         startDate: '20240101',
         endDate: '20240108',
         initialCapital: 100_000,

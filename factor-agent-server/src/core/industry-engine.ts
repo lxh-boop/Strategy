@@ -6,11 +6,12 @@ import { DuckDBInstance, DuckDBConnection, DuckDBValue } from '@duckdb/node-api'
 import type { FactorDataRow, FactorTableQuery } from './factor-data.service';
 
 /* ==========================================================
-   引擎 B（行业数据，ADR-0004 最小集）：
+   引擎 B（行业数据，ADR-0004 最小集；筛选字段化 ADR-0011）：
    - DuckDB 单文件库（SQL/industry/industry.duckdb，gitignore），
      启动/首查时从同目录 CSV 建表导入（源 mtime 新于库文件则重建）
-   - resolveIndustrySecurities：industries + 决策日 → 时点归属证券清单（PIT，
-     in_date ≤ D ≤ out_date，out_date 空 = 仍在册；证券后缀映射为引擎 A 口径）
+   - resolveFieldSecurities：可筛维度表字段值 + 决策日 → 时点归属证券清单（PIT，
+     注册表声明时点列；证券后缀映射为引擎 A 口径）
+   - industryFieldValues：去重读（值发现）——单字段去重取值 + keyword 收窄
    - industryReadTable：read_factor_data 的行业表路由实现（同一查表契约）
    与引擎 A 的分工：本引擎只服务 SQL/industry/tables.md 登记的行业域表。
    ========================================================== */
@@ -23,11 +24,17 @@ const DB_FILE = path.join(INDUSTRY_DIR, 'industry.duckdb');
 /** 行业域表清单（字典即路由的读取侧登记处） */
 export const INDUSTRY_TABLES = ['sw_classify', 'sw_member'] as const;
 
-/** 池规格的来源组：组内并集、组间交集（ADR-0006） */
+/** 池规格的来源组：组内并集、组间交集（ADR-0006/0011）：工具与引擎不感知行业与级别概念，粒度由字段名承载 */
 export type PoolGroup =
-  | { kind: 'industry'; names: string[] }
+  | { kind: 'field'; table: string; field: string; values: string[] }
   | { kind: 'index'; codes: string[] }
   | { kind: 'list'; ids: string[] };
+
+/** 可筛维度表注册表（ADR-0011）：注册只闸池来源——每张表声明证券代码列与时点列，
+ *  读数与值发现走统一查表路由不受此限。首批仅 sw_member；新增来源 = 注册一行，工具与提示词零改动。 */
+export const SCREENABLE_TABLES: Record<string, { codeColumn: string; pit: { in: string; out: string } | null }> = {
+  sw_member: { codeColumn: 'ts_code', pit: { in: 'in_date', out: 'out_date' } },
+};
 
 /** 常用指数代码 → 展示名（摘要与澄清指引用；库内有成分数据的指数不止这些） */
 export const INDEX_NAMES: Record<string, string> = {
@@ -107,48 +114,94 @@ function toRows(rows: Array<Record<string, unknown>>): FactorDataRow[] {
   return JSON.parse(JSON.stringify(rows, (_k, v) => (typeof v === 'bigint' ? Number(v) : v))) as FactorDataRow[];
 }
 
-/** 决策日 D 的时点归属：industries（申万一级行业名）→ 证券清单（引擎 A 口径后缀）。
- *  未识别的行业名单独返回（调用方决定澄清/忽略）。 */
-export async function resolveIndustrySecurities(
-  industries: string[],
+/** 表字段存在性校验：表名来自白名单/注册表（无注入面），字段名拼 SQL 前先对真实列核对 */
+async function assertTableColumn(table: string, field: string): Promise<void> {
+  const conn = await getConn();
+  const cols = await conn.runAndReadAll(`DESCRIBE ${table}`);
+  const names = new Set((cols.getRowObjects() as Array<{ column_name: string }>).map((r) => r.column_name));
+  if (!names.has(field)) {
+    throw new ApiException('INVALID_ARGUMENT', 400, `字段 ${field} 不在表 ${table} 中：请先 list_factor_fields(${table}) 核对列名`);
+  }
+}
+
+/** 决策日 D 的字段值归属：可筛维度表 field ∈ values → 证券清单（注册表 PIT 归属，ADR-0011）。
+ *  未命中的值单独返回（调用方指路去重读，不内嵌名录）。 */
+export async function resolveFieldSecurities(
+  table: string,
+  field: string,
+  values: string[],
   asOfDate: number,
 ): Promise<{ securities: string[]; unknown: string[] }> {
-  if (!industries.length) return { securities: [], unknown: [] };
+  const reg = SCREENABLE_TABLES[table];
+  if (!reg) {
+    throw new ApiException('INVALID_ARGUMENT', 400, `表 ${table} 未注册为可筛维度表：可选 ${Object.keys(SCREENABLE_TABLES).join('、')}`);
+  }
+  if (!values.length) return { securities: [], unknown: [] };
+  await assertTableColumn(table, field);
   const conn = await getConn();
   const asOf = String(asOfDate);
-  const nameReader = await conn.runAndReadAll(
-    "SELECT DISTINCT industry_name FROM sw_classify WHERE level = 'L1'",
-  );
-  const validNames = new Set((nameReader.getRowObjects() as Array<{ industry_name: string }>).map((r) => r.industry_name));
-  const unknown = industries.filter((n) => !validNames.has(n));
-  const placeholders = industries.map(() => '?').join(', ');
+  const allReader = await conn.runAndReadAll(`SELECT DISTINCT "${field}" AS v FROM ${table}`);
+  const known = new Set((allReader.getRowObjects() as Array<{ v: unknown }>).map((r) => String(r.v ?? '')));
+  const unknown = values.filter((v) => !known.has(v));
+  const placeholders = values.map(() => '?').join(', ');
+  const pitConds = reg.pit
+    ? ` AND CAST(${reg.pit.in} AS VARCHAR) <= ?` +
+      ` AND (${reg.pit.out} IS NULL OR CAST(${reg.pit.out} AS VARCHAR) = '' OR CAST(${reg.pit.out} AS VARCHAR) >= ?)`
+    : '';
+  const params: DuckDBValue[] = [...values];
+  if (reg.pit) params.push(asOf, asOf);
   const reader = await conn.runAndReadAll(
-    `SELECT DISTINCT m.ts_code FROM sw_member m
-     JOIN sw_classify c ON c.index_code = m.l1_code
-     WHERE c.level = 'L1' AND c.industry_name IN (${placeholders})
-       AND CAST(m.in_date AS VARCHAR) <= ?
-       AND (m.out_date IS NULL OR CAST(m.out_date AS VARCHAR) = '' OR CAST(m.out_date AS VARCHAR) >= ?)`,
-    [...industries, asOf, asOf] as DuckDBValue[],
+    `SELECT DISTINCT ${reg.codeColumn} AS code FROM ${table} WHERE "${field}" IN (${placeholders})${pitConds}`,
+    params,
   );
   const securities: string[] = [];
-  for (const row of reader.getRowObjects() as Array<{ ts_code: string }>) {
-    const mapped = toEngineSecurity(row.ts_code);
+  for (const row of reader.getRowObjects() as Array<{ code: string }>) {
+    const mapped = toEngineSecurity(row.code);
     if (mapped) securities.push(mapped);
   }
   return { securities, unknown };
 }
 
-/** 未识别行业的澄清指引（engine 回执/确认门共用） */
-export async function industryClarificationGuide(industries: string[]): Promise<Record<string, unknown>> {
-  const conn = await getConn();
-  const reader = await conn.runAndReadAll(
-    "SELECT industry_name FROM sw_classify WHERE level = 'L1' ORDER BY industry_name",
-  );
-  const names = (reader.getRowObjects() as Array<{ industry_name: string }>).map((r) => r.industry_name);
+/** 未命中字段值的澄清指引（指路不铺路，ADR-0011）：回执只给查询方法，不内嵌名录 */
+export function fieldClarificationGuide(
+  unknowns: Array<{ table: string; field: string; values: string[] }>,
+): Record<string, unknown> {
+  const detail = unknowns.map((u) => `${u.table}.${u.field} 中不存在这些值：${u.values.join('、')}`).join('；');
   return {
-    需要澄清: `以下行业名不在申万 2021 一级行业中：${industries.join('、')}。请从名录中修正后重试`,
-    可用行业: names.join('、'),
+    需要澄清:
+      `${detail}。请先用 read_factor_data 去重读核对该字段可用值（传 table + distinct=字段名，可用 keyword 收窄），` +
+      '再用确切值重新筛选',
   };
+}
+
+/** 值发现上限（去重读结果都是短标签，346 个三级名也在顶内；keyword 收窄仍建议） */
+export const FIELD_VALUES_CAP = 500;
+
+/** 值发现（去重读的引擎侧实现，ADR-0011）：单字段去重取值 + keyword 包含收窄 */
+export async function industryFieldValues(
+  table: string,
+  field: string,
+  keyword?: string,
+): Promise<{ values: string[]; truncated: boolean }> {
+  await assertTableColumn(table, field);
+  const conn = await getConn();
+  const conds: string[] = [];
+  const params: DuckDBValue[] = [];
+  if (keyword) {
+    conds.push(`CAST("${field}" AS VARCHAR) LIKE ?`);
+    params.push(`%${keyword}%`);
+  }
+  const where = conds.length ? ` WHERE ${conds.join(' AND ')}` : '';
+  const reader = await conn.runAndReadAll(
+    `SELECT DISTINCT "${field}" AS v FROM ${table}${where} ORDER BY v LIMIT ${FIELD_VALUES_CAP + 1}`,
+    params,
+  );
+  const rows = reader.getRowObjects() as Array<{ v: unknown }>;
+  const values = rows
+    .slice(0, FIELD_VALUES_CAP)
+    .map((r) => String(r.v ?? '').trim())
+    .filter(Boolean);
+  return { values, truncated: rows.length > FIELD_VALUES_CAP };
 }
 
 /* ----- 池规格解析（ADR-0006）：组内并集、组间交集，成员逐决策日时点归属 ----- */
@@ -220,10 +273,21 @@ export function assertPoolGroups(raw: unknown): PoolGroup[] {
     const kind = g?.kind;
     const list = (key: string): string[] =>
       [...new Set((Array.isArray(g?.[key]) ? (g[key] as unknown[]) : []).map((v) => String(v ?? '').trim()).filter(Boolean))];
-    if (kind === 'industry') {
-      const names = list('names');
-      if (!names.length) throw new ApiException('INVALID_ARGUMENT', 400, 'industry 组的 names 必须是非空行业名数组（如 ["食品饮料"]）');
-      return { kind: 'industry', names };
+    if (kind === 'field') {
+      const table = typeof g?.table === 'string' ? g.table.trim() : '';
+      const field = typeof g?.field === 'string' ? g.field.trim() : '';
+      const values = list('values');
+      if (!table || !field || !values.length) {
+        throw new ApiException(
+          'INVALID_ARGUMENT',
+          400,
+          'field 组需要 table + field + values（如 { kind:"field", table:"sw_member", field:"l2_name", values:["白酒"] }）',
+        );
+      }
+      if (!SCREENABLE_TABLES[table]) {
+        throw new ApiException('INVALID_ARGUMENT', 400, `表 ${table} 未注册为可筛维度表：可选 ${Object.keys(SCREENABLE_TABLES).join('、')}`);
+      }
+      return { kind: 'field', table, field, values };
     }
     if (kind === 'index') {
       const codes = list('codes');
@@ -235,14 +299,14 @@ export function assertPoolGroups(raw: unknown): PoolGroup[] {
       if (!ids.length) throw new ApiException('INVALID_ARGUMENT', 400, 'list 组的 ids 必须是非空证券代码数组（如 ["000002.XSHE"]）');
       return { kind: 'list', ids };
     }
-    throw new ApiException('INVALID_ARGUMENT', 400, `筛选组 kind 只允许 industry / index / list: ${String(kind)}`);
+    throw new ApiException('INVALID_ARGUMENT', 400, `筛选组 kind 只允许 field / index / list: ${String(kind)}`);
   });
 }
 
-/** 规格 → 展示摘要（筛选工具回执与回测卡共用同一口径）：组内 ∪、组间 ∩ */
+/** 规格 → 展示摘要（筛选工具回执与回测卡共用同一口径）：组内 ∪、组间 ∩；只拼值，表名字段名不进展示层 */
 export function describePoolSpec(groups: PoolGroup[]): string {
   const describeGroup = (g: PoolGroup): string => {
-    if (g.kind === 'industry') return g.names.join('∪');
+    if (g.kind === 'field') return g.values.join('∪');
     if (g.kind === 'index') return g.codes.map((c) => INDEX_NAMES[c] ?? c).join('∪');
     return `点名${g.ids.length}只`;
   };
@@ -250,22 +314,22 @@ export function describePoolSpec(groups: PoolGroup[]): string {
 }
 
 /** 规格解析：每组来源组内并集，组间取交集。
- *  未识别行业/指数单独返回（调用方决定澄清，不污染已识别组）。 */
+ *  未命中字段值/未知指数单独返回（调用方决定澄清，不污染已识别组）。 */
 export async function resolvePoolSpec(
   groups: PoolGroup[],
   asOfDate: number,
-): Promise<{ securities: string[]; unknownIndustry: string[]; unknownIndex: string[] }> {
+): Promise<{ securities: string[]; unknownField: Array<{ table: string; field: string; values: string[] }>; unknownIndex: string[] }> {
   const groupSets: Set<string>[] = [];
-  const unknownIndustry: string[] = [];
+  const unknownField: Array<{ table: string; field: string; values: string[] }> = [];
   const unknownIndex: string[] = [];
   for (const g of groups) {
     if (g.kind === 'list') {
       groupSets.push(new Set(g.ids));
       continue;
     }
-    if (g.kind === 'industry') {
-      const { securities, unknown } = await resolveIndustrySecurities(g.names, asOfDate);
-      unknownIndustry.push(...unknown);
+    if (g.kind === 'field') {
+      const { securities, unknown } = await resolveFieldSecurities(g.table, g.field, g.values, asOfDate);
+      if (unknown.length) unknownField.push({ table: g.table, field: g.field, values: unknown });
       groupSets.push(new Set(securities));
       continue;
     }
@@ -273,9 +337,9 @@ export async function resolvePoolSpec(
     unknownIndex.push(...unknown);
     groupSets.push(new Set(securities));
   }
-  if (!groupSets.length) return { securities: [], unknownIndustry, unknownIndex };
+  if (!groupSets.length) return { securities: [], unknownField, unknownIndex };
   const merged = groupSets.reduce((acc, cur) => new Set([...acc].filter((x) => cur.has(x))));
-  return { securities: [...merged], unknownIndustry, unknownIndex };
+  return { securities: [...merged], unknownField, unknownIndex };
 }
 
 /** read_factor_data 的行业表路由实现（契约同 FactorDataService.readTable）：
