@@ -60,6 +60,7 @@ const TOOL_STAGE: Record<string, string> = {
   run_factor_correlation: '因子相关性计算',
   run_daily_screen: '每日选股查询',
   screen_stock_pool: '股票池筛选',
+  list_backtest_runs: '查询回测存档',
   save_memory: '记忆维护',
 };
 
@@ -621,6 +622,7 @@ export class LangGraphAgentService extends AgentService {
     run_strategy_backtest: async (args, ctx) => this.execRunBacktest(args as StrategyBacktestInput, ctx),
     run_rank_analysis: async (args) => this.execRunRankAnalysis(args as Record<string, unknown>),
     run_factor_correlation: async (args) => this.execRunFactorCorrelation(args as Record<string, unknown>),
+    list_backtest_runs: async (_args, ctx) => this.execListBacktestRuns(ctx.conversationId),
     // 每日选股/股票池筛选：只读零副作用，不进 CONFIRMABLE（免确认，即查即得）
     run_daily_screen: async (args, ctx) => this.execRunDailyScreen(args as DailyScreenInput, ctx),
     screen_stock_pool: async (args, ctx) => this.execScreenStockPool(args as { groups?: unknown }, ctx),
@@ -1068,6 +1070,22 @@ export class LangGraphAgentService extends AgentService {
   }
 
   /** 相关性执行：白名单快检 → 矩阵 → 卡片；回执给两两系数清单（≤45 对） */
+  /** 回测存档清单（ADR-0010 F7）：编号/日期/标题索引——模型据此按编号写【展示卡片:card_N】。
+   *  只给索引级摘要，完整卡片绕过 LLM（只信卡片） */
+  private async execListBacktestRuns(conversationId: string): Promise<ToolOutcome> {
+    const runs = await this.userStore.listBacktestRuns(conversationId);
+    return {
+      result: {
+        ...(runs.length
+          ? {
+              回测存档: runs.map((r) => ({ 卡片编号: `card_${r.seq}`, 日期: r.createdDate, 标题: r.title })),
+              解读: '用户要求回看/调出某次回测时，在回复最末尾单独一行写【展示卡片:card_N】指定展示（该行不会展示给用户）',
+            }
+          : { 提示: '本会话还没有回测存档' }),
+      },
+    };
+  }
+
   private async execRunFactorCorrelation(args: Record<string, unknown>): Promise<ToolOutcome> {
     const input = this.parseFactorCorrelationArgs(args);
     this.backtest.preflight(input.refs.map((r) => ({ table: r.table, field: r.field })));
@@ -1365,8 +1383,8 @@ export class LangGraphAgentService extends AgentService {
         '结束时对比各次指标择优推荐，用【展示卡片:card_N】指定展示最优的一次；' +
         '给出优化建议后，结尾固定加一句：回复"授权调优"可按建议连续多组回测对比择优（前端会渲染授权按钮）；',
       '- 每次回测的回执带「卡片编号」（card_N = 本会话第 N 次回测，编号跨轮稳定、永不重置）：按用户意图选最符合的一次（如优化场景选指标最优的），在回复最末尾单独一行写【展示卡片:card_N】指定展示哪次（该行不会展示给用户）；只回测了一次则不写；' +
-        'card_N 必须原样引用回执或【会话回测档案】里标注的编号，禁止按"第 N 组=card_N"自行推算；' +
-        '仅当用户要求回看/调出某次历史回测时，才引用非本轮的编号（档案里有清单），本轮新回测择优一律用本轮回执的编号；',
+        'card_N 必须原样引用回执或 list_backtest_runs 查询结果里标注的编号，禁止按"第 N 组=card_N"自行推算；' +
+        '用户要求回看/列出/调出某次历史回测时，先调 list_backtest_runs 查清单再按编号引用；本轮新回测择优一律用本轮回执的编号；',
       '- 查询无数据行时如实告知，不要编造；',
       '- 长期记忆维护（save_memory）：用户陈述值得跨会话记住的稳定偏好/研究结论（如"以后只用动量因子""我习惯万三手续费"）或明说"记住 XX"时，' +
         '用 op=add 落一条（slug 起小写英文短横线名、title 一句话、content 一到两句具体事实）；' +
@@ -1374,20 +1392,7 @@ export class LangGraphAgentService extends AgentService {
         '无论增改删，最终回复里必须告知用户动了哪条记忆（一句话即可）；',
       '- 与因子数据无关的问候或闲聊：直接简短回复（不超过 90 字），不要调用工具。',
     ].join('\n');
-
-    // 会话回测档案（ADR-0010 F7）：card_N = 本会话第 N 次回测，编号跨轮稳定——
-    // 模型据此跨轮回看（引用【展示卡片:card_N】）；只给索引级摘要，完整卡片绕过 LLM
-    let prompt = catalog.length ? `${system}\n\n${formatTableCatalog(catalog)}` : system;
-    try {
-      const runs = await this.userStore.listBacktestRuns(conversation.id);
-      if (runs.length) {
-        const lines = runs.map((r) => `card_${r.seq} | ${r.createdDate} | ${r.title}`);
-        prompt += `\n\n【会话回测档案】（card_N = 本会话第 N 次回测，编号跨轮稳定；用户要求回看某次回测时，在回复最末尾单独一行写【展示卡片:card_N】指定展示，该行不会展示给用户）\n${lines.join('\n')}`;
-      }
-    } catch {
-      /* 档案读取失败不挡对话（索引缺失只影响跨轮回看） */
-    }
-    return prompt;
+    return catalog.length ? `${system}\n\n${formatTableCatalog(catalog)}` : system;
   }
 
   /** 从 LangChain 异常中提取上游可读原因（首行，截断到 120 字），如 "429 余额不足或无可用资源包,请充值." */

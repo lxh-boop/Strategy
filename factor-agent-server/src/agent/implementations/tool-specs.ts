@@ -361,8 +361,7 @@ const RUN_RANK_ANALYSIS_SPEC = {
 } as const;
 
 /** 因子相关性工具：2~10 个因子两两截面秩相关矩阵（多因子组合前判断冗余） */
-const RUN_FACTOR_CORRELATION_SPEC = {
-  type: 'function' as const,
+const RUN_FACTOR_CORRELATION_SPEC = {  type: 'function' as const,
   function: {
     name: 'run_factor_correlation',
     description:
@@ -553,6 +552,20 @@ export const SAVE_MEMORY_SPEC = {
   },
 };
 
+/** 会话回测存档清单：编号/日期/标题索引（ADR-0010 F7）——模型据此跨轮回看，
+ *  按编号写【展示卡片:card_N】指定展示；只给索引级摘要，完整卡片绕过 LLM（只信卡片） */
+const LIST_BACKTEST_RUNS_SPEC = {
+  type: 'function' as const,
+  function: {
+    name: 'list_backtest_runs',
+    description:
+      '查询本会话的历史回测存档清单（卡片编号/日期/标题）——' +
+      '用户要求"列出做过的回测/回看某次回测/把上次的调出来"时使用；' +
+      '查到目标后，在回复最末尾单独一行写【展示卡片:card_N】指定展示（该行不会展示给用户）。用户没提历史回测时禁止调用',
+    parameters: { type: 'object', properties: {} },
+  },
+} as const;
+
 export const AGENT_TOOL_SPECS = [
   LIST_FACTOR_TABLES_SPEC,
   LIST_FACTOR_FIELDS_SPEC,
@@ -562,6 +575,7 @@ export const AGENT_TOOL_SPECS = [
   RUN_FACTOR_CORRELATION_SPEC,
   RUN_DAILY_SCREEN_SPEC,
   SCREEN_STOCK_POOL_SPEC,
+  LIST_BACKTEST_RUNS_SPEC,
   SAVE_MEMORY_SPEC,
 ] as const;
 
