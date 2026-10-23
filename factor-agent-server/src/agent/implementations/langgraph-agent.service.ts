@@ -28,8 +28,9 @@ import {
   INDUSTRY_TABLES,
   assertPoolGroups,
   describePoolSpec,
+  fieldClarificationGuide,
   indexClarificationGuide,
-  industryClarificationGuide,
+  industryFieldValues,
   industryReadTable,
   resolvePoolSpec,
 } from '../../core/industry-engine';
@@ -714,14 +715,34 @@ export class LangGraphAgentService extends AgentService {
 
   private async execReadData(args: ReadFactorDataArgs): Promise<Record<string, unknown>> {
     const table = String(args.table ?? '').trim();
+    const distinct = String(args.distinct ?? '').trim();
+    const keyword = String(args.keyword ?? '').trim();
+
+    // 去重读（值发现，ADR-0011）：名录复用因子表链路，行业域表 DuckDB 承接，与行读互斥
+    if (distinct) {
+      if (!(INDUSTRY_TABLES as readonly string[]).includes(table)) {
+        return { error: `去重读仅支持行业域表：${INDUSTRY_TABLES.join('、')}（当前表 ${table || '（空）'}）` };
+      }
+      const { values, truncated } = await industryFieldValues(table, distinct, keyword || undefined);
+      return {
+        ok: true,
+        表: table,
+        字段: distinct,
+        ...(keyword ? { 收窄: keyword } : {}),
+        可选取值: values,
+        ...(truncated ? { 截断提示: `结果已按上限 ${values.length} 截断，请用 keyword 收窄后再查` } : {}),
+        提示: '以上即该字段全部可用取值（名录以本次查询结果为准），据此回答用户或转 screen_stock_pool 筛选；不输出 JSON',
+      };
+    }
+
     const fields = Array.isArray(args.fields) ? args.fields.map((f) => String(f).trim()).filter(Boolean) : [];
     const date = String(args.date ?? '').trim();
     const security = String(args.security ?? '').trim();
     if (!table || !fields.length || !date || !security) {
       return {
         error:
-          '参数不完整：需要 table（表名）、fields（因子字段名数组）、date（纯数字 YYYYMMDD）、security（如 000002.XSHE）。' +
-          '表与字段名请先通过 list_factor_tables / list_factor_fields 获取',
+          '参数不完整：常规行读需要 table（表名）、fields（因子字段名数组）、date（纯数字 YYYYMMDD）、security（如 000002.XSHE）；' +
+          '去重读只需要 table + distinct=字段名（可选 keyword）。表与字段名请先通过 list_factor_tables / list_factor_fields 获取',
       };
     }
 
@@ -922,8 +943,8 @@ export class LangGraphAgentService extends AgentService {
   /** 股票池筛选（免确认只读）：组内并集、组间交集 → 规格落库拿句柄；回执只给摘要，清单不进对话 */
   private async execScreenStockPool(args: { groups?: unknown }, ctx: ToolContext): Promise<ToolOutcome> {
     const groups = assertPoolGroups(args.groups);
-    const { securities, unknownIndustry, unknownIndex } = await resolvePoolSpec(groups, Number(todayStr().replaceAll('-', '')));
-    if (unknownIndustry.length) throw new ClarificationSignal(await industryClarificationGuide(unknownIndustry));
+    const { securities, unknownField, unknownIndex } = await resolvePoolSpec(groups, Number(todayStr().replaceAll('-', '')));
+    if (unknownField.length) throw new ClarificationSignal(fieldClarificationGuide(unknownField));
     if (unknownIndex.length) throw new ClarificationSignal(await indexClarificationGuide(unknownIndex));
     if (!securities.length) {
       throw new ApiException('INVALID_ARGUMENT', 400, '筛选条件交集为空（没有股票同时满足全部筛选组），请调整条件后重试');
@@ -1350,46 +1371,9 @@ export class LangGraphAgentService extends AgentService {
       flow,
       ...(memoryBlock ? [memoryBlock] : []),
       '回复规则：',
-      '- 最终回复不超过 90 字，只能引用工具返回的数据，严禁编造数字或个股，不输出 JSON，结尾用短句提醒不构成投资建议；',
-      '- 工具回执含"需要澄清"时，按其中"行动"指引向用户提问，不要当作错误转述；',
-      '- run_strategy_backtest 的回测区间（startDate/endDate）与调仓间隔（rebalanceIntervalDays）为必填：区间按用户说过的照传' +
-        '（相对时间如"最近两年"按系统提示的今天日期换算，完全没提时填合理区间如近三年，不要反问）；' +
-        '调仓间隔用户没说时必须先向用户询问，禁止自行假设；' +
-        'maxPositions 与业绩基准用户没说时可用引擎默认值，但最终文案要注明"默认"；' +
-        'sortFactors 缺省时引擎自动用默认 20 日动量排序（值大优），提案前请向用户说明这一点；' +
-        '同一因子既做过滤又做排序时，entryFilters 与 sortFactors 两处都要传；',
-      '- 大盘择时：用户表达总仓位控制意图（如"跌破某点位就空仓""放量才满仓""熊市半仓"）时组装 timingOverlay：' +
-        '字段必须先经 list_factor_fields 确认存在（当前可用 mkt_idxd 的 CLOSE_INDEX/CHG_PCT/TURNOVER_VALUE）；' +
-        '指数没说默认上证、阈值票数没说默认全部、熊市仓位没说默认空仓（提案中注明"默认"）；' +
-        '字典暂无均线/金叉类字段，用户提出时如实告知暂不支持，引导改用点位/涨跌幅/量能条件；' +
-        '择时只影响总仓位，选股条件照常生效；',
-      '- 过滤条件进阶：比较符支持 >/</eq/bw（bw 传 [下限, 上限] 闭区间）；' +
-        'entryFilters 可引用大盘字段（table=mkt_idxd，如 CLOSE_INDEX，可加 indexCode 指定指数、缺省上证）——' +
-        '这是"股票池开关"（大盘不好就换一类股票继续持有），与择时的"仓位开关"互补：' +
-        '用户表达"大盘 XX 时买防御股/换一池"用大盘条件，表达"大盘 XX 时减仓/空仓"用 timingOverlay，两者可同用；',
-      '- 不卖条件（keepRules）：用户说"满足 XX 就不卖""强势股别被调出"时传入，结构同 entryFilters 元素（暂不支持指数表字段）；' +
-        '命中的持仓不会被卖出规则与调仓卖出，但择时减仓照常生效（提案中注明这一边界）；',
-      '- 排除时间段（excludeRanges）：用户要"剔除某段行情（如股灾）再回测"时传入 [{start,end}]（≤5 段）；' +
-        '段内不交易、净值走平，指标按全序列计算——如实向用户说明这一口径；',
-      '- 股票池筛选（screen_stock_pool）：用户按行业/指数圈定股票池（"只做有色金属""在沪深300里选"）时先调用它生成池句柄，' +
-        '再在回测/每日选股传 poolId 引用；支持多组条件交并（组内并集、组间交集，如 有色金属∪黄金 ∩ 沪深300）；' +
-        '行业/指数成员清单一律不手工拼（禁止编造成分股），用本工具或 industries→industry 组表达；' +
-        '用户点名少量股票时直接传 securityIds 即可，不必走筛选工具；',
-      '- 每日选股（run_daily_screen）：用户问"今天/某个历史日这套条件选出哪些股票"时使用；' +
-        'entryFilters/sortFactors 结构同回测，date 缺省=最近交易日；只读免确认、零副作用，不产生可保存的策略；' +
-        '清单已出卡片，回复只做不超过 90 字的概括；',
-      '- 触发模式（模型 Ⅱ）：用户说"不按月调仓，满足条件就买""偏离 X% 再平衡"时传 rebalanceIntervalDays=0，' +
-        '必须同时传 positionDeviatePct（偏离带宽 %，没说默认 20，需注明"默认"）且预声明触发域 securityIds；' +
-        '触发模式的卖出规则不支持字段条件与排名跌出，如实告知；' +
-        '调仓模式下 positionDeviatePct 语义不同：可选的择时拉回阈值 %（默认 1），' +
-        '用户表达"偏离目标仓位超 X% 就拉回"时才传，没提不要主动传；',
-      '- 排名分析（run_rank_analysis）：用户问"这个因子有没有效/因子分段测试/排名 IC"时使用；' +
-        'factor 结构同 sortFactors 元素（table/field/direction），intervalDays=分析间隔（必填无默认，没说先问），' +
-        'segmentCount 默认 5（提案注明）；结果解读只能引用回执数字：IC 稳定为正且段收益单调 → 因子有效，' +
-        '严禁编造 IC 或排名结论；排名分析只评估因子本身，不产生可保存的策略；',
-      '- 因子相关性（run_factor_correlation）：用户问"这几个因子相关性高不高/有没有重复"时使用；' +
-        'factors 传 2~10 个因子（结构同上），intervalDays=采样间隔（必填无默认，没说先问）；' +
-        '|相关系数|>0.7 视为高相关（冗余），组合时建议二选一；',
+      '- 最终回复不超过 90 字，只能引用工具返回的数据，严禁编造数字或个股，不输出 JSON；' +
+        '没说的可选参数用引擎默认并在提案中注明"默认"，结尾用短句提醒不构成投资建议；',
+      '- 工具回执含"需要澄清"时，按其中"行动"指引向用户提问，不要当作错误转述；查询无数据行时如实告知，不要编造；',
       '- run_strategy_backtest 执行前系统会请用户确认参数：收到"已取消"回执时，' +
         '结合用户反馈调整参数后重新发起（会再次请用户确认），或放弃回测直接回应用户，' +
         '不要声称回测已开始或编造回测结果；',
@@ -1399,13 +1383,11 @@ export class LangGraphAgentService extends AgentService {
       '- 用户要求优化/调参/多方案对比时，可连续多次调用 run_strategy_backtest：' +
         '首次仍会请用户确认，用户回复"授权调优"后本轮内免确认（回执含"授权模式"注明）；' +
         '连续多组时保持用户已确认的关键参数不变（securityIds 股票池、区间、资金、基准），只按建议调整要对比的维度；' +
-        '因子阈值必须落在字段真实值域内（拿不准时先用 read_factor_data 抽样看值域再定阈值），禁止拍脑袋填大数；' +
         '结束时对比各次指标，确定最优的一组后调用 get_backtest_run（传该组回执的卡片编号，如 card_4）把最优组调出展示；' +
         '给出优化建议后，结尾固定加一句：回复"授权调优"可按建议连续多组回测对比择优（前端会渲染授权按钮）；',
       '- 每次回测的回执带「卡片编号」（card_N = 本会话第 N 次回测，编号跨轮稳定、永不重置）：card_N 必须原样引用回执或 list_backtest_runs 查询结果，禁止按"第 N 组=card_N"自行推算；' +
         '用户要求回看/列出/调出某次历史回测时，先调 list_backtest_runs 查清单，再调 get_backtest_run（传卡片编号）把该次结果调出展示；' +
         '本轮多组对比确定最优后，同样调 get_backtest_run 把最优组调出展示；',
-      '- 查询无数据行时如实告知，不要编造；',
       '- 长期记忆维护（save_memory）：用户陈述值得跨会话记住的稳定偏好/研究结论（如"以后只用动量因子""我习惯万三手续费"）或明说"记住 XX"时，' +
         '用 op=add 落一条（slug 起小写英文短横线名、title 一句话、content 一到两句具体事实）；' +
         '偏好变化时用 op=update 引用记忆块里的 slug 覆盖旧条目，禁止新增重复条目；用户说"忘掉 XX"时用 op=delete；' +

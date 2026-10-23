@@ -45,16 +45,18 @@ export const LIST_FACTOR_FIELDS_SPEC = {
   },
 };
 
-/** 工具 3：按 表/因子字段集合/交易日/证券代码 单点读数（数据问答用，回测不需要先抽样） */
+/** 工具 3：单点读数（常规行读 + 行业域表去重读/值发现，ADR-0011 链路复用不新增工具） */
 export const READ_FACTOR_DATA_SPEC = {
   type: 'function' as const,
   function: {
     name: 'read_factor_data',
     description:
-      '按 表/因子字段集合/交易日/证券代码 读取数据。' +
+      '两种读法。常规行读：按 表/因子字段集合/交易日/证券代码 读取数据——' +
       'table 必须来自系统提示中的表目录，fields 必须来自 list_factor_fields 的返回，' +
       'date 为纯数字交易日（如 20210506），security 为证券或指数代码（如 000002.XSHE / 000001.XSHG 上证指数）；' +
-      '股票因子表按全码匹配，指数/主表自动按交易代码+交易市场匹配，日期对无交易日列的静态表自动忽略。',
+      '股票因子表按全码匹配，指数/主表自动按交易代码+交易市场匹配，日期对无交易日列的静态表自动忽略。' +
+      '去重读（值发现）：只传 table + distinct=字段名（可选 keyword 收窄），返回该字段在表内的去重取值清单，' +
+      '筛选股票池前用它核实字段可用值；仅行业域表（sw_classify/sw_member）支持，与 fields/date/security 互斥。',
     parameters: {
       type: 'object',
       properties: {
@@ -62,13 +64,17 @@ export const READ_FACTOR_DATA_SPEC = {
         fields: {
           type: 'array',
           items: { type: 'string' },
-          minItems: 1,
-          description: '因子字段名列表',
+          description: '常规行读必填：因子字段名列表',
         },
-        date: { type: 'string', description: '交易日，纯数字 YYYYMMDD，如 20210506' },
-        security: { type: 'string', description: '证券代码，如 000002.XSHE' },
+        date: { type: 'string', description: '常规行读必填：交易日，纯数字 YYYYMMDD，如 20210506' },
+        security: { type: 'string', description: '常规行读必填：证券代码，如 000002.XSHE' },
+        distinct: {
+          type: 'string',
+          description: '去重读：字段名，返回该字段在表内的去重取值清单（如 distinct="l2_name" 查 sw_member 的全部二级行业名）',
+        },
+        keyword: { type: 'string', description: '去重读收窄：只返回包含该关键词的取值（如 keyword="酒"）' },
       },
-      required: ['table', 'fields', 'date', 'security'],
+      required: ['table'],
     },
   },
 };
@@ -99,7 +105,8 @@ export const RUN_STRATEGY_BACKTEST_SPEC = {
           items: { type: 'string' },
           description:
             '股票池：证券代码数组（如 ["000002.XSHE"]），只放用户点名或前置筛选的少量股票。缺省/空 = 全市场。' +
-            '行业/指数等成分池改用 poolId（screen_stock_pool 产物），禁止手工拼成分清单',
+            '行业/指数等成分池改用 poolId（screen_stock_pool 产物），禁止手工拼成分清单；' +
+            '触发模式（rebalanceIntervalDays=0）必须预声明触发域（本参数不能为空）',
         },
         poolId: {
           type: 'string',
@@ -131,7 +138,10 @@ export const RUN_STRATEGY_BACKTEST_SPEC = {
         },
         rebalanceIntervalDays: {
           type: 'integer',
-          description: '调仓间隔（必填，无默认值）：每隔多少个交易日调仓一次，如 5≈每周、10≈每两周、21≈每月、63≈每季',
+          description:
+            '调仓间隔（必填，无默认值）：每隔多少个交易日调仓一次，如 5≈每周、10≈每两周、21≈每月、63≈每季。' +
+            '=0 为触发模式（"满足条件就买"，须同时传 positionDeviatePct 并预声明触发域 securityIds；' +
+            '此模式 sellRules 仅支持止盈/止损/最大回撤/最大持有天数，不支持字段条件与排名跌出）',
         },
         positionDeviatePct: {
           type: 'number',
@@ -162,7 +172,7 @@ export const RUN_STRATEGY_BACKTEST_SPEC = {
         },
         maxPositions: {
           type: 'integer',
-          description: '最大持仓数，默认 10，上限 100。用户提到 topN/持仓 N 只/选 N 只时必须按用户说的数值传入（top5 → 5），禁止擅自换成默认值',
+          description: '最大持仓数，默认 10，上限 100，提案中注明"默认"。用户提到 topN/持仓 N 只/选 N 只时必须按用户说的数值传入（top5 → 5），禁止擅自换成默认值',
         },
         idealPositionPct: {
           type: 'number',
@@ -182,7 +192,8 @@ export const RUN_STRATEGY_BACKTEST_SPEC = {
               field: { type: 'string', description: '字段名，来自 list_factor_fields 的返回' },
               op: { type: 'string', enum: ['>', '<', 'eq', 'bw'], description: '比较符：大于 / 小于 / 等于 / 区间（bw 时 value 传 [下限, 上限]）' },
               value: {
-                description: '阈值；op=bw 时传二元区间数组如 [10, 30]（闭区间）',
+                description: '阈值；op=bw 时传二元区间数组如 [10, 30]（闭区间）。' +
+                  '阈值必须落在字段真实值域内，拿不准先用 read_factor_data 抽样看值域再定，禁止拍脑袋填大数',
                 type: ['number', 'array'],
                 items: { type: 'number' },
               },
@@ -200,7 +211,7 @@ export const RUN_STRATEGY_BACKTEST_SPEC = {
           maxItems: 10,
           description:
             '排序因子：各因子截面分位数标准化（0~100）后加权合成综合分，按综合分降序取前 maxPositions。' +
-            '缺省 = 引擎自动用默认排序因子（20 日动量 REVS20，值大优）。' +
+            '缺省 = 引擎自动用默认排序因子（20 日动量 REVS20，值大优），提案前向用户说明这一点。' +
             '需要自定义因子权重时不要在这里传权重，改用 weightFn 函数参数',
           items: {
             type: 'object',
@@ -275,7 +286,11 @@ export const RUN_STRATEGY_BACKTEST_SPEC = {
               table: { type: 'string', description: '数据表名，来自系统提示中的表目录' },
               field: { type: 'string', description: '字段名，来自 list_factor_fields 的返回' },
               op: { type: 'string', enum: ['>', '<', 'eq', 'bw'], description: '比较符；bw 时 value 传 [下限, 上限]' },
-              value: { description: '阈值；op=bw 时传二元区间数组', type: ['number', 'array'], items: { type: 'number' } },
+              value: {
+                description: '阈值；op=bw 时传二元区间数组。阈值须在字段真实值域内，拿不准先 read_factor_data 抽样看值域再定',
+                type: ['number', 'array'],
+                items: { type: 'number' },
+              },
             },
             required: ['table', 'field', 'op', 'value'],
           },
@@ -425,7 +440,11 @@ const RUN_DAILY_SCREEN_SPEC = {
               table: { type: 'string', description: '数据表名' },
               field: { type: 'string', description: '字段名' },
               op: { type: 'string', enum: ['>', '<', 'eq', 'bw'], description: '比较符；bw 时 value 传 [下限, 上限]' },
-              value: { description: '阈值；op=bw 时传二元区间数组', type: ['number', 'array'], items: { type: 'number' } },
+              value: {
+                description: '阈值；op=bw 时传二元区间数组。阈值必须落在字段真实值域内，拿不准先用 read_factor_data 抽样看值域再定',
+                type: ['number', 'array'],
+                items: { type: 'number' },
+              },
               indexCode: { type: 'string', enum: ['hs300', 'csi500', 'sse'], description: '仅大盘条件（table=mkt_idxd）可传，缺省 sse' },
             },
             required: ['table', 'field', 'op', 'value'],
@@ -473,15 +492,16 @@ const RUN_DAILY_SCREEN_SPEC = {
 } as const;
 
 /** 全部工具 schema：bindTools 一次绑定，顺序即 prompt 里的工具编号 */
-/** 工具 7：股票池筛选（ADR-0006）：多组条件交并 → 池句柄；成员清单不进对话，回测/选股以 poolId 引用 */
+/** 工具 7：股票池筛选（ADR-0006/0011）：多组条件交并 → 池句柄；成员清单不进对话，回测/选股以 poolId 引用 */
 export const SCREEN_STOCK_POOL_SPEC = {
   type: 'function' as const,
   function: {
     name: 'screen_stock_pool',
     description:
-      '股票池筛选：把定义固定的证券集合（行业/指数成分/点名清单）组合成可复用的股票池，返回池句柄（poolId）。' +
-      '组内并集、组间交集，如 [有色金属,黄金] ∩ 沪深300。回测或每日选股传 poolId 即在池内选股；' +
-      '成员清单不进入对话（回执只有条件摘要与成员数），向用户转述时同样只引用条件与数量。' +
+      '股票池筛选：把定义固定的证券集合（维度表字段/指数成分/点名清单）组合成可复用的股票池，返回池句柄（poolId）。' +
+      '组内并集、组间交集，如 [白酒,家电] ∩ 沪深300。' +
+      '字段取值必须先用 read_factor_data 去重读核实（传 table + distinct=字段名，可用 keyword 收窄），不要凭记忆猜测取值。' +
+      '回测或每日选股传 poolId 即在池内选股；成员清单不进入对话（回执只有条件摘要与成员数），向用户转述时同样只引用条件与数量。' +
       '即查即得无需确认。用户点名少量股票时不必用本工具，直接在回测传 securityIds。',
     parameters: {
       type: 'object',
@@ -494,14 +514,18 @@ export const SCREEN_STOCK_POOL_SPEC = {
           items: {
             type: 'object',
             properties: {
-              kind: { type: 'string', enum: ['industry', 'index', 'list'], description: '来源类型' },
-              names: {
+              kind: { type: 'string', enum: ['field', 'index', 'list'], description: '来源类型' },
+              table: { type: 'string', description: 'kind=field 时必填：可筛维度表名（来自表目录，首批仅 sw_member）' },
+              field: {
+                type: 'string',
+                description: 'kind=field 时必填：维度表字段名（来自 list_factor_fields，粒度由字段承载，如 l1_name/l2_name/l3_name）',
+              },
+              values: {
                 type: 'array',
                 items: { type: 'string' },
                 description:
-                  'kind=industry 时必填：申万一级行业名（共 31 个）：农林牧渔、基础化工、钢铁、有色金属、电子、汽车、家用电器、食品饮料、' +
-                  '纺织服饰、轻工制造、医药生物、公用事业、交通运输、房地产、商贸零售、社会服务、银行、非银金融、综合、' +
-                  '建筑材料、建筑装饰、电力设备、机械设备、国防军工、计算机、传媒、通信、煤炭、石油石化、环保、美容护理',
+                  'kind=field 时必填：字段取值数组（确切值来自 read_factor_data 去重读，注意精确匹配——' +
+                  '如 l2_name 的酒类取值是"白酒Ⅱ"而非"白酒"）',
               },
               codes: {
                 type: 'array',
@@ -609,6 +633,10 @@ export interface ReadFactorDataArgs {
   fields?: unknown;
   date?: unknown;
   security?: unknown;
+  /** 去重读（值发现，ADR-0011）：字段名；与 fields/date/security 互斥，仅行业域表 */
+  distinct?: unknown;
+  /** 去重读收窄：包含匹配 */
+  keyword?: unknown;
 }
 
 export interface SaveMemoryArgs {
