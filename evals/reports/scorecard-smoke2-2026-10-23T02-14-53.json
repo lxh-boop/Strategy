@@ -1,0 +1,259 @@
+{
+  "scorecard": {
+    "label": "smoke2",
+    "generatedAt": "2026-10-23T02:14:53.729Z",
+    "model": "glm-5.3-flash",
+    "judgeModel": "glm-5.3-flash",
+    "k": 1,
+    "taskCount": 1,
+    "totalRuns": 1,
+    "overall": {
+      "taskPassKRate": 0,
+      "runPassRate": 0
+    },
+    "categories": {
+      "calibration": {
+        "tasks": 1,
+        "runCount": 1,
+        "runPassRate": 0,
+        "passKRate": 0
+      }
+    },
+    "calibrationArgAccuracy": 1,
+    "fabricationRate": null,
+    "clarifyJudgeAvg": null,
+    "cost": {
+      "avgRounds": 4,
+      "avgToolCalls": 4,
+      "avgInputTokens": 41674,
+      "avgOutputTokens": 249,
+      "avgWallSec": 22.773
+    }
+  },
+  "results": [
+    {
+      "task": {
+        "id": "cal-01-interval-sort",
+        "category": "calibration",
+        "title": "基础回测：区间 + 调仓间隔 + 排序因子方向",
+        "rationale": "三个用户口径（区间/间隔/REVS20 值大优）必须完整进 run_strategy_backtest",
+        "steps": [
+          {
+            "user": "帮我回测一下：2023年全年，每10个交易日调仓，用 REVS20 因子值大优先买入"
+          },
+          {
+            "confirm": "确认"
+          }
+        ],
+        "checks": [
+          {
+            "id": "args",
+            "type": "toolCall",
+            "name": "run_strategy_backtest",
+            "argsContains": {
+              "startDate": {
+                "$oneOf": [
+                  "20230101",
+                  "20230103"
+                ]
+              },
+              "endDate": {
+                "$oneOf": [
+                  "20231231",
+                  "20231229"
+                ]
+              },
+              "rebalanceIntervalDays": 10,
+              "sortFactors": [
+                {
+                  "table": "equ_factor_obos",
+                  "field": "REVS20",
+                  "direction": 1
+                }
+              ]
+            }
+          },
+          {
+            "id": "confirm",
+            "type": "confirmAsked"
+          },
+          {
+            "id": "engine",
+            "type": "engineCall",
+            "mock": "backtest",
+            "method": "runStrategyBacktest",
+            "times": 1
+          },
+          {
+            "id": "card",
+            "type": "cardType",
+            "cardType": "backtest"
+          }
+        ]
+      },
+      "runs": [
+        {
+          "runIndex": 1,
+          "trajectory": {
+            "taskId": "cal-01-interval-sort",
+            "runIndex": 1,
+            "rounds": [
+              {
+                "inputMessageCount": 2,
+                "text": "",
+                "toolCalls": [
+                  {
+                    "name": "run_strategy_backtest",
+                    "args": {
+                      "endDate": "20231231",
+                      "rebalanceIntervalDays": 10,
+                      "sortFactors": [
+                        {
+                          "direction": 1,
+                          "field": "REVS20",
+                          "table": "REVS20"
+                        }
+                      ],
+                      "startDate": "20230101"
+                    }
+                  }
+                ],
+                "inputTokens": 8403,
+                "outputTokens": 64
+              },
+              {
+                "inputMessageCount": 4,
+                "text": "",
+                "toolCalls": [
+                  {
+                    "name": "list_factor_tables",
+                    "args": {}
+                  }
+                ],
+                "inputTokens": 8540,
+                "outputTokens": 7
+              },
+              {
+                "inputMessageCount": 6,
+                "text": "",
+                "toolCalls": [
+                  {
+                    "name": "list_factor_fields",
+                    "args": {
+                      "tables": [
+                        "equ_factor_obos"
+                      ]
+                    }
+                  }
+                ],
+                "inputTokens": 10566,
+                "outputTokens": 18
+              },
+              {
+                "inputMessageCount": 8,
+                "text": "确认了 REVS20 在超买超卖表中（equ_factor_obos），现在按正确表名发起回测：2023全年，每10个交易日调仓，REVS20 值大优先，其余参数（持仓10只、沪深300基准、万三费率）用引擎默认。",
+                "toolCalls": [
+                  {
+                    "name": "run_strategy_backtest",
+                    "args": {
+                      "endDate": "20231231",
+                      "rebalanceIntervalDays": 10,
+                      "sortFactors": [
+                        {
+                          "direction": 1,
+                          "field": "REVS20",
+                          "table": "equ_factor_obos"
+                        }
+                      ],
+                      "startDate": "20230101"
+                    }
+                  }
+                ],
+                "inputTokens": 14165,
+                "outputTokens": 160
+              }
+            ],
+            "turns": [
+              {
+                "userText": "帮我回测一下：2023年全年，每10个交易日调仓，用 REVS20 因子值大优先买入",
+                "replyText": "将按以下参数执行策略回测：\n- 回测区间：20230101~20231231\n- 股票池：全市场\n- 调仓间隔：每 10 个交易日\n- 每期持仓：10 只 × 10%（默认）\n- 成交时点：次日开盘价\n- 排序因子：REVS20.REVS20（值大优）\n- 过滤因子：无\n- 卖出规则：无\n- 涨跌停判定：开启（官方分档价：涨停不追/跌停不卖，触及不成交）\n- 初始资金/费用：1000000 元 · 单边 0.03%（默认）\n- 业绩基准：沪深300（默认）\n\n回复\"确认\"开始回测；如需调整，直接回复要改的参数（如\"改成每10个交易日调仓\"、\"区间用近一年\"、\"改成按 REVS20 值小优排序\"）；\n如需 AI 连续多次回测自动调优，回复\"授权调优\"（本轮内免确认；连续计算多组参数，整体耗时会明显长于单次回测）。",
+                "confirmPending": true,
+                "durationMs": 5573
+              },
+              {
+                "userText": "确认",
+                "replyText": "将按以下参数执行策略回测：\n- 回测区间：20230101~20231231\n- 股票池：全市场\n- 调仓间隔：每 10 个交易日\n- 每期持仓：10 只 × 10%（默认）\n- 成交时点：次日开盘价\n- 排序因子：equ_factor_obos.REVS20（值大优）\n- 过滤因子：无\n- 卖出规则：无\n- 涨跌停判定：开启（官方分档价：涨停不追/跌停不卖，触及不成交）\n- 初始资金/费用：1000000 元 · 单边 0.03%（默认）\n- 业绩基准：沪深300（默认）\n\n回复\"确认\"开始回测；如需调整，直接回复要改的参数（如\"改成每10个交易日调仓\"、\"区间用近一年\"、\"改成按 REVS20 值小优排序\"）；\n如需 AI 连续多次回测自动调优，回复\"授权调优\"（本轮内免确认；连续计算多组参数，整体耗时会明显长于单次回测）。",
+                "confirmPending": true,
+                "durationMs": 17200
+              }
+            ],
+            "engineCalls": [
+              {
+                "mock": "backtest",
+                "method": "runStrategyBacktest",
+                "args": {
+                  "securityIds": null,
+                  "startDate": "20230101",
+                  "endDate": "20231231",
+                  "initialCapital": 1000000,
+                  "feeRate": 0.0003,
+                  "rebalanceIntervalDays": 10,
+                  "executionTiming": 0,
+                  "maxPositions": 10,
+                  "idealPositionPct": 10,
+                  "minPositionPct": 1,
+                  "entryFilters": [],
+                  "sortFactors": [
+                    {
+                      "table": "REVS20",
+                      "field": "REVS20",
+                      "direction": 1
+                    }
+                  ],
+                  "sellRules": [],
+                  "keepRules": [],
+                  "excludeRanges": [],
+                  "benchmark": "hs300",
+                  "keepFullyInvested": false,
+                  "limitUpDownSkip": true,
+                  "strategyType": "equal_weight"
+                }
+              }
+            ],
+            "wallMs": 22773
+          },
+          "checks": [
+            {
+              "id": "args",
+              "type": "toolCall",
+              "pass": true,
+              "detail": "run_strategy_backtest × 2"
+            },
+            {
+              "id": "confirm",
+              "type": "confirmAsked",
+              "pass": true,
+              "detail": "确认门挂起 2 次"
+            },
+            {
+              "id": "engine",
+              "type": "engineCall",
+              "pass": true,
+              "detail": "引擎 backtest.runStrategyBacktest × 1"
+            },
+            {
+              "id": "card",
+              "type": "cardType",
+              "pass": false,
+              "detail": "未产出 backtest 卡片；实际：无, 无"
+            }
+          ],
+          "protocolViolations": [],
+          "success": false
+        }
+      ],
+      "passCount": 0,
+      "passK": false
+    }
+  ]
+}

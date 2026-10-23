@@ -1,0 +1,738 @@
+{
+  "scorecard": {
+    "label": "smoke3",
+    "generatedAt": "2026-10-23T02:18:04.943Z",
+    "model": "glm-5.3-flash",
+    "judgeModel": "glm-5.3-flash",
+    "k": 1,
+    "taskCount": 4,
+    "totalRuns": 4,
+    "overall": {
+      "taskPassKRate": 1,
+      "runPassRate": 1
+    },
+    "categories": {
+      "calibration": {
+        "tasks": 2,
+        "runCount": 2,
+        "runPassRate": 1,
+        "passKRate": 1
+      },
+      "clarification": {
+        "tasks": 1,
+        "runCount": 1,
+        "runPassRate": 1,
+        "passKRate": 1
+      },
+      "confirm-routing": {
+        "tasks": 1,
+        "runCount": 1,
+        "runPassRate": 1,
+        "passKRate": 1
+      }
+    },
+    "calibrationArgAccuracy": 1,
+    "fabricationRate": null,
+    "clarifyJudgeAvg": 1,
+    "cost": {
+      "avgRounds": 3.25,
+      "avgToolCalls": 2.5,
+      "avgInputTokens": 37426,
+      "avgOutputTokens": 211.5,
+      "avgWallSec": 19.444
+    }
+  },
+  "results": [
+    {
+      "task": {
+        "id": "cal-01-interval-sort",
+        "category": "calibration",
+        "title": "基础回测：区间 + 调仓间隔 + 排序因子方向",
+        "rationale": "三个用户口径（区间/间隔/REVS20 值大优）必须完整进 run_strategy_backtest",
+        "steps": [
+          {
+            "user": "帮我回测一下：2023年全年，每10个交易日调仓，用 REVS20 因子值大优先买入"
+          },
+          {
+            "confirm": "确认"
+          }
+        ],
+        "checks": [
+          {
+            "id": "args",
+            "type": "toolCall",
+            "name": "run_strategy_backtest",
+            "argsContains": {
+              "startDate": {
+                "$oneOf": [
+                  "20230101",
+                  "20230103"
+                ]
+              },
+              "endDate": {
+                "$oneOf": [
+                  "20231231",
+                  "20231229"
+                ]
+              },
+              "rebalanceIntervalDays": 10,
+              "sortFactors": [
+                {
+                  "table": "equ_factor_obos",
+                  "field": "REVS20",
+                  "direction": 1
+                }
+              ]
+            }
+          },
+          {
+            "id": "confirm",
+            "type": "confirmAsked"
+          },
+          {
+            "id": "engine",
+            "type": "engineCall",
+            "mock": "backtest",
+            "method": "runStrategyBacktest",
+            "times": 1
+          },
+          {
+            "id": "card",
+            "type": "cardType",
+            "cardType": "backtest"
+          }
+        ]
+      },
+      "runs": [
+        {
+          "runIndex": 1,
+          "trajectory": {
+            "taskId": "cal-01-interval-sort",
+            "runIndex": 1,
+            "rounds": [
+              {
+                "inputMessageCount": 2,
+                "text": "",
+                "toolCalls": [
+                  {
+                    "name": "list_factor_tables",
+                    "args": {}
+                  }
+                ],
+                "inputTokens": 8403,
+                "outputTokens": 38
+              },
+              {
+                "inputMessageCount": 4,
+                "text": "",
+                "toolCalls": [
+                  {
+                    "name": "list_factor_fields",
+                    "args": {
+                      "tables": [
+                        "equ_factor_obos"
+                      ]
+                    }
+                  }
+                ],
+                "inputTokens": 10429,
+                "outputTokens": 18
+              },
+              {
+                "inputMessageCount": 6,
+                "text": "",
+                "toolCalls": [
+                  {
+                    "name": "run_strategy_backtest",
+                    "args": {
+                      "endDate": "20231229",
+                      "rebalanceIntervalDays": 10,
+                      "sortFactors": [
+                        {
+                          "direction": 1,
+                          "field": "REVS20",
+                          "table": "equ_factor_obos"
+                        }
+                      ],
+                      "startDate": "20230101"
+                    }
+                  }
+                ],
+                "inputTokens": 14028,
+                "outputTokens": 65
+              },
+              {
+                "inputMessageCount": 8,
+                "text": "已完成回测：2023年全年、每10个交易日调仓、按 REVS20（20日动量）值大优先买入，全市场、默认持仓10只、沪深300基准、万三费率。结果：年化收益 +21.9%，最大回撤 -11.8%，年化换手（单边）12.4倍。仅供参考，不构成投资建议。",
+                "toolCalls": [],
+                "inputTokens": 14166,
+                "outputTokens": 88
+              }
+            ],
+            "turns": [
+              {
+                "userText": "帮我回测一下：2023年全年，每10个交易日调仓，用 REVS20 因子值大优先买入",
+                "replyText": "将按以下参数执行策略回测：\n- 回测区间：20230101~20231229\n- 股票池：全市场\n- 调仓间隔：每 10 个交易日\n- 每期持仓：10 只 × 10%（默认）\n- 成交时点：次日开盘价\n- 排序因子：equ_factor_obos.REVS20（值大优）\n- 过滤因子：无\n- 卖出规则：无\n- 涨跌停判定：开启（官方分档价：涨停不追/跌停不卖，触及不成交）\n- 初始资金/费用：1000000 元 · 单边 0.03%（默认）\n- 业绩基准：沪深300（默认）\n\n回复\"确认\"开始回测；如需调整，直接回复要改的参数（如\"改成每10个交易日调仓\"、\"区间用近一年\"、\"改成按 REVS20 值小优排序\"）；\n如需 AI 连续多次回测自动调优，回复\"授权调优\"（本轮内免确认；连续计算多组参数，整体耗时会明显长于单次回测）。",
+                "confirmPending": true,
+                "durationMs": 16796
+              },
+              {
+                "userText": "确认",
+                "replyText": "已完成回测：2023年全年、每10个交易日调仓、按 REVS20（20日动量）值大优先买入，全市场、默认持仓10只、沪深300基准、万三费率。结果：年化收益 +21.9%，最大回撤 -11.8%，年化换手（单边）12.4倍。仅供参考，不构成投资建议。",
+                "cardType": "backtest",
+                "confirmPending": false,
+                "durationMs": 6291
+              }
+            ],
+            "engineCalls": [
+              {
+                "mock": "backtest",
+                "method": "runStrategyBacktest",
+                "args": {
+                  "securityIds": null,
+                  "startDate": "20230101",
+                  "endDate": "20231229",
+                  "initialCapital": 1000000,
+                  "feeRate": 0.0003,
+                  "rebalanceIntervalDays": 10,
+                  "executionTiming": 0,
+                  "maxPositions": 10,
+                  "idealPositionPct": 10,
+                  "minPositionPct": 1,
+                  "entryFilters": [],
+                  "sortFactors": [
+                    {
+                      "table": "equ_factor_obos",
+                      "field": "REVS20",
+                      "direction": 1
+                    }
+                  ],
+                  "sellRules": [],
+                  "keepRules": [],
+                  "excludeRanges": [],
+                  "benchmark": "hs300",
+                  "keepFullyInvested": false,
+                  "limitUpDownSkip": true,
+                  "strategyType": "equal_weight"
+                }
+              }
+            ],
+            "wallMs": 23087
+          },
+          "checks": [
+            {
+              "id": "args",
+              "type": "toolCall",
+              "pass": true,
+              "detail": "run_strategy_backtest × 1"
+            },
+            {
+              "id": "confirm",
+              "type": "confirmAsked",
+              "pass": true,
+              "detail": "确认门挂起 1 次"
+            },
+            {
+              "id": "engine",
+              "type": "engineCall",
+              "pass": true,
+              "detail": "引擎 backtest.runStrategyBacktest × 1"
+            },
+            {
+              "id": "card",
+              "type": "cardType",
+              "pass": true,
+              "detail": "backtest"
+            }
+          ],
+          "protocolViolations": [],
+          "success": true
+        }
+      ],
+      "passCount": 1,
+      "passK": true
+    },
+    {
+      "task": {
+        "id": "cal-09-index-pool",
+        "category": "calibration",
+        "title": "指数池：先筛沪深300再回测（poolId 句柄）",
+        "rationale": "成分池禁止手拼清单：必须 screen_stock_pool（index 组 000300.SH）→ 回测传 poolId",
+        "steps": [
+          {
+            "user": "在沪深300里回测：2023年全年，每10个交易日调仓，REVS20 值大优"
+          },
+          {
+            "confirm": "确认"
+          }
+        ],
+        "checks": [
+          {
+            "id": "screen",
+            "type": "toolCall",
+            "name": "screen_stock_pool",
+            "argsContains": {
+              "groups": [
+                {
+                  "kind": "index",
+                  "codes": [
+                    "000300.SH"
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "id": "poolid",
+            "type": "toolCall",
+            "name": "run_strategy_backtest",
+            "argsContains": {
+              "poolId": {
+                "$type": "string"
+              }
+            }
+          },
+          {
+            "id": "nosids",
+            "type": "toolCall",
+            "name": "run_strategy_backtest",
+            "argsContains": {}
+          },
+          {
+            "id": "engine",
+            "type": "engineCall",
+            "mock": "backtest",
+            "method": "runStrategyBacktest",
+            "times": 1
+          }
+        ]
+      },
+      "runs": [
+        {
+          "runIndex": 1,
+          "trajectory": {
+            "taskId": "cal-09-index-pool",
+            "runIndex": 1,
+            "rounds": [
+              {
+                "inputMessageCount": 2,
+                "text": "",
+                "toolCalls": [
+                  {
+                    "name": "list_factor_tables",
+                    "args": {}
+                  }
+                ],
+                "inputTokens": 8403,
+                "outputTokens": 42
+              },
+              {
+                "inputMessageCount": 4,
+                "text": "",
+                "toolCalls": [
+                  {
+                    "name": "list_factor_fields",
+                    "args": {
+                      "tables": [
+                        "equ_factor_obos"
+                      ]
+                    }
+                  },
+                  {
+                    "name": "screen_stock_pool",
+                    "args": {
+                      "groups": [
+                        {
+                          "codes": [
+                            "000300.SH"
+                          ],
+                          "kind": "index"
+                        }
+                      ]
+                    }
+                  }
+                ],
+                "inputTokens": 10429,
+                "outputTokens": 44
+              },
+              {
+                "inputMessageCount": 7,
+                "text": "",
+                "toolCalls": [
+                  {
+                    "name": "run_strategy_backtest",
+                    "args": {
+                      "benchmark": "hs300",
+                      "endDate": "20231229",
+                      "poolId": "pbrhl6ce312",
+                      "rebalanceIntervalDays": 10,
+                      "sortFactors": [
+                        {
+                          "direction": 1,
+                          "field": "REVS20",
+                          "table": "equ_factor_obos"
+                        }
+                      ],
+                      "startDate": "20230101"
+                    }
+                  }
+                ],
+                "inputTokens": 14146,
+                "outputTokens": 85
+              },
+              {
+                "inputMessageCount": 9,
+                "text": "已按您的参数在沪深300内完成回测（2023年全年，每10个交易日调仓，REVS20 值大优排序，持仓数与基准为默认：10只/沪深300）：\n\n- 年化收益：+21.9%\n- 最大回撤：-11.8%\n- 年化换手（单边）：12.4倍\n\n动量策略2023年表现不错。如需对比其他排序因子或调仓频率，可回复\"授权调优\"。不构成投资建议。",
+                "toolCalls": [],
+                "inputTokens": 14304,
+                "outputTokens": 126
+              }
+            ],
+            "turns": [
+              {
+                "userText": "在沪深300里回测：2023年全年，每10个交易日调仓，REVS20 值大优",
+                "replyText": "将按以下参数执行策略回测：\n- 回测区间：20230101~20231229\n- 股票池：沪深300（300 只）\n- 调仓间隔：每 10 个交易日\n- 每期持仓：10 只 × 10%（默认）\n- 成交时点：次日开盘价\n- 排序因子：equ_factor_obos.REVS20（值大优）\n- 过滤因子：无\n- 卖出规则：无\n- 涨跌停判定：开启（官方分档价：涨停不追/跌停不卖，触及不成交）\n- 初始资金/费用：1000000 元 · 单边 0.03%（默认）\n- 业绩基准：沪深300\n\n回复\"确认\"开始回测；如需调整，直接回复要改的参数（如\"改成每10个交易日调仓\"、\"区间用近一年\"、\"改成按 REVS20 值小优排序\"）；\n如需 AI 连续多次回测自动调优，回复\"授权调优\"（本轮内免确认；连续计算多组参数，整体耗时会明显长于单次回测）。",
+                "confirmPending": true,
+                "durationMs": 16892
+              },
+              {
+                "userText": "确认",
+                "replyText": "已按您的参数在沪深300内完成回测（2023年全年，每10个交易日调仓，REVS20 值大优排序，持仓数与基准为默认：10只/沪深300）：\n\n- 年化收益：+21.9%\n- 最大回撤：-11.8%\n- 年化换手（单边）：12.4倍\n\n动量策略2023年表现不错。如需对比其他排序因子或调仓频率，可回复\"授权调优\"。不构成投资建议。",
+                "cardType": "backtest",
+                "confirmPending": false,
+                "durationMs": 8689
+              }
+            ],
+            "engineCalls": [
+              {
+                "mock": "backtest",
+                "method": "runStrategyBacktest",
+                "args": {
+                  "securityIds": null,
+                  "startDate": "20230101",
+                  "endDate": "20231229",
+                  "initialCapital": 1000000,
+                  "feeRate": 0.0003,
+                  "rebalanceIntervalDays": 10,
+                  "executionTiming": 0,
+                  "maxPositions": 10,
+                  "idealPositionPct": 10,
+                  "minPositionPct": 1,
+                  "entryFilters": [],
+                  "sortFactors": [
+                    {
+                      "table": "equ_factor_obos",
+                      "field": "REVS20",
+                      "direction": 1
+                    }
+                  ],
+                  "sellRules": [],
+                  "keepRules": [],
+                  "excludeRanges": [],
+                  "benchmark": "hs300",
+                  "keepFullyInvested": false,
+                  "limitUpDownSkip": true,
+                  "strategyType": "equal_weight",
+                  "pool": {
+                    "groups": [
+                      {
+                        "kind": "index",
+                        "codes": [
+                          "000300.SH"
+                        ]
+                      }
+                    ],
+                    "summary": "沪深300",
+                    "memberCount": 300
+                  }
+                }
+              }
+            ],
+            "wallMs": 25582
+          },
+          "checks": [
+            {
+              "id": "screen",
+              "type": "toolCall",
+              "pass": true,
+              "detail": "screen_stock_pool × 1"
+            },
+            {
+              "id": "poolid",
+              "type": "toolCall",
+              "pass": true,
+              "detail": "run_strategy_backtest × 1"
+            },
+            {
+              "id": "nosids",
+              "type": "toolCall",
+              "pass": true,
+              "detail": "run_strategy_backtest × 1"
+            },
+            {
+              "id": "engine",
+              "type": "engineCall",
+              "pass": true,
+              "detail": "引擎 backtest.runStrategyBacktest × 1"
+            }
+          ],
+          "protocolViolations": [],
+          "success": true
+        }
+      ],
+      "passCount": 1,
+      "passK": true
+    },
+    {
+      "task": {
+        "id": "cla-01-missing-interval",
+        "category": "clarification",
+        "title": "缺调仓间隔：必须先问",
+        "rationale": "rebalanceIntervalDays 必填无默认——直接执行或自行假设 21 日都是错的",
+        "steps": [
+          {
+            "user": "回测一下2024年全年的REVS20动量策略"
+          }
+        ],
+        "checks": [
+          {
+            "id": "noengine",
+            "type": "noEngineRun"
+          },
+          {
+            "id": "noconfirm",
+            "type": "noConfirm"
+          }
+        ],
+        "judge": true
+      },
+      "runs": [
+        {
+          "runIndex": 1,
+          "trajectory": {
+            "taskId": "cla-01-missing-interval",
+            "runIndex": 1,
+            "rounds": [
+              {
+                "inputMessageCount": 2,
+                "text": "好的，开始前需确认一个必填参数：**调仓间隔**（每隔多少个交易日调仓，如 5≈每周、21≈每月）？您希望按什么间隔调仓？\n\n其他参数我先按默认准备：\n- 区间：20240101–20241231\n- 排序因子：REVS20（20日动量，值大优）\n- 持仓数 10、基准沪深300、初始资金 100 万、费率万三（均默认）\n\n请告知调仓间隔，或直接说\"按月调仓\"等即可发起回测确认。",
+                "toolCalls": [],
+                "inputTokens": 8390,
+                "outputTokens": 148
+              }
+            ],
+            "turns": [
+              {
+                "userText": "回测一下2024年全年的REVS20动量策略",
+                "replyText": "好的，开始前需确认一个必填参数：**调仓间隔**（每隔多少个交易日调仓，如 5≈每周、21≈每月）？您希望按什么间隔调仓？\n\n其他参数我先按默认准备：\n- 区间：20240101–20241231\n- 排序因子：REVS20（20日动量，值大优）\n- 持仓数 10、基准沪深300、初始资金 100 万、费率万三（均默认）\n\n请告知调仓间隔，或直接说\"按月调仓\"等即可发起回测确认。",
+                "confirmPending": false,
+                "durationMs": 8448
+              }
+            ],
+            "engineCalls": [],
+            "wallMs": 8448
+          },
+          "checks": [
+            {
+              "id": "noengine",
+              "type": "noEngineRun",
+              "pass": true,
+              "detail": "引擎零调用"
+            },
+            {
+              "id": "noconfirm",
+              "type": "noConfirm",
+              "pass": true,
+              "detail": "未挂起"
+            }
+          ],
+          "judge": {
+            "score": 1,
+            "reason": "调仓间隔缺失时智能体明确且具体地追问（附示例），回测区间用户已给出故按20240101–20241231执行并声明默认参数，无冗余提问，行为完全符合规范。",
+            "pass": true
+          },
+          "protocolViolations": [],
+          "success": true
+        }
+      ],
+      "passCount": 1,
+      "passK": true
+    },
+    {
+      "task": {
+        "id": "rt-01-single-approve",
+        "category": "confirm-routing",
+        "title": "单组回测：确认后引擎恰好执行一次",
+        "rationale": "最基本契约：挂起时不进引擎，确认后恰好一次",
+        "steps": [
+          {
+            "user": "回测2023年全年，每21个交易日调仓，REVS20 值大优"
+          },
+          {
+            "confirm": "确认"
+          }
+        ],
+        "checks": [
+          {
+            "id": "confirm",
+            "type": "confirmAsked"
+          },
+          {
+            "id": "engine",
+            "type": "engineCall",
+            "mock": "backtest",
+            "method": "runStrategyBacktest",
+            "times": 1
+          },
+          {
+            "id": "card",
+            "type": "cardType",
+            "cardType": "backtest"
+          }
+        ]
+      },
+      "runs": [
+        {
+          "runIndex": 1,
+          "trajectory": {
+            "taskId": "rt-01-single-approve",
+            "runIndex": 1,
+            "rounds": [
+              {
+                "inputMessageCount": 2,
+                "text": "",
+                "toolCalls": [
+                  {
+                    "name": "list_factor_tables",
+                    "args": {}
+                  }
+                ],
+                "inputTokens": 8398,
+                "outputTokens": 21
+              },
+              {
+                "inputMessageCount": 4,
+                "text": "",
+                "toolCalls": [
+                  {
+                    "name": "list_factor_fields",
+                    "args": {
+                      "tables": [
+                        "equ_factor_obos"
+                      ]
+                    }
+                  }
+                ],
+                "inputTokens": 10424,
+                "outputTokens": 18
+              },
+              {
+                "inputMessageCount": 6,
+                "text": "",
+                "toolCalls": [
+                  {
+                    "name": "run_strategy_backtest",
+                    "args": {
+                      "endDate": "20231231",
+                      "rebalanceIntervalDays": 21,
+                      "sortFactors": [
+                        {
+                          "direction": 1,
+                          "field": "REVS20",
+                          "table": "equ_factor_obos"
+                        }
+                      ],
+                      "startDate": "20230101"
+                    }
+                  }
+                ],
+                "inputTokens": 14023,
+                "outputTokens": 65
+              },
+              {
+                "inputMessageCount": 8,
+                "text": "2023年全年回测（每21个交易日调仓，REVS20 值大优）已完成：年化收益 +21.9%，最大回撤 -11.8%，年化换手（单边）12.4倍。其余参数（持仓数、基准、费率）为默认。不构成投资建议。",
+                "toolCalls": [],
+                "inputTokens": 14161,
+                "outputTokens": 88
+              }
+            ],
+            "turns": [
+              {
+                "userText": "回测2023年全年，每21个交易日调仓，REVS20 值大优",
+                "replyText": "将按以下参数执行策略回测：\n- 回测区间：20230101~20231231\n- 股票池：全市场\n- 调仓间隔：每 21 个交易日\n- 每期持仓：10 只 × 10%（默认）\n- 成交时点：次日开盘价\n- 排序因子：equ_factor_obos.REVS20（值大优）\n- 过滤因子：无\n- 卖出规则：无\n- 涨跌停判定：开启（官方分档价：涨停不追/跌停不卖，触及不成交）\n- 初始资金/费用：1000000 元 · 单边 0.03%（默认）\n- 业绩基准：沪深300（默认）\n\n回复\"确认\"开始回测；如需调整，直接回复要改的参数（如\"改成每10个交易日调仓\"、\"区间用近一年\"、\"改成按 REVS20 值小优排序\"）；\n如需 AI 连续多次回测自动调优，回复\"授权调优\"（本轮内免确认；连续计算多组参数，整体耗时会明显长于单次回测）。",
+                "confirmPending": true,
+                "durationMs": 14331
+              },
+              {
+                "userText": "确认",
+                "replyText": "2023年全年回测（每21个交易日调仓，REVS20 值大优）已完成：年化收益 +21.9%，最大回撤 -11.8%，年化换手（单边）12.4倍。其余参数（持仓数、基准、费率）为默认。不构成投资建议。",
+                "cardType": "backtest",
+                "confirmPending": false,
+                "durationMs": 6328
+              }
+            ],
+            "engineCalls": [
+              {
+                "mock": "backtest",
+                "method": "runStrategyBacktest",
+                "args": {
+                  "securityIds": null,
+                  "startDate": "20230101",
+                  "endDate": "20231231",
+                  "initialCapital": 1000000,
+                  "feeRate": 0.0003,
+                  "rebalanceIntervalDays": 21,
+                  "executionTiming": 0,
+                  "maxPositions": 10,
+                  "idealPositionPct": 10,
+                  "minPositionPct": 1,
+                  "entryFilters": [],
+                  "sortFactors": [
+                    {
+                      "table": "equ_factor_obos",
+                      "field": "REVS20",
+                      "direction": 1
+                    }
+                  ],
+                  "sellRules": [],
+                  "keepRules": [],
+                  "excludeRanges": [],
+                  "benchmark": "hs300",
+                  "keepFullyInvested": false,
+                  "limitUpDownSkip": true,
+                  "strategyType": "equal_weight"
+                }
+              }
+            ],
+            "wallMs": 20659
+          },
+          "checks": [
+            {
+              "id": "confirm",
+              "type": "confirmAsked",
+              "pass": true,
+              "detail": "确认门挂起 1 次"
+            },
+            {
+              "id": "engine",
+              "type": "engineCall",
+              "pass": true,
+              "detail": "引擎 backtest.runStrategyBacktest × 1"
+            },
+            {
+              "id": "card",
+              "type": "cardType",
+              "pass": true,
+              "detail": "backtest"
+            }
+          ],
+          "protocolViolations": [],
+          "success": true
+        }
+      ],
+      "passCount": 1,
+      "passK": true
+    }
+  ]
+}
