@@ -1,3 +1,5 @@
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import { EvalHarness } from './harness';
 import { judgeRun } from './judges';
 import { subsetMatch } from './match';
@@ -226,19 +228,74 @@ export async function runSingle(task: EvalTask, runIndex: number): Promise<Singl
   }
 }
 
-export async function runBatch(tasks: EvalTask[], k: number, onProgress?: (msg: string) => void): Promise<TaskResult[]> {
+export interface BatchOptions {
+  onProgress?: (msg: string) => void;
+  /** 断点续跑状态文件：每完成一个任务增量落盘；重启时已有结果的任务直接跳过 */
+  stateFile?: string;
+}
+
+/** 单 run 看门狗：GLM 调用自带 60s 超时，但 v3 实证仍可能整体挂死（进程被外部硬杀前 71 分钟无输出）。
+ *  超时的 run 记为失败（error=watchdog），批次继续——测量不能被单个 run 拖死 */
+const RUN_WATCHDOG_MS = 8 * 60 * 1000;
+
+function withWatchdog(p: Promise<SingleRun>, taskId: string, runIndex: number): Promise<SingleRun> {
+  return Promise.race([
+    p,
+    new Promise<SingleRun>((resolve) =>
+      setTimeout(
+        () =>
+          resolve({
+            runIndex,
+            trajectory: {
+              taskId, runIndex, rounds: [], turns: [], engineCalls: [], wallMs: RUN_WATCHDOG_MS,
+              error: `watchdog 超时（${RUN_WATCHDOG_MS / 60000} 分钟）——疑似 GLM 调用挂死`,
+            },
+            checks: [],
+            protocolViolations: [],
+            success: false,
+          }),
+        RUN_WATCHDOG_MS,
+      ),
+    ),
+  ]);
+}
+
+export async function runBatch(tasks: EvalTask[], k: number, opts: BatchOptions = {}): Promise<TaskResult[]> {
+  const { onProgress, stateFile } = opts;
   const results: TaskResult[] = [];
+  const done = new Map<string, TaskResult>();
+  if (stateFile && fs.existsSync(stateFile)) {
+    try {
+      const prior = JSON.parse(fs.readFileSync(stateFile, 'utf8')) as TaskResult[];
+      for (const r of prior) if (r.runs.length === k) done.set(r.task.id, r);
+      onProgress?.(`断点续跑：状态文件已有 ${done.size} 个任务的完整结果，跳过`);
+    } catch {
+      onProgress?.('断点状态文件不可读，全量重跑');
+    }
+  }
+  const persist = (): void => {
+    if (!stateFile) return;
+    fs.mkdirSync(path.dirname(stateFile), { recursive: true });
+    fs.writeFileSync(stateFile, JSON.stringify(results, null, 2), 'utf8');
+  };
   for (const task of tasks) {
+    const prior = done.get(task.id);
+    if (prior) {
+      results.push(prior);
+      continue;
+    }
     const runs: SingleRun[] = [];
     for (let i = 0; i < k; i++) {
       onProgress?.(`[${task.id}] run ${i + 1}/${k} …`);
-      runs.push(await runWithRetry(task, i + 1, onProgress));
+      runs.push(await withWatchdog(runWithRetry(task, i + 1, onProgress), task.id, i + 1));
       onProgress?.(`[${task.id}] run ${i + 1}/${k} → ${runs[i].success ? '通过' : '未过'}`);
       await sleep(2_000); // 轻节流：降低连续打满 GLM 限流的概率（基线 v1 后半段 429 污染实证）
     }
     const passCount = runs.filter((r) => r.success).length;
     results.push({ task, runs, passCount, passK: passCount === k });
+    persist();
   }
+  if (stateFile && fs.existsSync(stateFile)) fs.rmSync(stateFile, { force: true });
   return results;
 }
 

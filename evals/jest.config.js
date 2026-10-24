@@ -9,4 +9,6 @@ module.exports = {
   // ApiException 从 server 文件导入保证 instanceof 同源，judge 是自包含子树）。见 README 工程约束。
   // 跑批是长任务（k 次重复 × 数十任务 × 真实 GLM 轮次），给足上限
   testTimeout: 4 * 60 * 60 * 1000,
+  // 跑批结束强制退出：个别挂起的 GLM socket/keepalive 定时器不该拖住进程（v3 实证）
+  forceExit: true,
 };

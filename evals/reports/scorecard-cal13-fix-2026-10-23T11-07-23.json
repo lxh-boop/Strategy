@@ -1,0 +1,567 @@
+{
+  "scorecard": {
+    "label": "cal13-fix",
+    "generatedAt": "2026-10-23T11:07:23.454Z",
+    "model": "glm-5.3-flash",
+    "judgeModel": "glm-5.3-flash",
+    "k": 4,
+    "taskCount": 1,
+    "totalRuns": 4,
+    "overall": {
+      "taskPassKRate": 0,
+      "runPassRate": 0.25
+    },
+    "categories": {
+      "calibration": {
+        "tasks": 1,
+        "runCount": 4,
+        "runPassRate": 0.25,
+        "passKRate": 0
+      }
+    },
+    "calibrationArgAccuracy": 0.25,
+    "fabricationRate": null,
+    "clarifyJudgeAvg": null,
+    "cost": {
+      "avgRounds": 2,
+      "avgToolCalls": 1,
+      "avgInputTokens": 16511.75,
+      "avgOutputTokens": 287.75,
+      "avgWallSec": 9.26175
+    }
+  },
+  "results": [
+    {
+      "task": {
+        "id": "cal-13-timing-overlay",
+        "category": "calibration",
+        "title": "大盘择时：跌破 3000 点空仓",
+        "rationale": "总仓位意图必须走 timingOverlay（rules 引用 CLOSE_INDEX \">\" 3000 由熊转牛 + 熊市空仓缺省），不是 entryFilters",
+        "steps": [
+          {
+            "user": "回测2023年全年每10个交易日调仓，默认排序；如果上证跌破3000点就整体空仓，涨回来再恢复"
+          },
+          {
+            "confirm": "确认"
+          }
+        ],
+        "checks": [
+          {
+            "id": "overlay",
+            "type": "toolCall",
+            "name": "run_strategy_backtest",
+            "argsContains": {
+              "timingOverlay": {
+                "bearPositionPct": 0,
+                "rules": [
+                  {
+                    "table": "mkt_idxd",
+                    "field": "CLOSE_INDEX",
+                    "op": ">",
+                    "value": 3000
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "id": "engine",
+            "type": "engineCall",
+            "mock": "backtest",
+            "method": "runStrategyBacktest",
+            "times": 1
+          }
+        ]
+      },
+      "runs": [
+        {
+          "runIndex": 1,
+          "trajectory": {
+            "taskId": "cal-13-timing-overlay",
+            "runIndex": 1,
+            "rounds": [
+              {
+                "inputMessageCount": 2,
+                "text": "",
+                "toolCalls": [
+                  {
+                    "name": "run_strategy_backtest",
+                    "args": {
+                      "endDate": "20231231",
+                      "rebalanceIntervalDays": 10,
+                      "startDate": "20230101",
+                      "timingOverlay": {
+                        "bearPositionPct": 0,
+                        "index": "sse",
+                        "rules": [
+                          {
+                            "field": "CLOSE_INDEX",
+                            "op": "<",
+                            "table": "mkt_idxd",
+                            "value": 3000
+                          }
+                        ]
+                      }
+                    }
+                  }
+                ],
+                "inputTokens": 8172,
+                "outputTokens": 169
+              },
+              {
+                "inputMessageCount": 4,
+                "text": "回测完成（2023全年，每10个交易日调仓，默认20日动量排序，上证<3000点空仓择时）：\n- 年化收益 +21.9%\n- 最大回撤 -11.8%\n- 年化换手（单边）12.4倍\n\n以上为历史回测结果，不构成投资建议。",
+                "toolCalls": [],
+                "inputTokens": 8332,
+                "outputTokens": 79
+              }
+            ],
+            "turns": [
+              {
+                "userText": "回测2023年全年每10个交易日调仓，默认排序；如果上证跌破3000点就整体空仓，涨回来再恢复",
+                "replyText": "将按以下参数执行策略回测：\n- 回测区间：20230101~20231231\n- 股票池：全市场\n- 调仓间隔：每 10 个交易日\n- 每期持仓：10 只 × 10%（默认）\n- 成交时点：次日开盘价\n- 排序因子：equ_factor_obos.REVS20（值大优）【默认追加】\n- 过滤因子：无\n- 卖出规则：无\n- 涨跌停判定：开启（官方分档价：涨停不追/跌停不卖，触及不成交）\n- 择时规则：上证指数：mkt_idxd.CLOSE_INDEX < 3000；需全部条件由熊转牛、需全部条件由牛转熊；熊市仓位 空仓\n- 初始资金/费用：1000000 元 · 单边 0.03%（默认）\n- 业绩基准：沪深300（默认）\n\n回复\"确认\"开始回测；如需调整，直接回复要改的参数（如\"改成每10个交易日调仓\"、\"区间用近一年\"、\"改成按 REVS20 值小优排序\"）；\n如需 AI 连续多次回测自动调优，回复\"授权调优\"（本轮内免确认；连续计算多组参数，整体耗时会明显长于单次回测）。",
+                "confirmPending": true,
+                "durationMs": 4851
+              },
+              {
+                "userText": "确认",
+                "replyText": "回测完成（2023全年，每10个交易日调仓，默认20日动量排序，上证<3000点空仓择时）：\n- 年化收益 +21.9%\n- 最大回撤 -11.8%\n- 年化换手（单边）12.4倍\n\n以上为历史回测结果，不构成投资建议。",
+                "cardType": "backtest",
+                "confirmPending": false,
+                "durationMs": 2950
+              }
+            ],
+            "engineCalls": [
+              {
+                "mock": "backtest",
+                "method": "runStrategyBacktest",
+                "args": {
+                  "securityIds": null,
+                  "startDate": "20230101",
+                  "endDate": "20231231",
+                  "initialCapital": 1000000,
+                  "feeRate": 0.0003,
+                  "rebalanceIntervalDays": 10,
+                  "executionTiming": 0,
+                  "maxPositions": 10,
+                  "idealPositionPct": 10,
+                  "minPositionPct": 1,
+                  "entryFilters": [],
+                  "sortFactors": [],
+                  "sellRules": [],
+                  "keepRules": [],
+                  "excludeRanges": [],
+                  "benchmark": "hs300",
+                  "timingOverlay": {
+                    "index": "sse",
+                    "rules": [
+                      {
+                        "table": "mkt_idxd",
+                        "field": "CLOSE_INDEX",
+                        "op": "<",
+                        "value": 3000
+                      }
+                    ],
+                    "enterVotes": -1,
+                    "exitVotes": -1,
+                    "bearPositionPct": 0
+                  },
+                  "keepFullyInvested": false,
+                  "limitUpDownSkip": true,
+                  "slippageRate": 0,
+                  "strategyType": "equal_weight"
+                }
+              }
+            ],
+            "wallMs": 7801
+          },
+          "checks": [
+            {
+              "id": "overlay",
+              "type": "toolCall",
+              "pass": false,
+              "detail": "run_strategy_backtest 无一次调用参数包含期望子集 {\"timingOverlay\":{\"bearPositionPct\":0,\"rules\":[{\"table\":\"mkt_idxd\",\"field\":\"CLOSE_INDEX\",\"op\":\">\",\"value\":3000}]}}；实际参数：{\"endDate\":\"20231231\",\"rebalanceIntervalDays\":10,\"startDate\":\"20230101\",\"timingOverlay\":{\"bearPositionPct\":0,\"index\":\"sse\",\"rules\":[{\"field\":\"CLOSE_INDEX\",\"op\":\"<\",\"table\":\"mkt_idxd\",\"value\":3000}]}}"
+            },
+            {
+              "id": "engine",
+              "type": "engineCall",
+              "pass": true,
+              "detail": "引擎 backtest.runStrategyBacktest × 1"
+            }
+          ],
+          "protocolViolations": [],
+          "success": false
+        },
+        {
+          "runIndex": 2,
+          "trajectory": {
+            "taskId": "cal-13-timing-overlay",
+            "runIndex": 2,
+            "rounds": [
+              {
+                "inputMessageCount": 2,
+                "text": "",
+                "toolCalls": [
+                  {
+                    "name": "run_strategy_backtest",
+                    "args": {
+                      "endDate": "20231231",
+                      "rebalanceIntervalDays": 10,
+                      "startDate": "20230101",
+                      "timingOverlay": {
+                        "bearPositionPct": 0,
+                        "index": "sse",
+                        "rules": [
+                          {
+                            "field": "CLOSE_INDEX",
+                            "op": "<",
+                            "table": "mkt_idxd",
+                            "value": 3000
+                          }
+                        ]
+                      }
+                    }
+                  }
+                ],
+                "inputTokens": 8172,
+                "outputTokens": 193
+              },
+              {
+                "inputMessageCount": 4,
+                "text": "回测完成（2023全年、每10个交易日调仓、默认20日动量排序、上证<3000点空仓）：年化收益 +21.9%，最大回撤 -11.8%，年化换手单边约12.4倍。择时规则有效规避了破位段回撤。注意：回测结果不构成投资建议。",
+                "toolCalls": [],
+                "inputTokens": 8332,
+                "outputTokens": 99
+              }
+            ],
+            "turns": [
+              {
+                "userText": "回测2023年全年每10个交易日调仓，默认排序；如果上证跌破3000点就整体空仓，涨回来再恢复",
+                "replyText": "将按以下参数执行策略回测：\n- 回测区间：20230101~20231231\n- 股票池：全市场\n- 调仓间隔：每 10 个交易日\n- 每期持仓：10 只 × 10%（默认）\n- 成交时点：次日开盘价\n- 排序因子：equ_factor_obos.REVS20（值大优）【默认追加】\n- 过滤因子：无\n- 卖出规则：无\n- 涨跌停判定：开启（官方分档价：涨停不追/跌停不卖，触及不成交）\n- 择时规则：上证指数：mkt_idxd.CLOSE_INDEX < 3000；需全部条件由熊转牛、需全部条件由牛转熊；熊市仓位 空仓\n- 初始资金/费用：1000000 元 · 单边 0.03%（默认）\n- 业绩基准：沪深300（默认）\n\n回复\"确认\"开始回测；如需调整，直接回复要改的参数（如\"改成每10个交易日调仓\"、\"区间用近一年\"、\"改成按 REVS20 值小优排序\"）；\n如需 AI 连续多次回测自动调优，回复\"授权调优\"（本轮内免确认；连续计算多组参数，整体耗时会明显长于单次回测）。",
+                "confirmPending": true,
+                "durationMs": 4453
+              },
+              {
+                "userText": "确认",
+                "replyText": "回测完成（2023全年、每10个交易日调仓、默认20日动量排序、上证<3000点空仓）：年化收益 +21.9%，最大回撤 -11.8%，年化换手单边约12.4倍。择时规则有效规避了破位段回撤。注意：回测结果不构成投资建议。",
+                "cardType": "backtest",
+                "confirmPending": false,
+                "durationMs": 6043
+              }
+            ],
+            "engineCalls": [
+              {
+                "mock": "backtest",
+                "method": "runStrategyBacktest",
+                "args": {
+                  "securityIds": null,
+                  "startDate": "20230101",
+                  "endDate": "20231231",
+                  "initialCapital": 1000000,
+                  "feeRate": 0.0003,
+                  "rebalanceIntervalDays": 10,
+                  "executionTiming": 0,
+                  "maxPositions": 10,
+                  "idealPositionPct": 10,
+                  "minPositionPct": 1,
+                  "entryFilters": [],
+                  "sortFactors": [],
+                  "sellRules": [],
+                  "keepRules": [],
+                  "excludeRanges": [],
+                  "benchmark": "hs300",
+                  "timingOverlay": {
+                    "index": "sse",
+                    "rules": [
+                      {
+                        "table": "mkt_idxd",
+                        "field": "CLOSE_INDEX",
+                        "op": "<",
+                        "value": 3000
+                      }
+                    ],
+                    "enterVotes": -1,
+                    "exitVotes": -1,
+                    "bearPositionPct": 0
+                  },
+                  "keepFullyInvested": false,
+                  "limitUpDownSkip": true,
+                  "slippageRate": 0,
+                  "strategyType": "equal_weight"
+                }
+              }
+            ],
+            "wallMs": 10496
+          },
+          "checks": [
+            {
+              "id": "overlay",
+              "type": "toolCall",
+              "pass": false,
+              "detail": "run_strategy_backtest 无一次调用参数包含期望子集 {\"timingOverlay\":{\"bearPositionPct\":0,\"rules\":[{\"table\":\"mkt_idxd\",\"field\":\"CLOSE_INDEX\",\"op\":\">\",\"value\":3000}]}}；实际参数：{\"endDate\":\"20231231\",\"rebalanceIntervalDays\":10,\"startDate\":\"20230101\",\"timingOverlay\":{\"bearPositionPct\":0,\"index\":\"sse\",\"rules\":[{\"field\":\"CLOSE_INDEX\",\"op\":\"<\",\"table\":\"mkt_idxd\",\"value\":3000}]}}"
+            },
+            {
+              "id": "engine",
+              "type": "engineCall",
+              "pass": true,
+              "detail": "引擎 backtest.runStrategyBacktest × 1"
+            }
+          ],
+          "protocolViolations": [],
+          "success": false
+        },
+        {
+          "runIndex": 3,
+          "trajectory": {
+            "taskId": "cal-13-timing-overlay",
+            "runIndex": 3,
+            "rounds": [
+              {
+                "inputMessageCount": 2,
+                "text": "",
+                "toolCalls": [
+                  {
+                    "name": "run_strategy_backtest",
+                    "args": {
+                      "endDate": "20231231",
+                      "rebalanceIntervalDays": 10,
+                      "startDate": "20230101",
+                      "timingOverlay": {
+                        "bearPositionPct": 0,
+                        "index": "sse",
+                        "rules": [
+                          {
+                            "field": "CLOSE_INDEX",
+                            "op": "<",
+                            "table": "mkt_idxd",
+                            "value": 3000
+                          }
+                        ]
+                      }
+                    }
+                  }
+                ],
+                "inputTokens": 8172,
+                "outputTokens": 139
+              },
+              {
+                "inputMessageCount": 4,
+                "text": "回测已完成（2023全年、每10个交易日调仓，默认动量排序，默认基准沪深300、10只持仓、万三费率、次日开盘成交）：\n\n- 上证跌破3000点自动空仓、收复后恢复满仓\n- 年化收益 +21.9%，最大回撤 -11.8%，年化换手（单边）12.4倍\n\n择时在3000点下方成功避开了部分回撤。需要对比其他区间或调仓频率可继续提。不构成投资建议。",
+                "toolCalls": [],
+                "inputTokens": 8332,
+                "outputTokens": 131
+              }
+            ],
+            "turns": [
+              {
+                "userText": "回测2023年全年每10个交易日调仓，默认排序；如果上证跌破3000点就整体空仓，涨回来再恢复",
+                "replyText": "将按以下参数执行策略回测：\n- 回测区间：20230101~20231231\n- 股票池：全市场\n- 调仓间隔：每 10 个交易日\n- 每期持仓：10 只 × 10%（默认）\n- 成交时点：次日开盘价\n- 排序因子：equ_factor_obos.REVS20（值大优）【默认追加】\n- 过滤因子：无\n- 卖出规则：无\n- 涨跌停判定：开启（官方分档价：涨停不追/跌停不卖，触及不成交）\n- 择时规则：上证指数：mkt_idxd.CLOSE_INDEX < 3000；需全部条件由熊转牛、需全部条件由牛转熊；熊市仓位 空仓\n- 初始资金/费用：1000000 元 · 单边 0.03%（默认）\n- 业绩基准：沪深300（默认）\n\n回复\"确认\"开始回测；如需调整，直接回复要改的参数（如\"改成每10个交易日调仓\"、\"区间用近一年\"、\"改成按 REVS20 值小优排序\"）；\n如需 AI 连续多次回测自动调优，回复\"授权调优\"（本轮内免确认；连续计算多组参数，整体耗时会明显长于单次回测）。",
+                "confirmPending": true,
+                "durationMs": 3562
+              },
+              {
+                "userText": "确认",
+                "replyText": "回测已完成（2023全年、每10个交易日调仓，默认动量排序，默认基准沪深300、10只持仓、万三费率、次日开盘成交）：\n\n- 上证跌破3000点自动空仓、收复后恢复满仓\n- 年化收益 +21.9%，最大回撤 -11.8%，年化换手（单边）12.4倍\n\n择时在3000点下方成功避开了部分回撤。需要对比其他区间或调仓频率可继续提。不构成投资建议。",
+                "cardType": "backtest",
+                "confirmPending": false,
+                "durationMs": 3818
+              }
+            ],
+            "engineCalls": [
+              {
+                "mock": "backtest",
+                "method": "runStrategyBacktest",
+                "args": {
+                  "securityIds": null,
+                  "startDate": "20230101",
+                  "endDate": "20231231",
+                  "initialCapital": 1000000,
+                  "feeRate": 0.0003,
+                  "rebalanceIntervalDays": 10,
+                  "executionTiming": 0,
+                  "maxPositions": 10,
+                  "idealPositionPct": 10,
+                  "minPositionPct": 1,
+                  "entryFilters": [],
+                  "sortFactors": [],
+                  "sellRules": [],
+                  "keepRules": [],
+                  "excludeRanges": [],
+                  "benchmark": "hs300",
+                  "timingOverlay": {
+                    "index": "sse",
+                    "rules": [
+                      {
+                        "table": "mkt_idxd",
+                        "field": "CLOSE_INDEX",
+                        "op": "<",
+                        "value": 3000
+                      }
+                    ],
+                    "enterVotes": -1,
+                    "exitVotes": -1,
+                    "bearPositionPct": 0
+                  },
+                  "keepFullyInvested": false,
+                  "limitUpDownSkip": true,
+                  "slippageRate": 0,
+                  "strategyType": "equal_weight"
+                }
+              }
+            ],
+            "wallMs": 7380
+          },
+          "checks": [
+            {
+              "id": "overlay",
+              "type": "toolCall",
+              "pass": false,
+              "detail": "run_strategy_backtest 无一次调用参数包含期望子集 {\"timingOverlay\":{\"bearPositionPct\":0,\"rules\":[{\"table\":\"mkt_idxd\",\"field\":\"CLOSE_INDEX\",\"op\":\">\",\"value\":3000}]}}；实际参数：{\"endDate\":\"20231231\",\"rebalanceIntervalDays\":10,\"startDate\":\"20230101\",\"timingOverlay\":{\"bearPositionPct\":0,\"index\":\"sse\",\"rules\":[{\"field\":\"CLOSE_INDEX\",\"op\":\"<\",\"table\":\"mkt_idxd\",\"value\":3000}]}}"
+            },
+            {
+              "id": "engine",
+              "type": "engineCall",
+              "pass": true,
+              "detail": "引擎 backtest.runStrategyBacktest × 1"
+            }
+          ],
+          "protocolViolations": [],
+          "success": false
+        },
+        {
+          "runIndex": 4,
+          "trajectory": {
+            "taskId": "cal-13-timing-overlay",
+            "runIndex": 4,
+            "rounds": [
+              {
+                "inputMessageCount": 2,
+                "text": "",
+                "toolCalls": [
+                  {
+                    "name": "run_strategy_backtest",
+                    "args": {
+                      "endDate": "20231231",
+                      "rebalanceIntervalDays": 10,
+                      "sortFactors": [
+                        {
+                          "direction": 1,
+                          "field": "REVS20",
+                          "table": "equ_factor_obos"
+                        }
+                      ],
+                      "startDate": "20230101",
+                      "timingOverlay": {
+                        "bearPositionPct": 0,
+                        "index": "sse",
+                        "rules": [
+                          {
+                            "field": "CLOSE_INDEX",
+                            "op": ">",
+                            "table": "mkt_idxd",
+                            "value": 3000
+                          }
+                        ]
+                      }
+                    }
+                  }
+                ],
+                "inputTokens": 8172,
+                "outputTokens": 221
+              },
+              {
+                "inputMessageCount": 4,
+                "text": "回测已完成（card 卡片已生成，2023/1/1–2023/12/31，每10个交易日调仓，默认20日动量排序，上证<3000点空仓择时）：\n- 年化收益 +21.9%，最大回撤 -11.8%，年化换手（单边）12.4 倍\n- 持仓数默认10只、初始资金100万、默认万三费率、次日开盘成交、沪深300基准\n不构成投资建议。",
+                "toolCalls": [],
+                "inputTokens": 8363,
+                "outputTokens": 120
+              }
+            ],
+            "turns": [
+              {
+                "userText": "回测2023年全年每10个交易日调仓，默认排序；如果上证跌破3000点就整体空仓，涨回来再恢复",
+                "replyText": "将按以下参数执行策略回测：\n- 回测区间：20230101~20231231\n- 股票池：全市场\n- 调仓间隔：每 10 个交易日\n- 每期持仓：10 只 × 10%（默认）\n- 成交时点：次日开盘价\n- 排序因子：equ_factor_obos.REVS20（值大优）\n- 过滤因子：无\n- 卖出规则：无\n- 涨跌停判定：开启（官方分档价：涨停不追/跌停不卖，触及不成交）\n- 择时规则：上证指数：mkt_idxd.CLOSE_INDEX > 3000；需全部条件由熊转牛、需全部条件由牛转熊；熊市仓位 空仓\n- 初始资金/费用：1000000 元 · 单边 0.03%（默认）\n- 业绩基准：沪深300（默认）\n\n回复\"确认\"开始回测；如需调整，直接回复要改的参数（如\"改成每10个交易日调仓\"、\"区间用近一年\"、\"改成按 REVS20 值小优排序\"）；\n如需 AI 连续多次回测自动调优，回复\"授权调优\"（本轮内免确认；连续计算多组参数，整体耗时会明显长于单次回测）。",
+                "confirmPending": true,
+                "durationMs": 5003
+              },
+              {
+                "userText": "确认",
+                "replyText": "回测已完成（card 卡片已生成，2023/1/1–2023/12/31，每10个交易日调仓，默认20日动量排序，上证<3000点空仓择时）：\n- 年化收益 +21.9%，最大回撤 -11.8%，年化换手（单边）12.4 倍\n- 持仓数默认10只、初始资金100万、默认万三费率、次日开盘成交、沪深300基准\n不构成投资建议。",
+                "cardType": "backtest",
+                "confirmPending": false,
+                "durationMs": 6367
+              }
+            ],
+            "engineCalls": [
+              {
+                "mock": "backtest",
+                "method": "runStrategyBacktest",
+                "args": {
+                  "securityIds": null,
+                  "startDate": "20230101",
+                  "endDate": "20231231",
+                  "initialCapital": 1000000,
+                  "feeRate": 0.0003,
+                  "rebalanceIntervalDays": 10,
+                  "executionTiming": 0,
+                  "maxPositions": 10,
+                  "idealPositionPct": 10,
+                  "minPositionPct": 1,
+                  "entryFilters": [],
+                  "sortFactors": [
+                    {
+                      "table": "equ_factor_obos",
+                      "field": "REVS20",
+                      "direction": 1
+                    }
+                  ],
+                  "sellRules": [],
+                  "keepRules": [],
+                  "excludeRanges": [],
+                  "benchmark": "hs300",
+                  "timingOverlay": {
+                    "index": "sse",
+                    "rules": [
+                      {
+                        "table": "mkt_idxd",
+                        "field": "CLOSE_INDEX",
+                        "op": ">",
+                        "value": 3000
+                      }
+                    ],
+                    "enterVotes": -1,
+                    "exitVotes": -1,
+                    "bearPositionPct": 0
+                  },
+                  "keepFullyInvested": false,
+                  "limitUpDownSkip": true,
+                  "slippageRate": 0,
+                  "strategyType": "equal_weight"
+                }
+              }
+            ],
+            "wallMs": 11370
+          },
+          "checks": [
+            {
+              "id": "overlay",
+              "type": "toolCall",
+              "pass": true,
+              "detail": "run_strategy_backtest × 1"
+            },
+            {
+              "id": "engine",
+              "type": "engineCall",
+              "pass": true,
+              "detail": "引擎 backtest.runStrategyBacktest × 1"
+            }
+          ],
+          "protocolViolations": [],
+          "success": true
+        }
+      ],
+      "passCount": 1,
+      "passK": false
+    }
+  ]
+}

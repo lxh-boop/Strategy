@@ -128,12 +128,12 @@ export const CALIBRATION_TASKS: EvalTask[] = [
   {
     id: 'cal-10-industry-pool',
     category: 'calibration',
-    title: '行业池：有色金属 ∪ 黄金（组内并集）',
-    rationale: '同组两行业是并集语义：一个 industry 组放两个 names，不能拆成两组（组间是交集）',
-    steps: [{ user: '只做有色金属和黄金这两类股票：2023年全年每10个交易日调仓，REVS20 值大优，帮我回测' }, { confirm: '确认' }],
+    title: '行业池：有色金属 ∪ 煤炭（field 组组内并集）',
+    rationale: '同组两取值是并集语义：一个 field 组放两个 values，不能拆成两组（组间是交集）；行业粒度由字段承载（l1_name）',
+    steps: [{ user: '只做有色金属和煤炭这两类股票：2023年全年每10个交易日调仓，REVS20 值大优，帮我回测' }, { confirm: '确认' }],
     checks: [
       { id: 'screen', type: 'toolCall', name: 'screen_stock_pool',
-        argsContains: { groups: [{ kind: 'industry', names: ['有色金属', '黄金'] }] } },
+        argsContains: { groups: [{ kind: 'field', table: 'sw_member', field: 'l1_name', values: ['有色金属', '煤炭'] }] } },
       { id: 'poolid', type: 'toolCall', name: 'run_strategy_backtest', argsContains: { poolId: { $type: 'string' } } },
       { id: 'engine', type: 'engineCall', mock: 'backtest', method: 'runStrategyBacktest', times: 1 },
     ],
@@ -166,11 +166,13 @@ export const CALIBRATION_TASKS: EvalTask[] = [
     id: 'cal-13-timing-overlay',
     category: 'calibration',
     title: '大盘择时：跌破 3000 点空仓',
-    rationale: '总仓位意图必须走 timingOverlay（rules 引用 CLOSE_INDEX "<" 3000），不是 entryFilters',
+    rationale: '总仓位意图必须走 timingOverlay（rules 引用 CLOSE_INDEX ">" 3000 由熊转牛 + 熊市空仓缺省），不是 entryFilters',
     steps: [{ user: '回测2023年全年每10个交易日调仓，默认排序；如果上证跌破3000点就整体空仓，涨回来再恢复' }, { confirm: '确认' }],
     checks: [
       { id: 'overlay', type: 'toolCall', name: 'run_strategy_backtest',
-        argsContains: { timingOverlay: { rules: [{ table: 'mkt_idxd', field: 'CLOSE_INDEX', op: '<', value: 3000 }] } } },
+        // 规则语义 = 由熊转牛的入场条件（timing.ts：全部条件满足由熊转牛，牛市满仓/熊市 bearPositionPct），
+        // "跌破3000空仓" = CLOSE_INDEX > 3000 + bearPositionPct 缺省 0。期望曾误写为 '<'（v1/v2 反向口径，v3 修正）
+        argsContains: { timingOverlay: { bearPositionPct: 0, rules: [{ table: 'mkt_idxd', field: 'CLOSE_INDEX', op: '>', value: 3000 }] } } },
       { id: 'engine', type: 'engineCall', mock: 'backtest', method: 'runStrategyBacktest', times: 1 },
     ],
   },

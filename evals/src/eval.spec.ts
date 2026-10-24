@@ -24,9 +24,13 @@ it('智能体测评跑批', async () => {
   if (!tasks.length) throw new Error(`套件 ${suite}（filter=${filter ?? '-'}）没有匹配任务`);
   console.log(`[evals] suite=${suite} k=${k} 任务数=${tasks.length}${filter ? ` filter=${filter}` : ''}`);
 
-  const results = await runBatch(tasks, k, (msg) => console.log(`[evals] ${msg}`));
-  const scorecard = aggregate(label, results, k);
   const reportsDir = path.resolve(__dirname, '..', 'reports');
+  const stateFile = process.env.EVAL_STATE || path.join(reportsDir, `state-${label}.json`);
+  const results = await runBatch(tasks, k, {
+    onProgress: (msg) => console.log(`[evals] ${msg}`),
+    stateFile,
+  });
+  const scorecard = aggregate(label, results, k);
   const { mdPath, jsonPath } = writeReport(reportsDir, label, scorecard, results);
   console.log(`[evals] 指标卡已写入:\n  ${mdPath}\n  ${jsonPath}\n`);
   console.log(renderScorecardMd(scorecard, results));
