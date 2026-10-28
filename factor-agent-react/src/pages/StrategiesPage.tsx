@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { AttributionCard, BtParamItem, Strategy } from "../types";
+import type { AttributionCard, BtParamItem, Strategy, StrategyAttributionDay } from "../types";
 import { useConfig } from "../config";
 import { fmtPct, upDownCls } from "../utils/format";
 import { PerfChart, Sparkline } from "../components/charts";
@@ -189,21 +189,37 @@ function StrategyDetailCard({ s, historyView, onShowHistory, onClose, onRebackte
   const [busy, setBusy] = useState(false);
   const [attrBusy, setAttrBusy] = useState(false);
   const [attrError, setAttrError] = useState<string | null>(null);
-  const [attrCard, setAttrCard] = useState<AttributionCard | null>(
-    s.attribution ?? null,
-  );
+  /** 归因弹窗开关：点按钮先判断当天有没有记录——有直接弹卡展示，无则生成后弹出 */
+  const [attrOpen, setAttrOpen] = useState(false);
+
+  const todayKey = () => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  };
+  const archive = s.attribution ?? [];
+  const hasToday = archive.some((e) => e.generatedAt?.startsWith(todayKey()));
+  const todayEntry = archive.find((e) => e.generatedAt?.startsWith(todayKey())) ?? null;
 
   const runAttribution = async () => {
     if (attrBusy) return;
     setAttrBusy(true);
     setAttrError(null);
     try {
-      setAttrCard(await onRunAttribution(s.id));
+      await onRunAttribution(s.id); // 服务端同日覆盖、跨日追加；前端状态由 App 归档刷新
     } catch (e) {
       setAttrError(e instanceof Error ? e.message : String(e));
     } finally {
       setAttrBusy(false);
     }
+  };
+
+  const openAttribution = () => {
+    setAttrError(null);
+    if (hasToday) {
+      setAttrOpen(true); // 当天已有 → 直接展示，不重做
+      return;
+    }
+    void runAttribution().then(() => setAttrOpen(true));
   };
   const m = s.metrics;
   /* 最新一期持仓 = periodHoldings 末期；旧数据无此字段时回退演示持仓 */
@@ -297,23 +313,32 @@ function StrategyDetailCard({ s, historyView, onShowHistory, onClose, onRebackte
                     title={s.trades?.length ? "查看逐笔交易明细" : "暂无明细数据，重新回测后生成"}
                     onClick={() => onShowHistory("trades")}>历史交易</button>
                   <button className="btn btn-sm" disabled={attrBusy}
-                    title="归因分析：个股/规则/亏损行为贡献分解（LLM 解读，落库到策略）"
-                    onClick={runAttribution}>
-                    {attrBusy ? "归因中…" : "归因分析"}
+                    title={hasToday ? "查看今日归因" : "归因分析：个股/规则/亏损行为贡献分解（LLM 解读，落库到策略）"}
+                    onClick={openAttribution}>
+                    {attrBusy ? "归因中…" : hasToday ? "查看今日归因" : "归因分析"}
                   </button>
                 </>
               )}
             </div>
           </div>
           {attrError && (
-          <div className="agent-card-text" style={{ color: "var(--down)", margin: "8px 0" }}>归因分析失败：{attrError}</div>
-        )}
-        {attrCard && (
-          <div className="detail-section">
-            <div className="detail-section-title">归因分析（{attrCard.generatedAt}）</div>
-            <AttributionTables card={attrCard} />
-            {attrCard.analysis && <div className="agent-card-text"><MiniMarkdown text={attrCard.analysis} /></div>}
-          </div>
+            <div className="agent-card-text" style={{ color: "var(--down)", margin: "8px 0" }}>归因分析失败：{attrError}</div>
+          )}
+        {attrOpen && todayEntry && (
+          <Modal onClose={() => setAttrOpen(false)} ariaLabel="归因分析">
+            <div style={{ maxHeight: "78vh", overflow: "auto" }}>
+              <div className="modal-head">
+                <div className="modal-title">归因分析（{todayEntry.generatedAt.slice(0, 10)}）</div>
+                <button className="icon-btn" aria-label="关闭" onClick={() => setAttrOpen(false)}>✕</button>
+              </div>
+              <AttributionTables card={todayEntry} />
+              {todayEntry.analysis && (
+                <div className="agent-card-text" style={{ marginTop: 10 }}>
+                  <MiniMarkdown text={todayEntry.analysis} />
+                </div>
+              )}
+            </div>
+          </Modal>
         )}
         {latestPeriod ? (
             <PeriodHoldingsTable holdings={latestPeriod.holdings} />
