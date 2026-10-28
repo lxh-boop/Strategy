@@ -9,6 +9,9 @@ import {
   bubbleChars,
   formatTableCatalog,
   LangGraphAgentService,
+  projectMessagesForModel,
+  stripTableCatalog,
+  summarizeToolReceipt,
   suffixStartIndex,
   uncoveredSlice,
 } from '../../../src/agent/implementations/langgraph-agent.service';
@@ -613,5 +616,76 @@ describe('确认门真图（confirm 节点 interrupt/resume）', () => {
     expect(backtest.runStrategyBacktest).not.toHaveBeenCalled();
     const toolMsgs = (done.messages as BaseMessage[]).filter((m) => m instanceof ToolMessage);
     expect((toolMsgs[0] as ToolMessage).content).toContain('需要澄清');
+  });
+});
+
+/* ==========================================================
+   token 减负投影（prompt 分支）：表目录哨兵撤除 + 旧行回执摘要化。
+   投影只发生在喂模型边界，图状态保持全量——这里只测纯函数本身。
+   ========================================================== */
+
+describe('token 减负投影（prompt 分支）', () => {
+  const SYS = '你是因子智投。\n\n【表目录开始】\n表甲 因子表说明\n表乙 行情表说明\n【表目录结束】';
+
+  const aiRound = (id: string) =>
+    new AIMessage({ content: '', tool_calls: [{ id, name: 'run_strategy_backtest', args: {} }] });
+  const tm = (id: string, content: string) => new ToolMessage({ content, tool_call_id: id });
+
+  it('stripTableCatalog：撤除哨兵段保留正文；无哨兵原样返回', () => {
+    const stripped = stripTableCatalog(SYS);
+    expect(stripped).not.toContain('表目录开始');
+    expect(stripped).not.toContain('表甲');
+    expect(stripped).toContain('你是因子智投。');
+    expect(stripTableCatalog('没有哨兵的普通提示')).toBe('没有哨兵的普通提示');
+  });
+
+  it('summarizeToolReceipt：回测回执抽卡片编号+核心指标；非 JSON 截断兜底', () => {
+    const s = summarizeToolReceipt(
+      JSON.stringify({ ok: true, 卡片编号: 'card_1', 年化收益: '12.3%', 最大回撤: '-8.1%', 排序因子: 'REVS20' }),
+    );
+    expect(s).toContain('card_1');
+    expect(s).toContain('年化收益=12.3%');
+    expect(s).toContain('排序因子=REVS20');
+    expect(s).toContain('get_backtest_run');
+    expect(summarizeToolReceipt('纯文本回执'.repeat(30))).toContain('【历史回执摘要】');
+    expect(summarizeToolReceipt('纯文本回执'.repeat(30)).length).toBeLessThan(180);
+  });
+
+  it('首轮调用：保留表目录，最后一轮回执原样，旧行回执摘要化且 tool_call_id 配对', () => {
+    const msgs = [
+      new SystemMessage(SYS),
+      new HumanMessage('帮我回测'),
+      aiRound('c1'),
+      tm('c1', JSON.stringify({ 卡片编号: 'card_1', 年化收益: '12.3%' })),
+      aiRound('c2'),
+      tm('c2', '本轮即时回执原文'),
+    ];
+    const out = projectMessagesForModel(msgs, true);
+    expect(String((out[0] as SystemMessage).content)).toContain('【表目录开始】');
+    const old = out[3] as ToolMessage;
+    expect(old.content).toContain('【历史回执摘要】');
+    expect(old.content).toContain('card_1');
+    expect(old.tool_call_id).toBe('c1');
+    expect((out[5] as ToolMessage).content).toBe('本轮即时回执原文');
+  });
+
+  it('非首轮调用：撤除表目录正文；旧行回执仍摘要化', () => {
+    const msgs = [
+      new SystemMessage(SYS),
+      new HumanMessage('继续'),
+      aiRound('c1'),
+      tm('c1', JSON.stringify({ 卡片编号: 'card_1' })),
+      aiRound('c2'),
+      tm('c2', '最新回执'),
+    ];
+    const out = projectMessagesForModel(msgs, false);
+    expect(String((out[0] as SystemMessage).content)).not.toContain('表目录开始');
+    expect(String((out[0] as SystemMessage).content)).toContain('你是因子智投。');
+    expect((out[3] as ToolMessage).content).toContain('【历史回执摘要】');
+  });
+
+  it('无工具轮的普通消息流原样返回', () => {
+    const msgs = [new SystemMessage('无目录提示'), new HumanMessage('你好')];
+    expect(projectMessagesForModel(msgs, true)).toEqual(msgs);
   });
 });

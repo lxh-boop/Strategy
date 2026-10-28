@@ -280,6 +280,8 @@ export const RUN_STRATEGY_BACKTEST_SPEC = {
           description:
             '大盘择时（可选）：字段条件逐日投票的状态机控制总仓位——牛市满仓、熊市保留 bearPositionPct。' +
             '仅用户明确表达总仓位控制意图（如"跌破某点位就空仓"）时传。' +
+            'rules 语义 = 由熊转牛的恢复条件（全部满足即转牛市满仓；任一不满足为熊市）——' +
+            '"跌破 X 就空仓"必须写 CLOSE_INDEX > X（涨回才恢复），不要把熊市下跌条件直接写进 rules。' +
             '结构：{index:"sse"|"hs300"|"csi500", rules:[{table,field,op:">"|"<"|"bw", value 或 low/high}] 1~3 条, enterVotes, exitVotes, bearPositionPct:0~100}。' +
             '缺省：index=sse、bearPositionPct=0（空仓）、enterVotes/exitVotes=-1（需全部条件命中），缺省值提案中注明。' +
             '字段当前可用 mkt_idxd 的 CLOSE_INDEX/CHG_PCT/TURNOVER_VALUE；暂无均线/金叉类字段，用户提出时如实告知并引导改用点位/涨跌幅/量能',

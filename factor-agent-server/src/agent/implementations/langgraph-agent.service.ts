@@ -182,10 +182,14 @@ const StrategyGraphState = Annotation.Root({
    *  default 为空数组：实际入口由 reply() 注入 [SystemMessage, ...最近6条历史, 当前消息]
    *  作为起点。 */
   messages: Annotation<BaseMessage[]>({
-    
+
     reducer: (a, b) => a.concat(b),
     default: () => [],
   }),
+  /** 本次提问内 agent 节点已执行的轮数（0 = 本提问的首次模型调用）：
+   *  表目录只在首次调用注入（模型选定表后，表/字段知识已在工具回执与自身参数里，
+   *  后续轮撤掉 3.1k 的目录重复）；线程按提问隔离（每问新 thread），default 归零即跨问复位 */
+  roundsRun: Annotation<number>({ reducer: (_, b) => b, default: () => 0 }),
 });
 
 type StrategyGraphStateType = typeof StrategyGraphState.State;
@@ -309,7 +313,14 @@ export class LangGraphAgentService extends AgentService {
   private buildGraph(agent: { invoke(messages: BaseMessage[]): Promise<unknown> }) {
     return new StateGraph(StrategyGraphState)
       .addNode('agent', async (state: StrategyGraphStateType, config: RunnableConfig) => {
-        const output = (await agent.invoke(state.messages)) as AIMessage;
+        const isFirstModelCall = (state.roundsRun ?? 0) === 0;
+        // token 减负（prompt 分支）：首轮全量；后续轮撤表目录 + 旧行的回执替换为一行摘要。
+        // 投影只发生在喂模型边界，图状态保持全量（确认门/卡片/runs 落库不受影响）
+        const output = (await agent.invoke(projectMessagesForModel(state.messages, isFirstModelCall))) as AIMessage;
+        const usage = (output as { usage_metadata?: { input_tokens?: number; output_tokens?: number } }).usage_metadata;
+        if (usage?.input_tokens != null) {
+          this.logger.log(`GLM usage 会话=${state.conversationId} 入=${usage.input_tokens} 出=${usage.output_tokens ?? '?'}`);
+        }
         const calls = output.tool_calls ?? [];
         const line = calls.length
           ? `agent节点 → 工具调用 ${calls.map((c) => `${c.name}(${toLogPreview(c.args)})`).join(' ; ')}`
@@ -321,7 +332,7 @@ export class LangGraphAgentService extends AgentService {
           const stage = TOOL_STAGE[c.name] ?? c.name;
           progressSink(config)?.({ type: 'tool_call', name: c.name, stage, args: toEventPreview(c.args) });
         }
-        return { messages: [output] };
+        return { messages: [output], roundsRun: (state.roundsRun ?? 0) + 1 };
       })
       .addNode('tools', async (state: StrategyGraphStateType, config: RunnableConfig) => {
         const last = state.messages[state.messages.length - 1] as AIMessage;
@@ -1565,7 +1576,9 @@ export class LangGraphAgentService extends AgentService {
         '无论增改删，最终回复里必须告知用户动了哪条记忆（一句话即可）；',
       '- 与因子数据无关的问候或闲聊：直接简短回复（不超过 90 字），不要调用工具。',
     ].join('\n');
-    return catalog.length ? `${system}\n\n${formatTableCatalog(catalog)}` : system;
+    /* 目录用哨兵包裹：agent 节点在非首轮调用时按标记整段撤除（stripTableCatalog），
+       表/字段知识此时已在工具回执与模型自身参数里，无需每轮重付 3.1k */
+    return catalog.length ? `${system}\n\n【表目录开始】\n${formatTableCatalog(catalog)}\n【表目录结束】` : system;
   }
 
   /** 从 LangChain 异常中提取上游可读原因（首行，截断到 120 字），如 "429 余额不足或无可用资源包,请充值." */
@@ -1584,6 +1597,68 @@ export class LangGraphAgentService extends AgentService {
 /** 气泡文本总字符数（长度制度量；卡片不参与——卡片本就不进模型上下文） */
 export function bubbleChars(messages: ChatMessage[]): number {
   return messages.reduce((sum, m) => sum + m.bubble.length, 0);
+}
+
+/* ----- token 减负纯函数（prompt 分支，导出供测试） -----
+ * 投影只发生在喂模型边界（agent 节点），图状态保持全量：
+ *  - 表目录（哨兵包裹段）仅在本次提问的首次模型调用注入，后续轮整段撤除；
+ *  - 旧行的 ToolMessage 替换为一行摘要（最后一轮原样保留），tool_call_id 配对不动。
+ * 完整回执已持久化 runs 表，模型要详情用 get_backtest_run 取回。 */
+
+/** 撤除 system 文本中哨兵包裹的表目录段；无哨兵时原样返回 */
+export function stripTableCatalog(systemText: string): string {
+  const start = systemText.indexOf('【表目录开始】');
+  if (start < 0) return systemText;
+  const end = systemText.indexOf('【表目录结束】');
+  if (end < 0) return systemText;
+  return (systemText.slice(0, start).trimEnd() + '\n' + systemText.slice(end + '【表目录结束】'.length).trimStart()).trim();
+}
+
+/** 回执的一行摘要：回测回执抽 卡片编号+核心指标+参数要点（授权调优改参要参照），
+ *  其余回执截前 140 字符兜底；解析失败按纯文本处理 */
+export function summarizeToolReceipt(content: string): string {
+  const KEY_ORDER = ['卡片编号', '股票池', '区间', '调仓间隔', '排序因子', '持仓数量', '年化收益', '最大回撤', '夏普比率', '胜率'];
+  try {
+    const j = JSON.parse(content) as Record<string, unknown>;
+    if (j && typeof j === 'object' && !Array.isArray(j)) {
+      if (j['卡片编号'] != null) {
+        const parts = KEY_ORDER
+          .filter((k) => j[k] != null)
+          .map((k) => `${k}=${typeof j[k] === 'object' ? JSON.stringify(j[k]) : String(j[k])}`);
+        return `【历史回执摘要】${parts.join(' | ')}；完整结果用 get_backtest_run 调取`;
+      }
+      return `【历史回执摘要】${JSON.stringify(j).slice(0, 140)}`;
+    }
+  } catch {
+    /* 非 JSON，走纯文本兜底 */
+  }
+  return `【历史回执摘要】${content.slice(0, 140)}`;
+}
+
+/** 喂模型前的消息投影：
+ *  @param messages 图状态的全量消息流
+ *  @param isFirstModelCall 本次提问的首次模型调用（true = 保留表目录；此前无任何回执可裁）
+ *  规则：非首次调用撤除 system 的表目录段；除最后一个"工具轮"（AIMessage(tool_calls) 及其后
+ *  的 ToolMessage 组）外，更早轮的 ToolMessage 内容替换为摘要行，tool_call_id 保持配对不变 */
+export function projectMessagesForModel(messages: BaseMessage[], isFirstModelCall: boolean): BaseMessage[] {
+  let lastToolRoundStart = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m instanceof AIMessage && (m.tool_calls?.length ?? 0) > 0) {
+      lastToolRoundStart = i;
+      break;
+    }
+  }
+  return messages.map((m, i) => {
+    if (m instanceof SystemMessage && !isFirstModelCall) {
+      const stripped = stripTableCatalog(String(m.content));
+      return stripped === String(m.content) ? m : new SystemMessage({ content: stripped });
+    }
+    if (m instanceof ToolMessage && lastToolRoundStart >= 0 && i < lastToolRoundStart) {
+      return new ToolMessage({ content: summarizeToolReceipt(String(m.content)), tool_call_id: m.tool_call_id });
+    }
+    return m;
+  });
 }
 
 /** 无损不变式的注入侧：累计字符越过 coveredChars 边界的消息（边界落在整条消息上，
