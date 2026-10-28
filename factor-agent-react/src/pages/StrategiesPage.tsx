@@ -114,13 +114,14 @@ function StrategyCard({ s, onOpen, onBacktest, onDelete }: {
      不用弹窗——与策略详情卡在滑入层内左右各半并排（策略卡左移、本面板自右滑入） ----- */
 
 function HistoryPanel({ kind, s, onClose }: {
-  kind: "holdings" | "trades";
+  kind: "holdings" | "trades" | "attribution";
   s: Strategy;
   onClose: () => void;
 }) {
   const periods = s.periodHoldings ?? [];
   const trades = s.trades ?? [];
-  const title = kind === "holdings" ? "历史持仓（逐期明细）" : "历史交易（逐笔明细）";
+  const title = kind === "holdings" ? "历史持仓（逐期明细）"
+    : kind === "attribution" ? "归因分析（按天）" : "历史交易（逐笔明细）";
   return (
     <div className="card sp-history-panel" aria-label={`${title}：${s.name}`}>
       <div className="sp-history-head">
@@ -135,6 +136,16 @@ function HistoryPanel({ kind, s, onClose }: {
           </div>
         )) : (
           <div className="agent-card-text">暂无逐期持仓明细；点击「重新回测」按真引擎口径生成。</div>
+        )
+      ) : kind === "attribution" ? (
+        (s.attribution ?? []).length ? [...(s.attribution ?? [])]
+          .sort((a, b) => (a.generatedAt < b.generatedAt ? 1 : -1)).map((day) => (
+          <div key={day.generatedAt} style={{ marginBottom: 12 }}>
+            <div className="agent-card-text">归因分析（{day.generatedAt}）</div>
+            <AttributionTables card={day} />
+          </div>
+        )) : (
+          <div className="agent-card-text">暂无归因分析；点击详情卡「归因分析」按今天口径生成并落库。</div>
         )
       ) : (
         trades.length ? (
