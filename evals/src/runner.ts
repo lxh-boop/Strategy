@@ -289,7 +289,9 @@ export async function runBatch(tasks: EvalTask[], k: number, opts: BatchOptions 
       onProgress?.(`[${task.id}] run ${i + 1}/${k} …`);
       runs.push(await withWatchdog(runWithRetry(task, i + 1, onProgress), task.id, i + 1));
       onProgress?.(`[${task.id}] run ${i + 1}/${k} → ${runs[i].success ? '通过' : '未过'}`);
-      await sleep(2_000); // 轻节流：降低连续打满 GLM 限流的概率（基线 v1 后半段 429 污染实证）
+      // 节流：实测单消费者 1 req/s 全过（2026-10-23 突发探测），默认 3s/run 在安全线内；
+      // 与开发服务器共用账号或升级批量时用 EVAL_THROTTLE_MS 调大
+      await sleep(Number(process.env.EVAL_THROTTLE_MS ?? 3_000));
     }
     const passCount = runs.filter((r) => r.success).length;
     results.push({ task, runs, passCount, passK: passCount === k });

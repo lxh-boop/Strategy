@@ -62,7 +62,7 @@ export function renderScorecardMd(scorecard: Scorecard, results: TaskResult[]): 
 export function writeReport(reportsDir: string, label: string, scorecard: Scorecard, results: TaskResult[]): { mdPath: string; jsonPath: string } {
   fs.mkdirSync(reportsDir, { recursive: true });
   const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-  const base = `scorecard-${label}-${stamp}`;
+  const base = `指标卡-${label}-${stamp}`;
   const mdPath = path.join(reportsDir, `${base}.md`);
   const jsonPath = path.join(reportsDir, `${base}.json`);
   fs.writeFileSync(mdPath, renderScorecardMd(scorecard, results), 'utf8');
