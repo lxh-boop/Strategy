@@ -1,9 +1,11 @@
 import { useState } from "react";
-import type { BtParamItem, Strategy } from "../types";
+import type { AttributionCard, BtParamItem, Strategy } from "../types";
 import { useConfig } from "../config";
 import { fmtPct, upDownCls } from "../utils/format";
 import { PerfChart, Sparkline } from "../components/charts";
 import { ConfirmModal, MetricGrid, Modal, ParamsBlock } from "../components/ui";
+import { AttributionTables } from "../components/AttributionTables";
+import { MiniMarkdown } from "../components/markdown";
 import { PeriodHoldingsTable } from "../components/HoldingsTable";
 import { fmtYmd } from "../utils/format";
 import { IconClose, IconInfo, IconLogo, IconPlay, IconPlus, IconTrash } from "../components/icons";
@@ -172,7 +174,7 @@ function HistoryPanel({ kind, s, onClose }: {
 /* ----- 策略详情卡（只读展示 + 重跑；创建/调参统一在对话完成）。
      不用弹窗：由页面级滑入层承载——点详情时策略列表左移，本卡自右滑入 ----- */
 
-function StrategyDetailCard({ s, historyView, onShowHistory, onClose, onRebacktest, onDelete }: {
+function StrategyDetailCard({ s, historyView, onShowHistory, onClose, onRebacktest, onDelete, onRunAttribution }: {
   s: Strategy;
   /** 当前打开的历史面板（与详情卡左右各半并排）；null = 未打开 */
   historyView: "holdings" | "trades" | null;
@@ -181,8 +183,28 @@ function StrategyDetailCard({ s, historyView, onShowHistory, onClose, onRebackte
   onClose: () => void;
   onRebacktest: () => Promise<void>;
   onDelete: () => void;
+  /** 归因分析（ADR-0010 配套）：对已保存策略重放回测 → 归因聚合 → LLM 解读 → 落库 */
+  onRunAttribution: (id: string) => Promise<AttributionCard>;
 }) {
   const [busy, setBusy] = useState(false);
+  const [attrBusy, setAttrBusy] = useState(false);
+  const [attrError, setAttrError] = useState<string | null>(null);
+  const [attrCard, setAttrCard] = useState<AttributionCard | null>(
+    s.attribution ?? null,
+  );
+
+  const runAttribution = async () => {
+    if (attrBusy) return;
+    setAttrBusy(true);
+    setAttrError(null);
+    try {
+      setAttrCard(await onRunAttribution(s.id));
+    } catch (e) {
+      setAttrError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setAttrBusy(false);
+    }
+  };
   const m = s.metrics;
   /* 最新一期持仓 = periodHoldings 末期；旧数据无此字段时回退演示持仓 */
   const latestPeriod = s.periodHoldings && s.periodHoldings.length > 0
@@ -274,11 +296,26 @@ function StrategyDetailCard({ s, historyView, onShowHistory, onClose, onRebackte
                   <button className={"btn btn-sm " + (historyView === "trades" ? "btn-primary" : "btn-ghost")}
                     title={s.trades?.length ? "查看逐笔交易明细" : "暂无明细数据，重新回测后生成"}
                     onClick={() => onShowHistory("trades")}>历史交易</button>
+                  <button className="btn btn-sm" disabled={attrBusy}
+                    title="归因分析：个股/规则/亏损行为贡献分解（LLM 解读，落库到策略）"
+                    onClick={runAttribution}>
+                    {attrBusy ? "归因中…" : "归因分析"}
+                  </button>
                 </>
               )}
             </div>
           </div>
-          {latestPeriod ? (
+          {attrError && (
+          <div className="agent-card-text" style={{ color: "var(--down)", margin: "8px 0" }}>归因分析失败：{attrError}</div>
+        )}
+        {attrCard && (
+          <div className="detail-section">
+            <div className="detail-section-title">归因分析（{attrCard.generatedAt}）</div>
+            <AttributionTables card={attrCard} />
+            {attrCard.analysis && <div className="agent-card-text"><MiniMarkdown text={attrCard.analysis} /></div>}
+          </div>
+        )}
+        {latestPeriod ? (
             <PeriodHoldingsTable holdings={latestPeriod.holdings} />
           ) : s.holdings.length ? (
             <table className="mini-table">
@@ -535,7 +572,7 @@ function NewStrategyModal({ onClose, onConfirm, notify }: {
 
 /* ----- 页面 ----- */
 
-export function StrategiesPage({ strategies, loading, notify, onGoChat, onRebacktest, onDelete }: {
+export function StrategiesPage({ strategies, loading, notify, onGoChat, onRebacktest, onDelete, onRunAttribution }: {
   strategies: Strategy[];
   loading: boolean;
   notify: (m: string) => void;
@@ -543,6 +580,8 @@ export function StrategiesPage({ strategies, loading, notify, onGoChat, onReback
   onGoChat: (prefill?: string) => void;
   onRebacktest: (id: string) => Promise<Strategy>;
   onDelete: (id: string) => Promise<void>;
+  /** 归因分析（ADR-0010 配套）：对已保存策略重放回测 → 归因聚合 → LLM 解读 → 落库 */
+  onRunAttribution: (id: string) => Promise<AttributionCard>;
 }) {
   const [detailId, setDetailId] = useState<string | null>(null);
   /* 详情滑入层里并排打开的历史面板（与详情卡左右各半）；切详情/关闭时复位 */
@@ -645,7 +684,8 @@ export function StrategiesPage({ strategies, loading, notify, onGoChat, onReback
               onShowHistory={v => setHistoryView(cur => (cur === v ? null : v))}
               onClose={() => { setDetailId(null); setHistoryView(null); }}
               onRebacktest={() => handleRebacktest(detail)}
-              onDelete={() => setConfirmDel(detail)} />
+              onDelete={() => setConfirmDel(detail)}
+              onRunAttribution={onRunAttribution} />
             {historyView && (
               <HistoryPanel key={historyView} kind={historyView} s={detail}
                 onClose={() => setHistoryView(null)} />

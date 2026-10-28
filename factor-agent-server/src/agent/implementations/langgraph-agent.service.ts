@@ -370,6 +370,7 @@ export class LangGraphAgentService extends AgentService {
                 card: outcome.card,
               });
               outcome.result['卡片编号'] = `card_${seq}`;
+              outcome.card.cardRef = `card_${seq}`;
             }
           }
           if (outcome.backtestFreq) backtestFreq = outcome.backtestFreq;
@@ -1127,6 +1128,79 @@ export class LangGraphAgentService extends AgentService {
       },
       card: run.card as AgentCard,
     };
+  }
+
+  /** 策略页"归因分析"入口：对已保存策略重放回测（同参数确定性复现）→ 归因聚合 → GLM 解读 → 落库 */
+  async runStrategyAttribution(userId: number, strategyId: string): Promise<AttributionCard> {
+    const strategy = await this.userStore.getStrategy(userId, strategyId);
+    if (!strategy) throw new ApiException('NOT_FOUND', 404, `策略不存在：${strategyId}`);
+    if (!strategy.backtestConfig) {
+      throw new ApiException('INVALID_ARGUMENT', 400, '该策略无回测配置（旧格式），无法做归因分析');
+    }
+    const out = await this.backtest.runStrategyBacktest(strategy.backtestConfig as never);
+    const a = out.attribution ?? {
+      stocks: [], rules: [], behavior: { counts: {}, lossAmount: {} }, drawdowns: [],
+      tail: { top5SharePct: 0, maxLoss: 0, maxLossStreak: 0, profitLossRatio: -1 },
+    };
+    const dates = out.card.dates ?? [];
+    const drawdowns = a.drawdowns.map((d) => ({
+      peak: dates[d.peakIdx] ?? 0,
+      trough: dates[d.troughIdx] ?? 0,
+      recover: d.recoverIdx >= 0 ? dates[d.recoverIdx] ?? 0 : -1,
+      depthPct: Math.round(d.depthPct * 100) / 100,
+      days: d.days,
+    }));
+
+    // GLM 归因解读（数字以聚合表为准，只准引用）——无 LLM 开发模式跳过
+    let analysis: string | undefined;
+    if (this.llm) {
+      const top = a.stocks.slice(0, 5).map((s) => `${s.code} ${s.total >= 0 ? '+' : ''}${s.total}`).join('、');
+      const bottom = a.stocks.filter((s) => s.total < 0).slice(0, 5).map((s) => `${s.code} ${s.total}`).join('、');
+      const rules = a.rules.map((r) => `${r.reason}:${r.count}笔${r.realized >= 0 ? '+' : ''}${Math.round(r.realized)}`).join('；');
+      const dd = a.drawdowns.length ? `最深深 ${Math.round(Math.max(...a.drawdowns.map((d) => d.depthPct)))}%` : '无';
+      try {
+        const output = (await this.llm.invoke([
+          new SystemMessage(
+            '你是策略归因分析师。基于给定的归因聚合数据写一段归因解读（不超过 250 字）：' +
+              '主要收益来源、主要亏损来源与亏损行为四分类的占比观察、规则贡献里哪条在持续放血、给一条改进方向。' +
+              '只准引用给定数字，严禁编造；不要复述全部数据。',
+          ),
+          new HumanMessage(
+            `策略：${strategy.name}
+回测区间：${strategy.backtestConfig && typeof strategy.backtestConfig === 'object' && 'startDate' in strategy.backtestConfig ? String((strategy.backtestConfig as { startDate: unknown }).startDate) : ''}
+` +
+              `个股贡献（正）：${top || '无'}
+个股拖累（负）：${bottom || '无'}
+` +
+              `规则贡献：${rules || '无'}
+回撤：${dd}
+尾部：最差5笔占总亏损 ${a.tail.top5SharePct}%，最大连亏 ${a.tail.maxLossStreak} 批`,
+          ),
+        ])) as AIMessage;
+        analysis = extractText(output).trim();
+      } catch {
+        analysis = undefined; // 解读失败不挡数据层
+      }
+    }
+
+    const card: AttributionCard = {
+      type: 'attribution',
+      sourceCard: strategyId,
+      generatedAt: new Date().toISOString().slice(0, 10),
+      title: `归因分析 · ${strategy.name}`,
+      tag: '归因分析',
+      note: '个股=全口径（已实现 FIFO+期末浮动）；规则贡献按平仓批次触发规则计；行为四分类阈值可配',
+      stocks: a.stocks,
+      rules: a.rules,
+      behavior: a.behavior,
+      drawdowns,
+      tail: a.tail,
+      counterfactuals: [],
+      analysis,
+      config: strategy.backtestConfig,
+    };
+    await this.userStore.saveStrategyAttribution(userId, strategyId, card);
+    return card;
   }
 
   /** 归因分析（ADR-0010 配套）：按卡片编号重放该次回测（同参数确定性复现，缓存热），

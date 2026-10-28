@@ -3,6 +3,7 @@ import type { BacktestCard, Strategy } from "./types";
 import {
   ApiError, backtestStrategy as apiBacktest,
   createStrategyFromBacktest, deleteStrategy as apiDeleteStrategy, getHealth, getToken, listStrategies,
+  runStrategyAttribution,
   me as apiMe, AUTH_EXPIRED_EVENT, type HealthInfo, type UserPublic,
 } from "./api";
 import { useConversations } from "./hooks/useConversations";
@@ -81,6 +82,12 @@ function MainApp({ user }: { user: UserPublic }) {
     const s = await apiBacktest(id);
     updateStrategyState(id, s);
     return s;
+  };
+
+  const runAttribution = async (id: string) => {
+    const card = await runStrategyAttribution(id);
+    setStrategies(prev => prev.map(s => (s.id === id ? { ...s, attribution: card } : s)));
+    return card;
   };
 
   const deleteStrategyById = async (id: string) => {
@@ -192,6 +199,7 @@ function MainApp({ user }: { user: UserPublic }) {
               onStop={conv.stop}
               onSaveBacktest={saveBacktestCard}
               onGotoStrategies={() => setPage("strategies")}
+              onAskAttribution={(cardRef) => void conv.submit(`对 ${cardRef} 做归因分析`)}
               draftInput={chatDraft}
               onDraftConsumed={() => setChatDraft(null)}
             />
@@ -202,6 +210,7 @@ function MainApp({ user }: { user: UserPublic }) {
               loading={strategiesLoading}
               notify={notify}
               onGoChat={goChat}
+              onRunAttribution={runAttribution}
               onRebacktest={rebacktest}
               onDelete={id => deleteStrategyById(id).then(() => notify("策略已删除")).catch(() => {})}
             />

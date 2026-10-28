@@ -11,7 +11,7 @@ import {
   WELCOME_TEXT,
 } from '../user-store.service';
 import { nowTime } from '../../common/time';
-import { AgentCard, ChatMessage, Conversation, Strategy } from '../../types';
+import { AgentCard, AttributionCard, ChatMessage, Conversation, Strategy } from '../../types';
 
 /* ==========================================================
    用户库 MySQL 实现（M13 / SVC-D23）：alphasage_user 库，独立连接池
@@ -135,7 +135,7 @@ export class MysqlUserStoreService extends UserStoreService {
 
   async listStrategies(userId: number): Promise<Strategy[]> {
     const rows = await this.selectRows<StrategyDbRow>(
-      'SELECT id, name, universe, rebalance, benchmark, factors, status, metrics, curve, bench_curve, holdings, dates, backtest_config, params, period_holdings, trades, updated_at FROM strategies WHERE user_id = ? ORDER BY created_at, id',
+      'SELECT id, name, universe, rebalance, benchmark, factors, status, metrics, curve, bench_curve, holdings, dates, backtest_config, params, period_holdings, trades, attribution, updated_at FROM strategies WHERE user_id = ? ORDER BY created_at, id',
       [userId],
       '查询策略列表失败',
     );
@@ -144,7 +144,7 @@ export class MysqlUserStoreService extends UserStoreService {
 
   async getStrategy(userId: number, id: string): Promise<Strategy | undefined> {
     const rows = await this.selectRows<StrategyDbRow>(
-      'SELECT id, name, universe, rebalance, benchmark, factors, status, metrics, curve, bench_curve, holdings, dates, backtest_config, params, period_holdings, trades, updated_at FROM strategies WHERE user_id = ? AND id = ? LIMIT 1',
+      'SELECT id, name, universe, rebalance, benchmark, factors, status, metrics, curve, bench_curve, holdings, dates, backtest_config, params, period_holdings, trades, attribution, updated_at FROM strategies WHERE user_id = ? AND id = ? LIMIT 1',
       [userId, id],
       '查询策略失败',
     );
@@ -154,13 +154,13 @@ export class MysqlUserStoreService extends UserStoreService {
   async saveStrategy(userId: number, strategy: Strategy): Promise<void> {
     try {
       await this.exec(
-        `INSERT INTO strategies (id, user_id, name, universe, rebalance, benchmark, factors, status, metrics, curve, bench_curve, holdings, dates, backtest_config, params, period_holdings, trades)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) AS new
+        `INSERT INTO strategies (id, user_id, name, universe, rebalance, benchmark, factors, status, metrics, curve, bench_curve, holdings, dates, backtest_config, params, period_holdings, trades, attribution)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) AS new
          ON DUPLICATE KEY UPDATE name = new.name, universe = new.universe, rebalance = new.rebalance,
            benchmark = new.benchmark, factors = new.factors, status = new.status, metrics = new.metrics,
            curve = new.curve, bench_curve = new.bench_curve, holdings = new.holdings, dates = new.dates,
            backtest_config = new.backtest_config, params = new.params, period_holdings = new.period_holdings,
-           trades = new.trades`,
+           trades = new.trades, attribution = new.attribution`,
         [
           strategy.id, userId, strategy.name, strategy.universe, strategy.rebalance, strategy.benchmark,
           JSON.stringify(strategy.factors), strategy.status,
@@ -172,6 +172,7 @@ export class MysqlUserStoreService extends UserStoreService {
           strategy.params && strategy.params.length ? JSON.stringify(strategy.params) : null,
           strategy.periodHoldings && strategy.periodHoldings.length ? JSON.stringify(strategy.periodHoldings) : null,
           strategy.trades && strategy.trades.length ? JSON.stringify(strategy.trades) : null,
+          strategy.attribution ? JSON.stringify(strategy.attribution) : null,
         ],
         '保存策略失败',
       );
@@ -187,6 +188,16 @@ export class MysqlUserStoreService extends UserStoreService {
       '删除策略失败',
     );
     return result.affectedRows > 0;
+  }
+
+  /* ----- 归因分析档案（ADR-0010 配套） ----- */
+
+  async saveStrategyAttribution(userId: number, strategyId: string, attribution: AttributionCard): Promise<void> {
+    await this.exec(
+      'UPDATE strategies SET attribution = ? WHERE user_id = ? AND id = ?',
+      [JSON.stringify(attribution), userId, strategyId],
+      '保存归因分析失败',
+    );
   }
 
   /* ----- 会话 ----- */

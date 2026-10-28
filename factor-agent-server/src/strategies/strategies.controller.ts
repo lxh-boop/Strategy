@@ -1,4 +1,5 @@
 import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Param, Patch, Post } from '@nestjs/common';
+import { AgentService } from '../agent/agent.service';
 import { Strategy } from '../types';
 import { UserId } from '../common/current-user.decorator';
 import { StrategiesService } from './strategies.service';
@@ -7,7 +8,18 @@ import { BacktestParamsDto, CreateFromBacktestDto, CreateStrategyDto, UpdateStra
 /** API-08 ~ API-13、API-27（M13 起需 Bearer，数据按 token 用户隔离） */
 @Controller('api/strategies')
 export class StrategiesController {
-  constructor(private readonly strategies: StrategiesService) {}
+  constructor(
+    private readonly strategies: StrategiesService,
+    private readonly agent: AgentService,
+  ) {}
+
+  /** 归因分析（ADR-0010 配套）：对已保存策略重放回测 → 归因聚合 → GLM 解读 → 落库 */
+  @Post(':id/attribution')
+  @HttpCode(HttpStatus.OK)
+  async attribution(@UserId() userId: number, @Param('id') id: string) {
+    return this.agent.runStrategyAttribution(userId, id);
+  }
+
 
   @Get()
   async list(@UserId() userId: number): Promise<Strategy[]> {

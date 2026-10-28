@@ -154,6 +154,8 @@ export interface BacktestCard extends CardBase {
   /** 曲线逐点对应的交易日（YYYYMMDD，与 curve 等长）：x 轴按真实日期打刻度；
    *  缺省（历史旧卡片/mock 曲线）时回退月频推算 */
   dates?: number[];
+  /** 会话级持久编号引用（card_N）：归因分析按钮按它指认本次回测 */
+  cardRef?: string;
   /** 交易明细（最近 50 笔，时间正序）；旧等权卡片无此字段 */
   trades?: BacktestTrade[];
   /** 月度归因（自然月收益 %）；旧等权卡片无此字段 */
@@ -335,6 +337,8 @@ export interface Strategy {
   periodHoldings?: PeriodHoldingsRow[];
   /** 回测交易明细（引擎产出）：详情页「历史交易」数据源 */
   trades?: BacktestTrade[];
+  /** 归因分析档案（按需生成，一个策略一个档案；删除策略级联清除） */
+  attribution?: AttributionCard;
 }
 
 /* ----- 个人中心 ----- */

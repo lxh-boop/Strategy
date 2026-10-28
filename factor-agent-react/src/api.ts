@@ -4,7 +4,7 @@
    生产期同域部署时无需改动。
    错误格式按契约：{ "error": { "code", "message" } }
    ========================================================== */
-import type {
+import type { AttributionCard,
   AgentCard,
   BacktestRunConfig,
   StrategyRunConfig,
@@ -287,6 +287,10 @@ export async function sendMessageStream(
 export const listStrategies = () => http<Strategy[]>("GET", "/strategies");
 export const backtestStrategy = (id: string) => http<Strategy>("POST", `/strategies/${id}/backtest`, {});
 export const deleteStrategy = (id: string) => http<void>("DELETE", `/strategies/${id}`);
+
+/** 归因分析（ADR-0010 配套）：对已保存策略重放回测 → 归因聚合 → LLM 解读 → 落库到策略 */
+export const runStrategyAttribution = (id: string) =>
+  http<AttributionCard>("POST", `/strategies/${id}/attribution`, {});
 
 /** API-27：把回测卡片保存为策略——服务端按 config 重跑真引擎（数字与卡片一致）；
  *  新引擎卡片为 StrategyRunConfig，历史等权卡片为 BacktestRunConfig */

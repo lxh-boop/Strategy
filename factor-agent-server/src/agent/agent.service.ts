@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { AgentProgressSink, AgentReply, Conversation } from '../types';
+import { AgentProgressSink, AgentReply, AttributionCard, Conversation } from '../types';
 
 /* ==========================================================
    智能体引擎接口（契约层）—— 业务层（会话模块）唯一可见的能力：
@@ -40,5 +40,12 @@ export abstract class AgentService {
   ): Promise<AgentReply> {
     void onProgress;
     return this.reply(conversation, userText, routeText);
+  }
+
+  /** 归因分析（策略页入口，ADR-0010 配套）：对已保存策略重放回测 → 归因聚合 → GLM 解读 → 落库。
+   *  返回归因卡（数据层 + GLM 解读）。缺省实现 = 不支持（开发模式） */
+  runStrategyAttribution(userId: number, strategyId: string): Promise<AttributionCard> {
+    void userId; void strategyId;
+    return Promise.reject(new Error('归因分析需要配置 GLM Key 后使用'));
   }
 }
