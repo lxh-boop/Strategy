@@ -141,8 +141,13 @@ function HistoryPanel({ kind, s, onClose }: {
         (s.attribution ?? []).length ? [...(s.attribution ?? [])]
           .sort((a, b) => (a.generatedAt < b.generatedAt ? 1 : -1)).map((day) => (
           <div key={day.generatedAt} style={{ marginBottom: 12 }}>
-            <div className="agent-card-text">归因分析（{day.generatedAt}）</div>
+            <div className="detail-section-title">归因分析（{day.generatedAt}{day.generatedAt?.startsWith(isoToday()) ? " · 今日" : ""}）</div>
             <AttributionTables card={day} />
+            {day.analysis && (
+              <div className="agent-card-text" style={{ marginTop: 8 }}>
+                <MiniMarkdown text={day.analysis} />
+              </div>
+            )}
           </div>
         )) : (
           <div className="agent-card-text">暂无归因分析；点击详情卡「归因分析」按今天口径生成并落库。</div>
@@ -188,9 +193,9 @@ function HistoryPanel({ kind, s, onClose }: {
 function StrategyDetailCard({ s, historyView, onShowHistory, onClose, onRebacktest, onDelete, onRunAttribution }: {
   s: Strategy;
   /** 当前打开的历史面板（与详情卡左右各半并排）；null = 未打开 */
-  historyView: "holdings" | "trades" | null;
+  historyView: "holdings" | "trades" | "attribution" | null;
   /** 点击历史按钮：同键再点关闭 */
-  onShowHistory: (v: "holdings" | "trades") => void;
+  onShowHistory: (v: "holdings" | "trades" | "attribution") => void;
   onClose: () => void;
   onRebacktest: () => Promise<void>;
   onDelete: () => void;
@@ -200,37 +205,36 @@ function StrategyDetailCard({ s, historyView, onShowHistory, onClose, onRebackte
   const [busy, setBusy] = useState(false);
   const [attrBusy, setAttrBusy] = useState(false);
   const [attrError, setAttrError] = useState<string | null>(null);
-  /** 归因弹窗开关：点按钮先判断当天有没有记录——有直接弹卡展示，无则生成后弹出 */
-  const [attrOpen, setAttrOpen] = useState(false);
 
-  const todayKey = () => {
-    const d = new Date();
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-  };
+  const todayKey = isoToday;
   const archive = s.attribution ?? [];
   const hasToday = archive.some((e) => e.generatedAt?.startsWith(todayKey()));
-  const todayEntry = archive.find((e) => e.generatedAt?.startsWith(todayKey())) ?? null;
 
-  const runAttribution = async () => {
-    if (attrBusy) return;
+  const runAttribution = async (): Promise<boolean> => {
+    if (attrBusy) return false;
     setAttrBusy(true);
     setAttrError(null);
     try {
       await onRunAttribution(s.id); // 服务端同日覆盖、跨日追加；前端状态由 App 归档刷新
+      return true;
     } catch (e) {
       setAttrError(e instanceof Error ? e.message : String(e));
+      return false;
     } finally {
       setAttrBusy(false);
     }
   };
 
+  /* 归因分析与历史持仓/交易同款交互：走右侧滑入面板。当天已有 → 直接开面板；没有 → 生成成功后开 */
   const openAttribution = () => {
     setAttrError(null);
     if (hasToday) {
-      setAttrOpen(true); // 当天已有 → 直接展示，不重做
+      onShowHistory("attribution");
       return;
     }
-    void runAttribution().then(() => setAttrOpen(true));
+    void runAttribution().then((ok) => {
+      if (ok && historyView !== "attribution") onShowHistory("attribution");
+    });
   };
   const m = s.metrics;
   /* 最新一期持仓 = periodHoldings 末期；旧数据无此字段时回退演示持仓 */
@@ -323,8 +327,9 @@ function StrategyDetailCard({ s, historyView, onShowHistory, onClose, onRebackte
                   <button className={"btn btn-sm " + (historyView === "trades" ? "btn-primary" : "btn-ghost")}
                     title={s.trades?.length ? "查看逐笔交易明细" : "暂无明细数据，重新回测后生成"}
                     onClick={() => onShowHistory("trades")}>历史交易</button>
-                  <button className="btn btn-sm" disabled={attrBusy}
-                    title={hasToday ? "查看今日归因" : "归因分析：个股/规则/亏损行为贡献分解（LLM 解读，落库到策略）"}
+                  <button className={"btn btn-sm " + (historyView === "attribution" ? "btn-primary" : "btn-ghost")}
+                    disabled={attrBusy}
+                    title={hasToday ? "查看今日归因（按天档案在右侧面板）" : "归因分析：个股/规则/亏损行为贡献分解（LLM 解读，落库到策略）"}
                     onClick={openAttribution}>
                     {attrBusy ? "归因中…" : hasToday ? "查看今日归因" : "归因分析"}
                   </button>
@@ -335,22 +340,6 @@ function StrategyDetailCard({ s, historyView, onShowHistory, onClose, onRebackte
           {attrError && (
             <div className="agent-card-text" style={{ color: "var(--down)", margin: "8px 0" }}>归因分析失败：{attrError}</div>
           )}
-        {attrOpen && todayEntry && (
-          <Modal onClose={() => setAttrOpen(false)} ariaLabel="归因分析">
-            <div style={{ maxHeight: "78vh", overflow: "auto" }}>
-              <div className="modal-head">
-                <div className="modal-title">归因分析（{todayEntry.generatedAt.slice(0, 10)}）</div>
-                <button className="icon-btn" aria-label="关闭" onClick={() => setAttrOpen(false)}>✕</button>
-              </div>
-              <AttributionTables card={todayEntry} />
-              {todayEntry.analysis && (
-                <div className="agent-card-text" style={{ marginTop: 10 }}>
-                  <MiniMarkdown text={todayEntry.analysis} />
-                </div>
-              )}
-            </div>
-          </Modal>
-        )}
         {latestPeriod ? (
             <PeriodHoldingsTable holdings={latestPeriod.holdings} />
           ) : s.holdings.length ? (
@@ -621,7 +610,7 @@ export function StrategiesPage({ strategies, loading, notify, onGoChat, onReback
 }) {
   const [detailId, setDetailId] = useState<string | null>(null);
   /* 详情滑入层里并排打开的历史面板（与详情卡左右各半）；切详情/关闭时复位 */
-  const [historyView, setHistoryView] = useState<"holdings" | "trades" | null>(null);
+  const [historyView, setHistoryView] = useState<"holdings" | "trades" | "attribution" | null>(null);
   const [reportId, setReportId] = useState<string | null>(null);
   const [showNew, setShowNew] = useState(false);
   const [confirmDel, setConfirmDel] = useState<Strategy | null>(null);

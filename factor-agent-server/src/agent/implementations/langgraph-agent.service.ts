@@ -1137,6 +1137,10 @@ export class LangGraphAgentService extends AgentService {
     if (!strategy.backtestConfig) {
       throw new ApiException('INVALID_ARGUMENT', 400, '该策略无回测配置（旧格式），无法做归因分析');
     }
+    // 当天已有档案 → 直接返回既有记录：不重放回测、不重复消耗 GLM（与前端「今天有就展示」同语义，此处为服务端兜底）
+    const today = new Date().toISOString().slice(0, 10);
+    const existing = (strategy.attribution ?? []).find((e) => e.generatedAt?.startsWith(today));
+    if (existing) return existing;
     const out = await this.backtest.runStrategyBacktest(strategy.backtestConfig as never);
     const a = out.attribution ?? {
       stocks: [], rules: [], behavior: { counts: {}, lossAmount: {} }, drawdowns: [],

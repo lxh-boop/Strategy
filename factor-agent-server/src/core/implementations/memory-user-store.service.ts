@@ -74,11 +74,18 @@ export class MemoryUserStoreService extends UserStoreService {
 
   /* ----- 策略 ----- */
   async listStrategies(userId: number): Promise<Strategy[]> {
-    return [...this.strategies.entries()].filter(([k]) => k.startsWith(`${userId}|`)).map(([, s]) => s);
+    return [...this.strategies.entries()].filter(([k]) => k.startsWith(`${userId}|`)).map(([, s]) => this.withAttribution(userId, s));
   }
 
   async getStrategy(userId: number, id: string): Promise<Strategy | undefined> {
-    return this.strategies.get(this.key(userId, id));
+    const s = this.strategies.get(this.key(userId, id));
+    return s ? this.withAttribution(userId, s) : undefined;
+  }
+
+  /** 归因档案独立存 Map，读策略时并回（与 MySQL 单列存取同语义） */
+  private withAttribution(userId: number, s: Strategy): Strategy {
+    const archive = this.strategyAttributions.get(this.key(userId, s.id));
+    return archive ? { ...s, attribution: archive } : s;
   }
 
   async saveStrategy(userId: number, strategy: Strategy): Promise<void> {

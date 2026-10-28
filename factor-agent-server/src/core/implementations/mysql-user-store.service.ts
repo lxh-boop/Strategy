@@ -51,6 +51,7 @@ interface StrategyDbRow {
   params: unknown;
   period_holdings: unknown;
   trades: unknown;
+  attribution: unknown;
   updated_at: string;
 }
 
@@ -431,6 +432,7 @@ export class MysqlUserStoreService extends UserStoreService {
       params: (r.params ?? undefined) as Strategy['params'],
       periodHoldings: (r.period_holdings ?? undefined) as Strategy['periodHoldings'],
       trades: (r.trades ?? undefined) as Strategy['trades'],
+      attribution: (r.attribution ?? undefined) as Strategy['attribution'],
     };
   }
 

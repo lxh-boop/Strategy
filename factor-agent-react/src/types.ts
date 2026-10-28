@@ -274,6 +274,12 @@ export interface AttributionCard extends CardBase {
 
 export type AgentCard = BacktestCard | RankAnalysisCard | CorrelationCard | ScreenCard | AttributionCard;
 
+/** 归因分析档案条目：一天一份（generatedAt = 生成日，同日覆盖） */
+export interface StrategyAttributionDay extends AttributionCard {
+  /** 生成日 YYYY-MM-DD */
+  generatedAt: string;
+}
+
 export interface AgentReply {
   text: string;
   card?: AgentCard;       // 普通对话（chat）与 LLM 失败的回复没有卡片
@@ -338,7 +344,8 @@ export interface Strategy {
   /** 回测交易明细（引擎产出）：详情页「历史交易」数据源 */
   trades?: BacktestTrade[];
   /** 归因分析档案（按需生成，一个策略一个档案；删除策略级联清除） */
-  attribution?: AttributionCard;
+  /** 归因分析档案（按天保留：一天一份，同日覆盖跨日追加；删除策略级联清除） */
+  attribution?: StrategyAttributionDay[];
 }
 
 /* ----- 个人中心 ----- */

@@ -364,8 +364,8 @@ export interface Strategy {
   periodHoldings?: PeriodHoldingsRow[];
   /** 回测交易明细（引擎产出）：详情页「历史交易」数据源 */
   trades?: BacktestTrade[];
-  /** 归因分析档案（按需生成，一个策略一个档案、按生成日期保留：同日覆盖跨日追加；删除策略级联清除） */
-  attribution?: AttributionCard;
+  /** 归因分析档案（按需生成，一天一份、按生成日期保留：同日覆盖跨日追加；删除策略级联清除） */
+  attribution?: StrategyAttributionDay[];
 }
 
 /* ----- 个人中心 ----- */

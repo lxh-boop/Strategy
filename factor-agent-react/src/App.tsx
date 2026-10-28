@@ -86,7 +86,9 @@ function MainApp({ user }: { user: UserPublic }) {
 
   const runAttribution = async (id: string) => {
     const card = await runStrategyAttribution(id);
-    setStrategies(prev => prev.map(s => (s.id === id ? { ...s, attribution: card } : s)));
+    setStrategies(prev => prev.map(s => (s.id === id
+      ? { ...s, attribution: [...(s.attribution ?? []).filter((e) => e.generatedAt?.slice(0, 10) !== card.generatedAt?.slice(0, 10)), card] }
+      : s)));
     return card;
   };
 
