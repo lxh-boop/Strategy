@@ -14,6 +14,7 @@ function industryEngine(): typeof import('../industry-engine') {
   return require('../industry-engine');
 }
 
+import { buildAttribution } from '../attribution';
 import { ApiException } from '../../common/api.exception';
 import {
   aggregateNav,
@@ -413,7 +414,16 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
       `策略回测 ${p.startDate}~${p.endDate} 每${p.rebalanceIntervalDays}交易日: ` +
         `年化=${summary.年化收益} 回撤=${summary.最大回撤} 夏普=${summary.夏普比率} 交易 ${loop.trades.length} 笔 费用 ${summary.总费用}`,
     );
-    return { card, summary, metrics: aggregate.metrics };
+    // 归因聚合（ADR-0010 配套）：个股全口径/规则分组/亏损行为/回撤窗/尾部——纯内存计算
+    const attribution = buildAttribution({
+      trades: loop.trades,
+      dates: tradeDates,
+      equities: loop.equities,
+      closeAt: (code, dayIdx) => quotes.get(code)?.get(tradeDates[dayIdx] ?? -1)?.close,
+      finalPositions: loop.positions,
+      lastClose: loop.lastClose,
+    });
+    return { card, summary, metrics: aggregate.metrics, attribution };
   }
 
   /* ----- 单日截面信号（回测信号预计算与每日选股共用） ----- */

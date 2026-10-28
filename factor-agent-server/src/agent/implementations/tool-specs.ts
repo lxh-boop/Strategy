@@ -576,6 +576,25 @@ export const SAVE_MEMORY_SPEC = {
   },
 };
 
+/** 归因分析工具：对指定回测（card_N）做个股/规则/亏损侧归因聚合 + GLM 解读（ADR-0010 配套） */
+const RUN_ATTRIBUTION_ANALYSIS_SPEC = {
+  type: 'function' as const,
+  function: {
+    name: 'run_attribution_analysis',
+    description:
+      '归因分析：对指定回测做个股贡献/卖出规则贡献/亏损行为（回撤窗/买错卖晚卖早踏空/尾部集中度）聚合，' +
+      '并生成归因解读——用户要求"归因分析/为什么赚为什么亏/钱是哪只票赚的"时使用；' +
+    '参数 card 原样照抄回执或 list_backtest_runs 里的卡片编号（如 card_2）',
+    parameters: {
+      type: 'object',
+      properties: {
+        card: { type: 'string', description: '卡片编号，原样照抄（如 card_2）' },
+      },
+      required: ['card'],
+    },
+  },
+} as const;
+
 /** 会话回测存档清单：编号/日期/标题索引（ADR-0010 F7）——模型据此跨轮回看，
  *  目标确认后用 get_backtest_run 调出展示；只给索引级摘要，完整卡片绕过 LLM（只信卡片） */
 const LIST_BACKTEST_RUNS_SPEC = {
@@ -619,6 +638,7 @@ export const AGENT_TOOL_SPECS = [
   SCREEN_STOCK_POOL_SPEC,
   LIST_BACKTEST_RUNS_SPEC,
   GET_BACKTEST_RUN_SPEC,
+  RUN_ATTRIBUTION_ANALYSIS_SPEC,
   SAVE_MEMORY_SPEC,
 ] as const;
 

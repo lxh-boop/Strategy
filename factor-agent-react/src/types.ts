@@ -246,7 +246,31 @@ export interface CorrelationCard extends CardBase {
   periodCount: number;
 }
 
-export type AgentCard = BacktestCard | RankAnalysisCard | CorrelationCard | ScreenCard;
+export interface AttributionCard extends CardBase {
+  type: "attribution";
+  sourceCard: string;
+  generatedAt: string;
+  stocks: {
+    code: string;
+    realized: number;
+    floating: number;
+    total: number;
+    batches: number;
+    winRatePct: number;
+    shares?: number;
+    entryPrice?: number;
+    lastClose?: number;
+  }[];
+  rules: { reason: string; count: number; realized: number; avgHoldingDays: number }[];
+  behavior: { counts: Record<string, number>; lossAmount: Record<string, number> };
+  drawdowns: { peak: number; trough: number; recover: number; depthPct: number; days: number }[];
+  tail: { top5SharePct: number; maxLoss: number; maxLossStreak: number; profitLossRatio: number };
+  counterfactuals: { removed: string; annualPct: number | null; drawdownPct: number | null; trades: number }[];
+  analysis?: string;
+  config?: unknown;
+}
+
+export type AgentCard = BacktestCard | RankAnalysisCard | CorrelationCard | ScreenCard | AttributionCard;
 
 export interface AgentReply {
   text: string;

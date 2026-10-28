@@ -4,7 +4,7 @@ import { AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage } from
 import { RunnableConfig } from '@langchain/core/runnables';
 import { Annotation, Command, END, GraphInterrupt, interrupt, MemorySaver, START, StateGraph } from '@langchain/langgraph';
 import { ChatOpenAI } from '@langchain/openai';
-import { AgentCard, AgentProgressSink, AgentReply, ChatMessage, Conversation, CorrelationCard, RankAnalysisCard, ScreenCard } from '../../types';
+import { AgentCard, AgentProgressSink, AgentReply, AttributionCard, BacktestCard, ChatMessage, Conversation, CorrelationCard, RankAnalysisCard, ScreenCard } from '../../types';
 import { ApiException } from '../../common/api.exception';
 import { appendConversationLog } from '../../common/conversation-log';
 import {
@@ -63,6 +63,7 @@ const TOOL_STAGE: Record<string, string> = {
   screen_stock_pool: '股票池筛选',
   list_backtest_runs: '查询回测存档',
   get_backtest_run: '调取历史回测',
+  run_attribution_analysis: '归因聚合计算',
   save_memory: '记忆维护',
 };
 
@@ -618,6 +619,7 @@ export class LangGraphAgentService extends AgentService {
     run_factor_correlation: async (args) => this.execRunFactorCorrelation(args as Record<string, unknown>),
     list_backtest_runs: async (_args, ctx) => this.execListBacktestRuns(ctx.conversationId),
     get_backtest_run: async (args, ctx) => this.execGetBacktestRun(String((args as { card?: string }).card ?? ''), ctx.conversationId),
+    run_attribution_analysis: async (args, ctx) => this.execRunAttributionAnalysis(args as { card?: string }, ctx.conversationId),
     // 每日选股/股票池筛选：只读零副作用，不进 CONFIRMABLE（免确认，即查即得）
     run_daily_screen: async (args, ctx) => this.execRunDailyScreen(args as DailyScreenInput, ctx),
     screen_stock_pool: async (args, ctx) => this.execScreenStockPool(args as { groups?: unknown }, ctx),
@@ -1124,6 +1126,97 @@ export class LangGraphAgentService extends AgentService {
         解读: '以上为该次回测的摘要；完整卡片（净值曲线/交易明细/每期持仓）已在对话中展示，请只引用以上数字下结论',
       },
       card: run.card as AgentCard,
+    };
+  }
+
+  /** 归因分析（ADR-0010 配套）：按卡片编号重放该次回测（同参数确定性复现，缓存热），
+   *  引擎内算归因聚合 → 摘要进回执给 GLM 写解读，完整 AttributionCard 走 card 通道直达前端。
+   *  未保存策略的归因只在对话内展示；数字以聚合表为准（只信卡片） */
+  private async execRunAttributionAnalysis(args: { card?: string }, conversationId: string): Promise<ToolOutcome> {
+    const ref = String(args.card ?? '');
+    const seq = Number(/(\d+)\s*$/.exec(ref)?.[1] ?? NaN);
+    if (!Number.isInteger(seq) || seq <= 0) {
+      return { result: { 提示: `卡片编号无效：${ref}（形如 card_2）` } };
+    }
+    const run = await this.userStore.getBacktestRunBySeq(conversationId, seq);
+    if (!run) {
+      return { result: { 提示: `本会话没有 card_${seq} 的回测存档；可用 list_backtest_runs 查看有效编号` } };
+    }
+    const saved = run.card as BacktestCard;
+    if (!saved.config) {
+      return { result: { error: '该回测无可复现配置（旧格式卡片），无法做归因分析' } };
+    }
+    const out = await this.backtest.runStrategyBacktest(saved.config as never);
+    const a = out.attribution ?? { stocks: [], rules: [], behavior: { counts: {}, lossAmount: {} }, drawdowns: [], tail: { top5SharePct: 0, maxLoss: 0, maxLossStreak: 0, profitLossRatio: -1 } };
+
+    // 反事实规则复盘：对每条卖出规则做"剔除后重跑"，与原策略对照（ADR-0010 配套，方法论=掘金 rank_out 定案）
+    const baseCfg = (saved.config ?? {}) as { sellRules?: Array<Record<string, unknown>> };
+    const baseRules = Array.isArray(baseCfg.sellRules) ? baseCfg.sellRules : [];
+    const describeRule = (r: Record<string, unknown>): string => {
+      const kind = String(r.kind ?? '');
+      if (kind === 'field') return `${String(r.table ?? '')}.${String(r.field ?? '')}${String(r.op ?? '')}${String(r.value ?? '')}`;
+      if (kind === 'stop_profit') return `止盈+${String(r.pct ?? '')}%`;
+      if (kind === 'stop_loss') return `止损-${String(r.pct ?? '')}%`;
+      if (kind === 'max_drawdown_from_entry') return `回撤止盈${String(r.pct ?? '')}%`;
+      if (kind === 'max_hold_days') return `持有满${String(r.days ?? '')}日`;
+      if (kind === 'rank_out') return `排名跌出前${String(r.bottomN ?? '')}`;
+      return kind;
+    };
+    const counterfactuals: { removed: string; annualPct: number | null; drawdownPct: number | null; trades: number }[] = [];
+    const parsePct = (v: unknown): number | null => {
+      const n = parseFloat(String(v ?? '').replace('%', ''));
+      return Number.isFinite(n) ? n : null;
+    };
+    for (let i = 0; i < baseRules.length; i++) {
+      const reduced = { ...saved.config, sellRules: baseRules.filter((_, j) => j !== i) } as never;
+      try {
+        const r = await this.backtest.runStrategyBacktest(reduced);
+        counterfactuals.push({
+          removed: describeRule(baseRules[i]),
+          annualPct: parsePct(r.summary['年化收益']),
+          drawdownPct: parsePct(r.summary['最大回撤']),
+          trades: (() => { const m = /买\s*(\d+)\s*\/\s*卖\s*(\d+)/.exec(String(r.summary['交易笔数'] ?? '')); return m ? Number(m[1]) + Number(m[2]) : 0; })(),
+        });
+      } catch {
+        // 剔除该规则后回测失败：跳过该反事实（不挡主流程）
+      }
+    }
+    const card: AttributionCard = {
+      type: 'attribution',
+      sourceCard: `card_${seq}`,
+      generatedAt: new Date().toISOString().slice(0, 10),
+      title: `归因分析 · card_${seq}`,
+      tag: '归因分析',
+      note: '个股=全口径（已实现 FIFO+期末浮动）；规则贡献按平仓批次触发规则计；行为四分类阈值可配',
+      stocks: a.stocks,
+      rules: a.rules,
+      behavior: a.behavior,
+      drawdowns: (out.card.dates ?? []).length
+        ? a.drawdowns.map((d) => ({
+            peak: (out.card.dates ?? [])[d.peakIdx] ?? 0,
+            trough: (out.card.dates ?? [])[d.troughIdx] ?? 0,
+            recover: d.recoverIdx >= 0 ? (out.card.dates ?? [])[d.recoverIdx] ?? 0 : -1,
+            depthPct: Math.round(d.depthPct * 100) / 100,
+            days: d.days,
+          }))
+        : [],
+      tail: a.tail,
+      counterfactuals,
+      config: saved.config,
+    };
+    const top = a.stocks.slice(0, 3).map((s) => `${s.code} ${s.total >= 0 ? '+' : ''}${s.total}`).join('、');
+    const bottom = a.stocks.slice(-3).map((s) => `${s.code} ${s.total >= 0 ? '+' : ''}${s.total}`).join('、');
+    return {
+      result: {
+        卡片编号: `card_${seq}`,
+        个股贡献总榜: `正贡献 ${top}；拖累 ${bottom}`,
+        规则贡献: a.rules.map((r) => `${r.reason}:${r.count}笔${r.realized >= 0 ? '+' : ''}${Math.round(r.realized)}`).join('；'),
+        亏损行为: Object.entries(a.behavior.counts).map(([k, v]) => `${k}:${v}笔`).join('；'),
+        回撤窗: a.drawdowns.length ? `${a.drawdowns.length} 个（最深 ${Math.max(...a.drawdowns.map((d) => Math.round(d.depthPct)))}%）` : '无显著回撤窗',
+        尾部集中度: `最差5笔占总亏损 ${a.tail.top5SharePct}%`,
+        解读指引: '请基于以上聚合数字写归因解读（哪类决策在重复亏钱/赚钱的来源），只准引用本回执数字',
+      },
+      card,
     };
   }
 

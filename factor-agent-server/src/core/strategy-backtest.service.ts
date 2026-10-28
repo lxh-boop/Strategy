@@ -1296,6 +1296,9 @@ export interface StrategyBacktestOutput {
   summary: Record<string, unknown>;
   /** RawMetrics 口径（annual/drawdown/sharpe/winRate，已四舍五入），与 card.metrics 展示串同源 */
   metrics: RawMetrics;
+  /** 归因聚合（ADR-0010 配套）：个股全口径/规则分组/亏损行为/回撤窗/尾部。
+   *  策略回测引擎产出；触发引擎暂不产出（undefined） */
+  attribution?: import('./attribution').AttributionSummary;
 }
 
 /* ----- 每日选股（果仁「每日选股」面板对标）：不跑回测，单日截面 → 过滤 → 排序 → 清单 ----- */

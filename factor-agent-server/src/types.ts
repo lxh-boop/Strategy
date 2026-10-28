@@ -193,7 +193,41 @@ export interface BacktestCard extends CardBase {
   recentSold?: string[];
 }
 
-export type AgentCard = BacktestCard | RankAnalysisCard | CorrelationCard | ScreenCard;
+export type AgentCard = BacktestCard | RankAnalysisCard | CorrelationCard | ScreenCard | AttributionCard;
+
+/** 归因分析卡（run_attribution_analysis 产出，ADR-0010 配套）：
+ *  聚合数据层由引擎确定性计算；analysis 为 GLM 归因解读（数字以聚合表为准，只准引用） */
+export interface AttributionCard extends CardBase {
+  type: 'attribution';
+  /** 归因对应的回测卡片编号（card_N，会话级持久 seq） */
+  sourceCard: string;
+  generatedAt: string;
+  /** 个股贡献（全口径=已实现+期末浮动，按 |total| 降序） */
+  stocks: {
+    code: string;
+    realized: number;
+    floating: number;
+    total: number;
+    batches: number;
+    winRatePct: number;
+    shares?: number;
+    entryPrice?: number;
+    lastClose?: number;
+  }[];
+  /** 卖出规则贡献（按 reason 分组） */
+  rules: { reason: string; count: number; realized: number; avgHoldingDays: number }[];
+  /** 亏损行为四分类（笔数/亏损金额） */
+  behavior: { counts: Record<string, number>; lossAmount: Record<string, number> };
+  /** 回撤窗口（peak/trough 为交易日 YYYYMMDD；recover=-1 未修复） */
+  drawdowns: { peak: number; trough: number; recover: number; depthPct: number; days: number }[];
+  tail: { top5SharePct: number; maxLoss: number; maxLossStreak: number; profitLossRatio: number };
+  /** 反事实规则复盘：剔除某条卖出规则后的指标对照 */
+  counterfactuals: { removed: string; annualPct: number | null; drawdownPct: number | null; trades: number }[];
+  /** GLM 归因解读（数字以聚合表为准） */
+  analysis?: string;
+  /** 归因对应的回测配置（重放/保存用） */
+  config?: unknown;
+}
 
 /** 每日选股清单卡（run_daily_screen 产出：单日截面 → 过滤 → 排序 → 入选清单） */
 export interface ScreenCard extends CardBase {
