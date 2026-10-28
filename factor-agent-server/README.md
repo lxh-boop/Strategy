@@ -156,3 +156,18 @@ START → agent(GLM，绑定 2 个工具) ⇄ tools(执行工具) → 最终文�
   `core/screen.service.ts`，LangGraph 中加工具节点即可；
 - 可选增强（契约 §5）：流式回复（SSE：先推 `{"type":"text","delta"}` 再推 `{"type":"card"}`）、
   回测进度、报告导出。
+
+## 目录结构（本层）
+
+```text
+factor-agent-server/
+├── SQL/           # 数据字典：因子库各表结构说明与行业/板块数据下载
+├── docs/          # 后端文档：库表、技术要点、测试用例、回测引擎重构方案
+├── logs/          # 运行日志（后端/前端/会话，gitignore）
+├── memories/      # 跨对话长期记忆存储（按用户目录，运行时产物）
+├── scripts/       # 冒烟脚本：直连库与引擎的快速自检
+├── src/           # 源码：按模块划分（agent/core/auth/user 等，各目录内有 README）
+├── test/          # 单元测试：按 src 模块镜像组织
+├── .env.example   # 环境变量样例（数据库、ZHIPU_API_KEY 等）
+└── nest-cli.json / tsconfig*.json / package.json   # 构建与工程配置
+```
