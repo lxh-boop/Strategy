@@ -197,6 +197,12 @@ export interface BacktestCard extends CardBase {
 
 export type AgentCard = BacktestCard | RankAnalysisCard | CorrelationCard | ScreenCard | AttributionCard;
 
+/** 归因分析档案条目：一天一份（generatedAt = 生成日，同日覆盖） */
+export interface StrategyAttributionDay extends AttributionCard {
+  /** 生成日 YYYY-MM-DD */
+  generatedAt: string;
+}
+
 /** 归因分析卡（run_attribution_analysis 产出，ADR-0010 配套）：
  *  聚合数据层由引擎确定性计算；analysis 为 GLM 归因解读（数字以聚合表为准，只准引用） */
 export interface AttributionCard extends CardBase {

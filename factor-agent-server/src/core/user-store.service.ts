@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { AttributionCard, ChatMessage, Conversation, Strategy } from '../types';
+import { AttributionCard, ChatMessage, Conversation, Strategy, StrategyAttributionDay } from '../types';
 
 /* ==========================================================
    用户库存储接口（SVC-D23，契约层）—— M13 登录鉴权与多用户。
@@ -54,9 +54,9 @@ export abstract class UserStoreService {
   abstract getStrategy(userId: number, id: string): Promise<Strategy | undefined>;
   abstract saveStrategy(userId: number, strategy: Strategy): Promise<void>;
   /** 归因分析档案保存（ADR-0010 配套）：同日覆盖、跨日追加的语义由调用方保证 */
-  abstract saveStrategyAttribution(userId: number, strategyId: string, attribution: AttributionCard): Promise<void>;
+  abstract saveStrategyAttribution(userId: number, strategyId: string, attribution: StrategyAttributionDay): Promise<void>;
   /** 归因分析档案保存（ADR-0010 配套）：同日覆盖、跨日追加的语义由调用方保证 */
-  abstract saveStrategyAttribution(userId: number, strategyId: string, attribution: AttributionCard): Promise<void>;
+  abstract saveStrategyAttribution(userId: number, strategyId: string, attribution: StrategyAttributionDay): Promise<void>;
   abstract deleteStrategy(userId: number, id: string): Promise<boolean>;
 
   /* ----- 会话（按用户隔离，方法集镜像 SVC-D05~D11） ----- */

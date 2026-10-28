@@ -11,7 +11,7 @@ import {
   WELCOME_TEXT,
 } from '../user-store.service';
 import { nowTime } from '../../common/time';
-import { AgentCard, AttributionCard, ChatMessage, Conversation, Strategy } from '../../types';
+import { AgentCard, AttributionCard, ChatMessage, Conversation, Strategy, StrategyAttributionDay } from '../../types';
 
 /* ==========================================================
    用户库 MySQL 实现（M13 / SVC-D23）：alphasage_user 库，独立连接池
@@ -190,12 +190,17 @@ export class MysqlUserStoreService extends UserStoreService {
     return result.affectedRows > 0;
   }
 
-  /* ----- 归因分析档案（ADR-0010 配套） ----- */
+  /* ----- 归因分析档案（ADR-0010 配套）：一天一份，同日覆盖、跨日追加，删策略级联 ----- */
 
-  async saveStrategyAttribution(userId: number, strategyId: string, attribution: AttributionCard): Promise<void> {
+  async saveStrategyAttribution(userId: number, strategyId: string, attribution: StrategyAttributionDay): Promise<void> {
+    const strategy = await this.getStrategy(userId, strategyId);
+    if (!strategy) throw new ApiException('NOT_FOUND', 404, `策略不存在：${strategyId}`);
+    const archive = Array.isArray(strategy.attribution) ? strategy.attribution : [];
+    const day = attribution.generatedAt.slice(0, 10);
+    const next = [...archive.filter((e) => !e.generatedAt?.startsWith(day)), attribution];
     await this.exec(
       'UPDATE strategies SET attribution = ? WHERE user_id = ? AND id = ?',
-      [JSON.stringify(attribution), userId, strategyId],
+      [JSON.stringify(next), userId, strategyId],
       '保存归因分析失败',
     );
   }

@@ -8,7 +8,7 @@ import {
   WELCOME_TEXT,
 } from '../user-store.service';
 import { nowTime } from '../../common/time';
-import { AttributionCard, ChatMessage, Conversation, Strategy } from '../../types';
+import { AttributionCard, StrategyAttributionDay, ChatMessage, Conversation, Strategy } from '../../types';
 
 /* ==========================================================
    用户库内存实现：.env 未配置 USER_DB_HOST 时的开发兜底（数据不落盘、
@@ -159,7 +159,7 @@ export class MemoryUserStoreService extends UserStoreService {
   private readonly poolRefs = new Map<string, PoolRefRow>();
 
   /* ----- 归因分析档案（ADR-0010 配套）：内存桩 ----- */
-  private readonly strategyAttributions = new Map<string, AttributionCard>();
+  private readonly strategyAttributions = new Map<string, StrategyAttributionDay[]>();
 
   /* ----- 回测卡存档（ADR-0010）：内存桩，形态与 MySQL 实现一致 ----- */
   private readonly backtestRuns = new Map<string, Array<{ seq: number; title: string; card: unknown }>>();
@@ -172,8 +172,13 @@ export class MemoryUserStoreService extends UserStoreService {
     return this.poolRefs.get(id);
   }
 
-  async saveStrategyAttribution(userId: number, strategyId: string, attribution: AttributionCard): Promise<void> {
-    this.strategyAttributions.set(`${userId}|${strategyId}`, attribution);
+  async saveStrategyAttribution(userId: number, strategyId: string, attribution: StrategyAttributionDay): Promise<void> {
+    const key = `${userId}|${strategyId}`;
+    const archive = (this.strategyAttributions.get(key) ?? []).filter(
+      (e) => !e.generatedAt?.startsWith(attribution.generatedAt.slice(0, 10)),
+    );
+    archive.push(attribution);
+    this.strategyAttributions.set(key, archive);
   }
 
   async saveBacktestRun(input: { conversationId: string; username: string; title: string; card: unknown }): Promise<number> {
