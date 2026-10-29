@@ -492,28 +492,27 @@ export const SCREEN_STOCK_POOL_SPEC = {
   },
 };
 
-/** 长期记忆三操作（ADR-0007）：新增/更新/删除一条用户记忆 */
+/** 长期记忆两操作（ADR-0013 记忆队列）：追加 / 忘掉 */
 export const SAVE_MEMORY_SPEC = {
   type: 'function' as const,
   function: {
     name: 'save_memory',
-    description: '把用户的稳定偏好、研究结论等值得跨会话记住的事实写入本地记忆库，下次对话自动可见。',
+    description: '把用户的稳定偏好、研究结论等值得跨会话记住的事实追加进本地记忆队列，下次对话自动可见。',
     parameters: {
       type: 'object',
       properties: {
         op: {
           type: 'string',
-          enum: ['add', 'update', 'delete'],
-          description: '操作：add=新增（用户说"记住：XX"或陈述稳定偏好/结论）/ update=引用既有 slug 覆盖（偏好变了，禁止新增重复条目）/ delete=删除（用户说"忘掉 XX"）',
+          enum: ['add', 'delete'],
+          description: '操作：add=追加（新偏好、重新确认已有记忆、修正旧偏好都走它，不判重——追加即保鲜）/ delete=忘掉（按标题或内容关键词匹配删除）',
         },
-        slug: {
+        title: {
           type: 'string',
-          description: '条目标识（小写英文短横线，如 prefer-momentum）。add 必填（新起一个不与记忆块重复的）；update/delete 必填且必须来自记忆块行首方括号内的既有 slug',
+          description: '一句话标题。add 必填；delete 必填（用于匹配要忘掉的记忆标题或关键词）',
         },
-        title: { type: 'string', description: '条目标题（一句话概括，中文）。add/update 必填' },
-        content: { type: 'string', description: '条目内容（一到两句事实，具体可执行，不写空话）。add/update 必填' },
+        content: { type: 'string', description: '条目内容（一到两句事实，具体可执行，不写空话）。add 必填' },
       },
-      required: ['op'],
+      required: ['op', 'title'],
     },
   },
 };
@@ -596,7 +595,6 @@ export interface ReadFactorDataArgs {
 
 export interface SaveMemoryArgs {
   op?: unknown;
-  slug?: unknown;
   title?: unknown;
   content?: unknown;
 }

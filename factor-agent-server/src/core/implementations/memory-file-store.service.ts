@@ -1,22 +1,20 @@
 import { Injectable } from '@nestjs/common';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import {
-  ConversationSummary,
-  MemoryEntry,
-  MemoryStoreService,
-  sanitizeSlug,
-} from '../memory-store.service';
+import { ConversationSummary, MemoryEntry, MemoryQueue, MemoryStoreService, memoryStamp } from '../memory-store.service';
 import { todayStr } from '../../common/time';
 
 /* ==========================================================
-   长期记忆文件实现（ADR-0007，唯一实现）：
-   条目   <root>/<userId>/<slug>.md       —— frontmatter(title/created/updated) + 正文
-   摘要   <root>/<userId>/_threads/<conversationId>.md —— frontmatter(coveredChars/updated) + 正文
-   读写全部同步 fs（几十个文件的目录扫描同表目录量级，微秒级现读现拼）；
-   解析只认自家写入格式 + 容忍人手微调（键值行、引号、空白），坏文件跳过不炸。
+   长期记忆队列文件实现（ADR-0013，唯一实现）：
+   <root>/<userId>/memory.md —— frontmatter(summary/foldedCount/updated) + 条目块：
+     ## [YYYY-MM-DD HH:MM] 标题
+     内容一到两句……
+   追加 = 尾部插块；折叠 = 重写文件（新 summary + 剩余条目）；
+   旧 <slug>.md 条目文件（ADR-0007 格式）首次读取时一次性迁移导入队尾后清除。
+   读写全部同步 fs；解析只认自家写入格式 + 容忍人手微调，坏块跳过不炸。
    ========================================================== */
 
+const QUEUE_FILE = 'memory.md';
 const FRONTMATTER_RE = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/;
 const THREADS_DIR = '_threads';
 
@@ -27,63 +25,33 @@ export class MemoryFileStoreService extends MemoryStoreService {
     super();
   }
 
-  /* ----- 记忆条目 ----- */
+  /* ----- 记忆队列 ----- */
 
-  async listEntries(userId: number): Promise<MemoryEntry[]> {
-    const dir = this.userDir(userId);
-    let names: string[];
-    try {
-      names = fs.readdirSync(dir);
-    } catch {
-      return []; // 目录不存在 = 该用户还没有任何记忆
-    }
-    const entries: MemoryEntry[] = [];
-    for (const name of names) {
-      if (!name.endsWith('.md')) continue;
-      const slug = name.slice(0, -3);
-      const raw = this.readFile(path.join(dir, name));
-      if (raw === null) continue;
-      const entry = parseEntryFile(slug, raw);
-      if (entry) entries.push(entry);
-    }
-    return entries;
+  async readQueue(userId: number): Promise<MemoryQueue> {
+    const raw = this.readFile(this.queuePath(userId));
+    if (raw === null) return this.migrateLegacy(userId); // 无队列文件 → 尝试旧条目迁移
+    return parseQueue(raw);
   }
 
-  async saveEntry(
-    userId: number,
-    input: { slug: string; title: string; content: string },
-  ): Promise<MemoryEntry> {
-    const slug = sanitizeSlug(input.slug);
-    const dir = this.userDir(userId);
-    fs.mkdirSync(dir, { recursive: true });
-    const file = path.join(dir, `${slug}.md`);
-    const existing = parseEntryFile(slug, this.readFile(file) ?? '');
-    const today = todayStr();
+  async appendEntry(userId: number, input: { title: string; content: string }): Promise<MemoryEntry> {
+    const queue = await this.readQueue(userId);
     const entry: MemoryEntry = {
-      slug,
+      time: memoryStamp(),
       title: input.title.trim(),
       content: input.content.trim(),
-      created: existing?.created ?? today,
-      updated: today,
     };
-    fs.writeFileSync(
-      file,
-      `---\ntitle: ${entry.title}\ncreated: ${entry.created}\nupdated: ${entry.updated}\n---\n\n${entry.content}\n`,
-      'utf8',
-    );
+    queue.entries.push(entry);
+    queue.updated = memoryStamp();
+    this.writeQueueFileSync(userId, queue);
     return entry;
   }
 
-  async deleteEntry(userId: number, slug: string): Promise<boolean> {
-    try {
-      fs.unlinkSync(path.join(this.userDir(userId), `${sanitizeSlug(slug)}.md`));
-      return true;
-    } catch {
-      return false; // ENOENT = 条目本就不存在
-    }
+  async writeQueue(userId: number, queue: MemoryQueue): Promise<void> {
+    queue.updated = memoryStamp();
+    this.writeQueueFileSync(userId, queue);
   }
 
-  /* ----- 会话滚动摘要缓存 ----- */
+  /* ----- 会话滚动摘要缓存（历史滚动窗口，ADR-0007 修订） ----- */
 
   async readSummary(userId: number, conversationId: string): Promise<ConversationSummary | null> {
     const raw = this.readFile(this.summaryPath(userId, conversationId));
@@ -120,6 +88,10 @@ export class MemoryFileStoreService extends MemoryStoreService {
     return path.join(this.rootDir, String(userId));
   }
 
+  private queuePath(userId: number): string {
+    return path.join(this.userDir(userId), QUEUE_FILE);
+  }
+
   private summaryPath(userId: number, conversationId: string): string {
     return path.join(this.userDir(userId), THREADS_DIR, `${this.threadName(conversationId)}.md`);
   }
@@ -137,9 +109,59 @@ export class MemoryFileStoreService extends MemoryStoreService {
       return null;
     }
   }
+
+  private writeQueueFileSync(userId: number, queue: MemoryQueue): void {
+    fs.mkdirSync(this.userDir(userId), { recursive: true });
+    // summary 折成单行进 frontmatter（解析器按行读键值）
+    const head =
+      `---\nsummary: ${queue.summary.replace(/\s*\r?\n\s*/g, ' ')}\n` +
+      `foldedCount: ${queue.foldedCount}\nupdated: ${queue.updated}\n---\n`;
+    const body = queue.entries.map((e) => `## [${e.time}] ${e.title}\n${e.content}\n`).join('\n');
+    fs.writeFileSync(this.queuePath(userId), `${head}\n${body}`, 'utf8');
+  }
+
+  /** 旧 ADR-0007 条目文件（<slug>.md：frontmatter title/created/updated + 正文）一次性迁移：
+   *  按 updated 升序导入队尾 → 写队列文件 → 删除旧文件；无旧文件则返回空队列 */
+  private migrateLegacy(userId: number): MemoryQueue {
+    const dir = this.userDir(userId);
+    let names: string[] = [];
+    try {
+      names = fs.readdirSync(dir).filter((n) => n.endsWith('.md') && n !== QUEUE_FILE);
+    } catch {
+      names = [];
+    }
+    const legacy: Array<MemoryEntry & { file: string }> = [];
+    for (const name of names) {
+      const raw = this.readFile(path.join(dir, name));
+      if (raw === null) continue;
+      const parsed = parseFrontmatter(raw);
+      if (!parsed || !parsed.body) continue;
+      const { title, updated } = parsed.meta;
+      if (!title || !updated) continue;
+      legacy.push({ time: updated.slice(0, 16), title, content: parsed.body, file: name });
+    }
+    legacy.sort((a, b) => (a.time < b.time ? -1 : 1));
+    const queue: MemoryQueue = {
+      summary: '',
+      foldedCount: 0,
+      updated: memoryStamp(),
+      entries: legacy.map(({ time, title, content }) => ({ time, title, content })),
+    };
+    if (legacy.length) {
+      this.writeQueueFileSync(userId, queue);
+      for (const item of legacy) {
+        try {
+          fs.unlinkSync(path.join(dir, item.file));
+        } catch {
+          /* 删不掉的坏文件留在原地，下次迁移再试 */
+        }
+      }
+    }
+    return queue;
+  }
 }
 
-/* ----- 解析（容错口径：字段缺失/非法 → 返回 null，调用方跳过） ----- */
+/* ----- 解析（容错口径：字段缺失/非法 → 跳过该条，不炸整体） ----- */
 
 /** key: value 行的宽松解析（容忍空白与首尾引号），只认自家格式不追求 YAML 全集 */
 function parseFrontmatter(raw: string): { meta: Record<string, string>; body: string } | null {
@@ -153,12 +175,28 @@ function parseFrontmatter(raw: string): { meta: Record<string, string>; body: st
   return { meta, body: raw.slice(match[0].length).trim() };
 }
 
-function parseEntryFile(slug: string, raw: string): MemoryEntry | null {
+function parseQueue(raw: string): MemoryQueue {
   const parsed = parseFrontmatter(raw);
-  if (!parsed) return null;
-  const { title, created, updated } = parsed.meta;
-  if (!title || !created || !updated || !parsed.body) return null;
-  return { slug, title, content: parsed.body, created, updated };
+  if (!parsed) return { summary: '', foldedCount: 0, updated: memoryStamp(), entries: [] };
+  const foldedCount = Number(parsed.meta.foldedCount);
+  const entries: MemoryEntry[] = [];
+  let cur: MemoryEntry | null = null;
+  for (const line of parsed.body.split(/\r?\n/)) {
+    const header = /^## \[([^\]]+)\] (.+)$/.exec(line.trim());
+    if (header) {
+      if (cur) entries.push(cur);
+      cur = { time: header[1], title: header[2], content: '' };
+      continue;
+    }
+    if (cur && line.trim()) cur.content = cur.content ? `${cur.content}\n${line.trim()}` : line.trim();
+  }
+  if (cur) entries.push(cur);
+  return {
+    summary: parsed.meta.summary ?? '',
+    foldedCount: Number.isFinite(foldedCount) && foldedCount >= 0 ? foldedCount : 0,
+    updated: parsed.meta.updated ?? memoryStamp(),
+    entries,
+  };
 }
 
 function parseSummaryFile(raw: string): ConversationSummary | null {

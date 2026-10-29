@@ -4,7 +4,7 @@
 implementations/
 ├── account-backtest-execution.service.impl.ts   # 基于 Account 原语的回测执行实现
 ├── factor-analysis.service.impl.ts              # 因子分析实现
-├── memory-file-store.service.ts                 # 记忆的文件存储实现（memories/<uid>/）
+├── memory-file-store.service.ts                 # 记忆队列文件存储（memory.md 追加队列+折叠摘要，ADR-0013）
 ├── memory-user-store.service.ts                 # 内存桩实现（开发/测试用）
 ├── mysql-factor-data.service.ts                 # 因子数据 MySQL 实现：交易日/截面/区间读取、字典列类型分流
 ├── mysql-user-store.service.ts                  # 用户数据 MySQL 实现：策略/会话/记忆/回测存档/归因档案（按天）

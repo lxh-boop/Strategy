@@ -106,55 +106,60 @@ describe('LangGraphAgentService（表目录注入 + 数据会话门）', () => {
   });
 });
 
-describe('LangGraphAgentService（长期记忆注入，ADR-0007 第 1 刀）', () => {
+describe('LangGraphAgentService（长期记忆注入，ADR-0013 记忆队列）', () => {
   const userId = 42;
+  type PromptBuilder = { prepareMessages(c: Conversation, text: string): Promise<BaseMessage[]> };
 
-  async function systemWithMemory(
-    seed: { slug: string; title: string; content: string }[],
+  async function systemWithQueue(
+    seed: { title: string; content: string }[],
+    opts?: { summary?: string },
     uid: number = userId,
   ): Promise<string> {
     const store = new MemoryFileStoreService(MEMORY_ROOT);
-    for (const item of seed) await store.saveEntry(uid, item);
+    for (const item of seed) await store.appendEntry(uid, item);
+    if (opts?.summary) {
+      const q = await store.readQueue(uid);
+      await store.writeQueue(uid, { ...q, summary: opts.summary, foldedCount: 2 });
+    }
     const service = newService();
-    const builder = service as unknown as PromptBuilder;
-    const messages = await builder.prepareMessages({ ...conv('conv-mem'), userId: uid }, '你好');
+    const messages = await (service as unknown as PromptBuilder).prepareMessages(
+      { ...conv('conv-mem'), userId: uid },
+      '你好',
+    );
     return String((messages[0] as SystemMessage).content);
   }
 
-  it('有条目且带 userId：system 注入记忆块与条目行（slug 可见，供 update/delete 引用）', async () => {
-    const system = await systemWithMemory([{ slug: 'prefer-momentum', title: '偏好动量', content: '只做 20 日动量。' }]);
+  it('有条目且带 userId：system 注入记忆块（摘要段 + 条目行按时间序）', async () => {
+    const system = await systemWithQueue([{ title: '偏好动量', content: '只做 20 日动量。' }], {
+      summary: '更早记忆的浓缩要点',
+    });
     expect(system).toContain('【用户长期记忆】');
-    expect(system).toContain('- [prefer-momentum] 偏好动量（');
-    expect(system).toContain('只做 20 日动量。');
+    expect(system).toContain('- 摘要（更早记忆的浓缩）：更早记忆的浓缩要点');
+    expect(system).toContain('- [');
+    expect(system).toContain('偏好动量：只做 20 日动量。');
   });
 
   it('记忆为空：不注入记忆块（prompt 与既往一致）', async () => {
-    const system = await systemWithMemory([], 43); // 全新用户：目录里没有任何条目
+    const system = await systemWithQueue([], undefined, 43); // 全新用户：无任何记忆
     expect(system).not.toContain('【用户长期记忆】');
   });
 
   it('会话不带 userId（编排层漏接线的防御口径）：不注入记忆块', async () => {
     const store = new MemoryFileStoreService(MEMORY_ROOT);
-    await store.saveEntry(userId, { slug: 'orphan', title: '孤儿条目', content: '不应出现。' });
+    await store.appendEntry(userId, { title: '孤儿条目', content: '不应出现。' });
     const service = newService();
-    const builder = service as unknown as PromptBuilder;
-    const messages = await builder.prepareMessages(conv('conv-nouser'), '你好');
+    const messages = await (service as unknown as PromptBuilder).prepareMessages(conv('conv-nouser'), '你好');
     expect(String((messages[0] as SystemMessage).content)).not.toContain('【用户长期记忆】');
   });
 
-  it('预算截断：budgetChars 调小后只注入预算内条目（新者先留）', async () => {
-    await systemWithMemory([
-      { slug: 'new-entry', title: '新条目', content: '新的偏好。' },
-      { slug: 'old-entry', title: '旧条目', content: '旧的偏好，内容还特别长，超出预算就应该被淘汰掉。' },
-    ]);
-    const service = newService();
-    (service as unknown as { memoryBudgetChars: number }).memoryBudgetChars = 60;
-    const builder = service as unknown as PromptBuilder;
-    const messages = await builder.prepareMessages({ ...conv('conv-mem'), userId }, '你好');
-    const system = String((messages[0] as SystemMessage).content);
-    expect(system).toContain('【用户长期记忆】');
-    expect(system).toContain('new-entry');
-    expect(system).not.toContain('old-entry');
+  it('开发模式（无 LLM）超预算也不折叠：宁多勿失，全量注入', async () => {
+    await systemWithQueue([{ title: '巨长记忆', content: '长'.repeat(4000) }]);
+    const service = newService(); // 无 LLM
+    const messages = await (service as unknown as PromptBuilder).prepareMessages(
+      { ...conv('conv-mem-nofold'), userId },
+      '你好',
+    );
+    expect(String((messages[0] as SystemMessage).content)).toContain('长'.repeat(4000));
   });
 });
 
@@ -248,7 +253,7 @@ describe('历史滚动窗口（prompt 分支，ADR-0007 修订）', () => {
   });
 });
 
-describe('save_memory（长期记忆写入闭环，ADR-0007 第 2 刀）', () => {
+describe('save_memory（长期记忆写入闭环，ADR-0013 记忆队列）', () => {
   const conv = (id: string): Conversation => ({ id, title: '', messages: [], updatedAt: 0 });
   type SaveRunner = {
     execSaveMemory(
@@ -257,56 +262,74 @@ describe('save_memory（长期记忆写入闭环，ADR-0007 第 2 刀）', () =>
     ): Promise<{ result: Record<string, unknown> }>;
   };
   const ctxOf = (userId?: number) => ({ delegated: false, conversationId: 'spec-save', userId });
-  const add = (slug: string, extra: Record<string, unknown> = {}) => ({ op: 'add', slug, title: '标题', content: '内容。', ...extra });
+  const add = (title: string, extra: Record<string, unknown> = {}) => ({ op: 'add', title, content: '内容。', ...extra });
 
-  it('add：落盘成功，回执带「已记住」', async () => {
+  it('add：落盘成功，回执带「已记住」与时间戳', async () => {
     const service = newService();
-    const r = await (service as unknown as SaveRunner).execSaveMemory(add('prefer-low-vol'), ctxOf(9));
-    expect(r.result).toMatchObject({ ok: true, 回执: '已记住：标题', slug: 'prefer-low-vol' });
-    const entries = await new MemoryFileStoreService(MEMORY_ROOT).listEntries(9);
-    expect(entries.map((e) => e.slug)).toContain('prefer-low-vol');
+    const r = await (service as unknown as SaveRunner).execSaveMemory(add('偏好动量'), ctxOf(9));
+    expect(r.result).toMatchObject({ ok: true, 回执: '已记住：偏好动量' });
+    const q = await new MemoryFileStoreService(MEMORY_ROOT).readQueue(9);
+    expect(q.entries.map((e) => e.title)).toContain('偏好动量');
+    expect(q.entries[0].time).toMatch(/\d{4}-\d{2}-\d{2} \d{2}:\d{2}/);
   });
 
-  it('add 撞既有 slug：报错引导 update，不覆盖', async () => {
+  it('重复确认同一主题：直接追加不判重（两条并存，追加即保鲜）', async () => {
     const service = newService();
-    await (service as unknown as SaveRunner).execSaveMemory(add('dup-slug'), ctxOf(10));
-    const r = await (service as unknown as SaveRunner).execSaveMemory(add('dup-slug'), ctxOf(10));
-    expect(String(r.result.error)).toContain('改用 op=update');
-    const entries = await new MemoryFileStoreService(MEMORY_ROOT).listEntries(10);
-    expect(entries.filter((e) => e.slug === 'dup-slug')).toHaveLength(1);
+    await (service as unknown as SaveRunner).execSaveMemory(add('偏好动量'), ctxOf(10));
+    await (service as unknown as SaveRunner).execSaveMemory(add('偏好动量'), ctxOf(10));
+    const q = await new MemoryFileStoreService(MEMORY_ROOT).readQueue(10);
+    expect(q.entries.filter((e) => e.title === '偏好动量')).toHaveLength(2);
   });
 
-  it('update：覆盖既有条目；引用不存在的 slug 报错引导 add', async () => {
+  it('update 已并入 add：修正偏好=追加修正版', async () => {
     const service = newService();
-    await (service as unknown as SaveRunner).execSaveMemory(add('upd-target'), ctxOf(11));
-    const ok = await (service as unknown as SaveRunner).execSaveMemory(
-      { op: 'update', slug: 'upd-target', title: '新标题', content: '新内容。' },
+    const r = await (service as unknown as SaveRunner).execSaveMemory(
+      { op: 'update', title: '偏好动量', content: '改用低波动。' },
       ctxOf(11),
     );
-    expect(ok.result).toMatchObject({ ok: true, 回执: '已更新：新标题' });
-    const miss = await (service as unknown as SaveRunner).execSaveMemory(
-      { op: 'update', slug: 'no-such', title: 't', content: 'c' },
-      ctxOf(11),
-    );
-    expect(String(miss.result.error)).toContain('改用 op=add');
+    expect(r.result).toMatchObject({ ok: true, 回执: '已记住：偏好动量' });
+    const q = await new MemoryFileStoreService(MEMORY_ROOT).readQueue(11);
+    expect(q.entries).toHaveLength(1);
+    expect(q.entries[0].content).toBe('改用低波动。');
   });
 
-  it('delete：存在则移除，不存在报错', async () => {
+  it('delete：单条命中物理删除；零命中且无摘要报错；多命中列出待确认', async () => {
     const service = newService();
-    await (service as unknown as SaveRunner).execSaveMemory(add('del-target'), ctxOf(12));
-    const ok = await (service as unknown as SaveRunner).execSaveMemory({ op: 'delete', slug: 'del-target' }, ctxOf(12));
-    expect(ok.result).toMatchObject({ ok: true, 回执: '已忘掉：del-target' });
-    const miss = await (service as unknown as SaveRunner).execSaveMemory({ op: 'delete', slug: 'del-target' }, ctxOf(12));
-    expect(String(miss.result.error)).toContain('无法删除');
+    const runner = service as unknown as SaveRunner;
+    await runner.execSaveMemory(add('只用动量因子'), ctxOf(12));
+    await runner.execSaveMemory(add('万三手续费'), ctxOf(12));
+    const ok = await runner.execSaveMemory({ op: 'delete', title: '动量' }, ctxOf(12));
+    expect(ok.result).toMatchObject({ ok: true, 回执: '已忘掉：只用动量因子' });
+    const miss = await runner.execSaveMemory({ op: 'delete', title: '不存在的' }, ctxOf(12));
+    expect(String(miss.result.error)).toContain('没有找到');
+    await runner.execSaveMemory(add('动量因子偏好'), ctxOf(12));
+    await runner.execSaveMemory(add('动量止损习惯'), ctxOf(12));
+    const multi = await runner.execSaveMemory({ op: 'delete', title: '动量' }, ctxOf(12));
+    expect(String(multi.result.需要确认)).toContain('2 条');
+  });
+
+  it('delete 零命中但摘要非空：追加作废条目（下次折叠消化）', async () => {
+    const service = newService();
+    const store = new MemoryFileStoreService(MEMORY_ROOT);
+    await store.writeQueue(15, {
+      summary: '旧要点：偏好动量。',
+      foldedCount: 3,
+      updated: '2026-10-29 09:00',
+      entries: [],
+    });
+    const r = await (service as unknown as SaveRunner).execSaveMemory({ op: 'delete', title: '动量' }, ctxOf(15));
+    expect(r.result).toMatchObject({ ok: true });
+    const q = await store.readQueue(15);
+    expect(q.entries.at(-1)?.title).toContain('已作废');
   });
 
   it('缺参与非法 op：逐项报错不落盘', async () => {
     const service = newService();
     const runner = service as unknown as SaveRunner;
-    expect(String((await runner.execSaveMemory({ op: 'add' }, ctxOf(13))).result.error)).toContain('参数不完整');
-    expect(String((await runner.execSaveMemory({ op: 'delete' }, ctxOf(13))).result.error)).toContain('需要 slug');
-    expect(String((await runner.execSaveMemory({ op: 'wat', slug: 's', title: 't', content: 'c' }, ctxOf(13))).result.error)).toContain('op 不合法');
-    await expect(new MemoryFileStoreService(MEMORY_ROOT).listEntries(13)).resolves.toEqual([]);
+    expect(String((await runner.execSaveMemory({ op: 'add', title: '只有标题' }, ctxOf(13))).result.error)).toContain('参数不完整');
+    expect(String((await runner.execSaveMemory({ op: 'delete' }, ctxOf(13))).result.error)).toContain('需要 title');
+    expect(String((await runner.execSaveMemory({ op: 'wat', title: 't', content: 'c' }, ctxOf(13))).result.error)).toContain('op 不合法');
+    await expect(new MemoryFileStoreService(MEMORY_ROOT).readQueue(13)).resolves.toMatchObject({ entries: [] });
   });
 
   it('会话未携带 userId（防御口径）：报错不落盘', async () => {
@@ -319,7 +342,7 @@ describe('save_memory（长期记忆写入闭环，ADR-0007 第 2 刀）', () =>
     const { app, agent } = buildTestGraph();
     agent.invoke
       .mockImplementationOnce(async () =>
-        withToolCalls('save_memory', '', [{ id: 'm1', args: { op: 'add', slug: 'graph-add', title: '图测条目', content: '图级闭环写入。' } }]),
+        withToolCalls('save_memory', '', [{ id: 'm1', args: { op: 'add', title: '图测条目', content: '图级闭环写入。' } }]),
       )
       .mockImplementationOnce(async () => finalText('已记住你的偏好。'));
     const state = (await app.invoke(
@@ -329,8 +352,8 @@ describe('save_memory（长期记忆写入闭环，ADR-0007 第 2 刀）', () =>
     const toolMsg = state.messages.find((m) => (m as unknown as { tool_call_id?: string }).tool_call_id === 'm1');
     expect(toolMsg).toBeInstanceOf(ToolMessage);
     expect(JSON.parse(String((toolMsg as ToolMessage).content))).toMatchObject({ 回执: '已记住：图测条目' });
-    const entries = await new MemoryFileStoreService(MEMORY_ROOT).listEntries(14);
-    expect(entries.map((e) => e.slug)).toContain('graph-add');
+    const q = await new MemoryFileStoreService(MEMORY_ROOT).readQueue(14);
+    expect(q.entries.map((e) => e.title)).toContain('图测条目');
   });
 });
 

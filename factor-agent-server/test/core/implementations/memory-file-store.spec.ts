@@ -1,133 +1,129 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import {
-  MemoryEntry,
-  renderMemoryLine,
-  sanitizeSlug,
-  selectWithinBudget,
-} from '../../../src/core/memory-store.service';
+import { MemoryEntry, MemoryQueue, queueText, renderQueueLine } from '../../../src/core/memory-store.service';
 import { MemoryFileStoreService } from '../../../src/core/implementations/memory-file-store.service';
 
 /* ==========================================================
-   长期记忆文件存储单元测试（ADR-0007 第 0 刀）：
-   slug 清洗 / 注入预算 / 文件 CRUD / 损坏容错 / 摘要缓存生命周期
+   长期记忆队列文件存储单元测试（ADR-0013）：
+   追加不判重 / 队列读写 / 折叠写回 / 忘掉删除 / 旧条目迁移 / 摘要缓存生命周期
    ========================================================== */
 
-describe('sanitizeSlug（slug 清洗）', () => {
-  it('非法字符转连字符并折叠', () => {
-    expect(sanitizeSlug('偏好 动量!!因子')).toBe('memo'); // 全部非法 → 兜底
-    expect(sanitizeSlug('prefer-momentum  v2')).toBe('prefer-momentum-v2');
-    expect(sanitizeSlug('  --Momentum__Factor--  ')).toBe('momentum-factor');
+const entry = (time: string, title: string, content = '内容。'): MemoryEntry => ({ time, title, content });
+
+describe('记忆队列纯函数', () => {
+  it('renderQueueLine：时间 + 标题 + 内容', () => {
+    expect(renderQueueLine(entry('2026-10-29 09:00', '只用动量因子', '回调加仓。'))).toBe(
+      '- [2026-10-29 09:00] 只用动量因子：回调加仓。',
+    );
   });
-  it('截断 64 且不去尾词', () => {
-    const long = 'a'.repeat(70);
-    expect(sanitizeSlug(long)).toHaveLength(64);
-  });
-  it('清洗后为空 → memo 兜底', () => {
-    expect(sanitizeSlug('中文')).toBe('memo');
-    expect(sanitizeSlug('')).toBe('memo');
+  it('queueText：摘要段在前 + 条目行', () => {
+    const q: MemoryQueue = { summary: '旧要点', foldedCount: 2, updated: '', entries: [entry('2026-10-29 09:00', 't')] };
+    expect(queueText(q)).toBe('旧要点\n- [2026-10-29 09:00] t：内容。');
+    expect(queueText({ summary: '', foldedCount: 0, updated: '', entries: [] })).toBe('');
   });
 });
 
-describe('selectWithinBudget（注入预算）', () => {
-  const entry = (slug: string, updated: string, titleLen = 4, contentLen = 10): MemoryEntry => ({
-    slug,
-    title: '标'.repeat(titleLen),
-    content: '容'.repeat(contentLen),
-    created: '2026-10-20',
-    updated,
-  });
-
-  it('按 updated 降序（新者先留）', () => {
-    const picked = selectWithinBudget([entry('old', '2026-10-01'), entry('new', '2026-10-02')], 10, 10_000);
-    expect(picked.map((e) => e.slug)).toEqual(['new', 'old']);
-  });
-  it('条数预算截断', () => {
-    const picked = selectWithinBudget([entry('a', '2026-10-03'), entry('b', '2026-10-02'), entry('c', '2026-10-01')], 2, 10_000);
-    expect(picked.map((e) => e.slug)).toEqual(['a', 'b']);
-  });
-  it('字数预算截断（按渲染行长度计）', () => {
-    const a = entry('a', '2026-10-03');
-    const lineLen = renderMemoryLine(a).length;
-    const b = entry('b', '2026-10-02', 4, lineLen); // 第二条渲染必超预算
-    const picked = selectWithinBudget([a, b], 10, lineLen + 5);
-    expect(picked.map((e) => e.slug)).toEqual(['a']);
-  });
-  it('首条必收（超预算保底一条）', () => {
-    const big = entry('big', '2026-10-03', 50, 500);
-    const picked = selectWithinBudget([big], 10, 5);
-    expect(picked).toHaveLength(1);
-  });
-  it('空记忆 → 空数组', () => {
-    expect(selectWithinBudget([], 30, 800)).toEqual([]);
-  });
-});
-
-describe('MemoryFileStoreService（文件实现）', () => {
+describe('MemoryFileStoreService（队列文件实现）', () => {
   let rootDir: string;
   let store: MemoryFileStoreService;
 
   beforeEach(() => {
-    rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mem-store-'));
+    rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mem-queue-'));
     store = new MemoryFileStoreService(rootDir);
   });
   afterEach(() => {
     fs.rmSync(rootDir, { recursive: true, force: true });
   });
 
-  it('无记忆用户 → 空数组', async () => {
-    await expect(store.listEntries(1)).resolves.toEqual([]);
+  it('无记忆用户 → 空队列', async () => {
+    const q = await store.readQueue(1);
+    expect(q).toMatchObject({ summary: '', foldedCount: 0 });
+    expect(q.entries).toEqual([]);
   });
 
-  it('新增 → 回读一致；再存同 slug 覆盖并沿用 created', async () => {
-    const saved = await store.saveEntry(1, { slug: 'prefer-momentum', title: '偏好动量', content: '对动量类因子兴趣高。' });
-    expect(saved.created).toBe(saved.updated);
-    const list = await store.listEntries(1);
-    expect(list).toHaveLength(1);
-    expect(list[0]).toMatchObject({ slug: 'prefer-momentum', title: '偏好动量', content: '对动量类因子兴趣高。' });
-
-    const again = await store.saveEntry(1, { slug: 'prefer-momentum', title: '偏好动量（改）', content: '只做 20 日动量。' });
-    expect(again.created).toBe(saved.created);
-    const after = await store.listEntries(1);
-    expect(after).toHaveLength(1);
-    expect(after[0].title).toBe('偏好动量（改）');
+  it('追加不判重：重复主题两次追加 = 两条并存', async () => {
+    await store.appendEntry(1, { title: '只用动量因子', content: '回调加仓。' });
+    await store.appendEntry(1, { title: '只用动量因子', content: '再次确认。' });
+    const q = await store.readQueue(1);
+    expect(q.entries).toHaveLength(2);
+    expect(q.entries[0].content).toBe('回调加仓。');
+    expect(q.entries[1].content).toBe('再次确认。');
   });
 
-  it('中文 slug 清洗落盘（可回读）', async () => {
-    const saved = await store.saveEntry(1, { slug: '风险偏好', title: '风险偏好', content: '稳健型。' });
-    expect(saved.slug).toBe('memo');
-    const list = await store.listEntries(1);
-    expect(list[0].slug).toBe('memo');
+  it('写回：折叠摘要 + 剩余条目 + foldedCount 落盘可回读', async () => {
+    await store.appendEntry(1, { title: '老偏好', content: '旧值。' });
+    await store.appendEntry(1, { title: '新偏好', content: '新值。' });
+    const queue = await store.readQueue(1);
+    const next: MemoryQueue = {
+      summary: '一、需求与结论：改用低波动。二、已确定的关键参数：无。三、未决事项：无。',
+      foldedCount: 1,
+      updated: queue.updated,
+      entries: queue.entries.slice(1),
+    };
+    await store.writeQueue(1, next);
+    const reread = await store.readQueue(1);
+    expect(reread.summary).toContain('改用低波动');
+    expect(reread.foldedCount).toBe(1);
+    expect(reread.entries.map((e) => e.title)).toEqual(['新偏好']);
   });
 
-  it('删除：存在 true / 不存在 false', async () => {
-    await store.saveEntry(1, { slug: 'tmp-one', title: 't', content: 'c' });
-    await expect(store.deleteEntry(1, 'tmp-one')).resolves.toBe(true);
-    await expect(store.deleteEntry(1, 'tmp-one')).resolves.toBe(false);
-    await expect(store.listEntries(1)).resolves.toEqual([]);
+  it('忘掉：读队列 → 过滤 → 写回，条目物理消失', async () => {
+    await store.appendEntry(1, { title: '只用动量因子', content: 'a' });
+    await store.appendEntry(1, { title: '万三手续费', content: 'b' });
+    const queue = await store.readQueue(1);
+    queue.entries = queue.entries.filter((e) => !e.title.includes('动量'));
+    await store.writeQueue(1, queue);
+    const reread = await store.readQueue(1);
+    expect(reread.entries.map((e) => e.title)).toEqual(['万三手续费']);
   });
 
-  it('损坏文件（无 frontmatter / 缺字段）跳过不炸', async () => {
-    await store.saveEntry(1, { slug: 'good-one', title: '好条目', content: '内容。' });
-    const dir = path.join(rootDir, '1');
+  it('迁移：旧 <slug>.md（ADR-0007 格式）导入队尾并清除', async () => {
+    const dir = path.join(rootDir, '7');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, 'prefer-momentum.md'),
+      '---\ntitle: 偏好动量\ncreated: 2026-10-20\nupdated: 2026-10-21\n---\n\n只做 20 日动量。',
+      'utf8',
+    );
+    fs.writeFileSync(
+      path.join(dir, 'fee-habit.md'),
+      '---\ntitle: 万三手续费\ncreated: 2026-10-20\nupdated: 2026-10-22\n---\n\n双边万三。',
+      'utf8',
+    );
+    const q = await store.readQueue(7);
+    expect(q.entries.map((e) => e.title)).toEqual(['偏好动量', '万三手续费']); // updated 升序
+    expect(q.entries[0].time).toBe('2026-10-21');
+    expect(fs.existsSync(path.join(dir, 'prefer-momentum.md'))).toBe(false);
+    expect(fs.existsSync(path.join(dir, 'fee-habit.md'))).toBe(false);
+    expect(fs.existsSync(path.join(dir, 'memory.md'))).toBe(true);
+    // 幂等：再读不再迁移
+    const again = await store.readQueue(7);
+    expect(again.entries).toHaveLength(2);
+  });
+
+  it('迁移跳过坏文件（无 frontmatter / 缺字段）', async () => {
+    const dir = path.join(rootDir, '8');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'good-one.md'), '---\ntitle: 好条目\ncreated: 2026-10-20\nupdated: 2026-10-21\n---\n\n内容。', 'utf8');
     fs.writeFileSync(path.join(dir, 'bad-nofm.md'), '没有 frontmatter 的纯文本', 'utf8');
     fs.writeFileSync(path.join(dir, 'bad-nofield.md'), '---\ntitle: 缺日期\n---\n\n正文', 'utf8');
-    fs.writeFileSync(path.join(dir, 'bad-empty.md'), '---\ntitle: 空\ncreated: 2026-10-21\nupdated: 2026-10-21\n---\n\n', 'utf8');
-    const list = await store.listEntries(1);
-    expect(list.map((e) => e.slug)).toEqual(['good-one']);
+    const q = await store.readQueue(8);
+    expect(q.entries.map((e) => e.title)).toEqual(['好条目']);
   });
 
   it('人手微调（引号/空白）可解析', async () => {
-    const dir = path.join(rootDir, '1');
+    const dir = path.join(rootDir, '9');
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(
-      path.join(dir, 'hand-edit.md'),
-      '---\ntitle: "手改条目"  \ncreated: 2026-10-20\nupdated: 2026-10-21\n---\n\n手改正文。',
+      path.join(dir, 'memory.md'),
+      '---\nsummary: "手改摘要"  \nfoldedCount: 1\nupdated: 2026-10-29 09:00\n---\n\n## [2026-10-29 08:00] 手改条目\n手改正文。',
       'utf8',
     );
-    const list = await store.listEntries(1);
-    expect(list[0]).toMatchObject({ slug: 'hand-edit', title: '手改条目', content: '手改正文。' });
+    const q = await store.readQueue(9);
+    expect(q.summary).toBe('手改摘要');
+    expect(q.foldedCount).toBe(1);
+    expect(q.entries[0]).toMatchObject({ time: '2026-10-29 08:00', title: '手改条目', content: '手改正文。' });
   });
 
   it('摘要缓存：写 → 读 → 清；未写/已清/坏文件 → null', async () => {

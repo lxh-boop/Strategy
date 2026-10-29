@@ -36,14 +36,13 @@ export default () => ({
     secret: (process.env.USER_JWT_SECRET ?? '').trim() || 'alphasage-dev-secret-change-me',
     expiresIn: (process.env.USER_JWT_EXPIRES ?? '').trim() || '7d',
   },
-  // 长期记忆与历史滚动窗口（ADR-0007）：md 文件落盘，dir 缺省 <运行目录>/memories（CoreModule 兜底拼接）。
-  // 滚动摘要（prompt 分支改造）：历史段按 token 预算触发压缩——超 HISTORY_MAX_TOKENS 后保留最近
-  // HISTORY_KEEP_TURNS 轮原文、更早轮次折叠进摘要轮；旧字符三旋钮（triggerChars/tailChars/refitCapChars）废弃
+  // 长期记忆队列（ADR-0013）与历史滚动窗口（prompt 分支修订）：md 文件落盘，
+  // dir 缺省 <运行目录>/memories（CoreModule 兜底拼接）。
+  // 记忆队列：追加制不判重，记忆区超 queueMaxTokens 后队头折叠进记忆摘要
   memories: {
     dir: process.env.MEMORIES_DIR ?? '',
     summaryChars: Number(process.env.MEMORY_SUMMARY_CHARS ?? 500),
-    maxEntries: Number(process.env.MEMORY_MAX_ENTRIES ?? 30),
-    budgetChars: Number(process.env.MEMORY_BUDGET_CHARS ?? 800),
+    queueMaxTokens: Number(process.env.MEMORY_QUEUE_MAX_TOKENS ?? 2000),
   },
   history: {
     // 历史段 token 预算（estTokens 估算：中文≈1/字、ASCII≈1/4 字符），超过即开始折叠压缩
