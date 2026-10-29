@@ -233,6 +233,21 @@ export function useConversations(notify?: (msg: string) => void) {
             }
             return { ...p, steps };
           });
+        } else if (ev.type === "retry") {
+          // GLM 限流退避重试：原地滚动更新一行（并发治理 C1，重试不再是黑盒）
+          setLive(p => {
+            if (!p || p.convId !== convId) return p;
+            const steps = [...p.steps];
+            const stage = "GLM 限流重试";
+            const detail = `第 ${ev.attempt}/${ev.max} 次（${Math.max(1, Math.round(ev.delayMs / 1000))}s 后自动重发）`;
+            const last = steps[steps.length - 1];
+            if (last && last.stage === stage) {
+              steps[steps.length - 1] = { stage, detail };
+            } else {
+              steps.push({ stage, detail });
+            }
+            return { ...p, steps };
+          });
         } else if (ev.type === "confirm_pending") {
           setConfirmGate({ convId, kind: ev.kind, params: ev.params });
         } else if (ev.type === "tool_result") {

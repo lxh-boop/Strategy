@@ -12,6 +12,11 @@ export default () => ({
     // 推理模型思考开关（GLM thinking）：默认 disabled——思考内容计入 max_tokens，
     // 工具循环里思考量波动大，随机爆发会吃穿预算导致正文为空
     thinking: (process.env.ZHIPU_THINKING ?? 'disabled').toLowerCase(),
+    // GLM 调用协调（C1，团队套餐共享 key 形态下自收并发）：在飞上限超出排队；
+    // 429 按退避基数指数重试（1s/2s/4s/8s/8s…封顶 8s）
+    maxConcurrency: Number(process.env.GLM_MAX_CONCURRENCY ?? 2),
+    retryMax: Number(process.env.GLM_RETRY_MAX ?? 10),
+    backoffBaseMs: Number(process.env.GLM_BACKOFF_BASE_MS ?? 1000),
   },
   mysql: {
     host: process.env.MYSQL_HOST ?? '127.0.0.1',

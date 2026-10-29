@@ -246,6 +246,16 @@ export class LangGraphAgentService extends AgentService {
   private historyMaxTokens = 3000;
   private historyKeepTurns = 2;
 
+  /** GLM 调用协调（C1 配置旋钮 zhipu.maxConcurrency/retryMax/backoffBaseMs，测试可改）：
+   *  在飞上限/限流重试次数/退避基数 */
+  private llmMaxConcurrency = 2;
+  private llmRetryMax = 10;
+  private llmBackoffBaseMs = 1000;
+
+  /** 挂起恢复（C1 断点续跑）：限流耗尽的 thread 检查点保留，等用户下一问从断点完成。
+   *  与 pendingConfirms 互斥——一轮只会挂一种；会话删除/清空时随 discardConversationState 清弃 */
+  private pendingResumes = new Map<string, string>();
+
   /** 轮次序号：thread_id = `${conversationId}:${时间戳}:${seq}`，保证进程内唯一 */
   private turnSeq = 0;
 
@@ -304,6 +314,9 @@ export class LangGraphAgentService extends AgentService {
     // 长期记忆注入预算旋钮（ADR-0007；get 不可用的测试构造走字段缺省）
     this.memoryQueueMaxTokens = Number(config.get<number>('memories.queueMaxTokens') ?? 2000);
     this.memorySummaryChars = Number(config.get<number>('memories.summaryChars') ?? 500);
+    this.llmMaxConcurrency = Number(config.get<number>('zhipu.maxConcurrency') ?? 2);
+    this.llmRetryMax = Number(config.get<number>('zhipu.retryMax') ?? 10);
+    this.llmBackoffBaseMs = Number(config.get<number>('zhipu.backoffBaseMs') ?? 1000);
     // 历史滚动窗口旋钮（prompt 分支改造）：历史段 token 预算 + 压缩时保留的原文问答轮数
     this.historyMaxTokens = Number(config.get<number>('history.maxTokens') ?? 3000);
     this.historyKeepTurns = Number(config.get<number>('history.keepTurns') ?? 2);
@@ -315,7 +328,11 @@ export class LangGraphAgentService extends AgentService {
         const isFirstModelCall = (state.roundsRun ?? 0) === 0;
         // token 减负（prompt 分支）：首轮全量；后续轮撤表目录 + 旧行的回执替换为一行摘要。
         // 投影只发生在喂模型边界，图状态保持全量（确认门/卡片/runs 落库不受影响）
-        const output = (await agent.invoke(projectMessagesForModel(state.messages, isFirstModelCall))) as AIMessage;
+        const output = (await this.withLlmSlot(
+          () => agent.invoke(projectMessagesForModel(state.messages, isFirstModelCall)),
+          (attempt, delayMs) =>
+            progressSink(config)?.({ type: 'retry', attempt, max: this.llmRetryMax, delayMs }),
+        )) as AIMessage;
         const usage = (output as { usage_metadata?: { input_tokens?: number; output_tokens?: number } }).usage_metadata;
         if (usage?.input_tokens != null) {
           this.logger.log(`GLM usage 会话=${state.conversationId} 入=${usage.input_tokens} 出=${usage.output_tokens ?? '?'}`);
@@ -452,12 +469,17 @@ export class LangGraphAgentService extends AgentService {
     }
   }
 
-  /** 会话删除/清空时的挂起检查点清理（ADR-0013 阶段并入）：有挂起确认则连检查点一起弃 */
+  /** 会话删除/清空时的挂起检查点清理：确认门挂起与限流待续跑的 thread 一并弃 */
   async discardConversationState(conversationId: string): Promise<void> {
     const pendingThread = this.pendingConfirms.get(conversationId);
     if (pendingThread) {
       this.pendingConfirms.delete(conversationId);
       await this.discardCheckpoint(pendingThread);
+    }
+    const resumeThread = this.pendingResumes.get(conversationId);
+    if (resumeThread) {
+      this.pendingResumes.delete(conversationId);
+      await this.discardCheckpoint(resumeThread);
     }
   }
 
@@ -501,14 +523,25 @@ export class LangGraphAgentService extends AgentService {
           }
         }, this.keepaliveMs)
       : null;
-    // thread 按轮分配；检查点（确认门暂停存档）生命周期：图收尾/失败即弃，仅确认挂起中保留（C2）
-    const threadId = `${conversation.id}:${Date.now()}:${this.turnSeq++}`;
+    // thread 分配（C1 挂起恢复）：上一轮限流耗尽的 thread 检查点停在「工具刚完成」断点 →
+    // 下一问复用同 thread + 简化组装（只追加新问题消息），GLM 看到回执与新消息自行完成剩余任务；
+    // 无挂起则按轮新建。检查点生命周期：图收尾/失败即弃，仅确认挂起/待续跑中保留（C2）
+    const resumeThread = this.pendingResumes.get(conversation.id);
+    const threadId = resumeThread ?? `${conversation.id}:${Date.now()}:${this.turnSeq++}`;
+    if (resumeThread) this.pendingResumes.delete(conversation.id); // 消费挂起（本轮再限流会再登记）
     try {
       if (pendingThread) {
         this.inflightResumes.add(conversation.id);
         try {
           return await this.resumeConfirm(conversation, userText, pendingThread, onProgress);
         } catch (error) {
+          if (isGlmRateLimitError(error)) {
+            // 限流耗尽（已自动重试 10 次）：保留确认态与检查点，稍后重发「确认」原地恢复——不退出确认模式
+            this.logger.warn(`确认门恢复遇限流，保留确认态 会话=${conversation.id}: ${String(error)}`);
+            const reply = this.errorReply(error, conversation.id);
+            onProgress?.({ type: 'error', message: reply.text });
+            return reply;
+          }
           // fail-open：恢复失败（GLM 报错等）清掉挂起映射退回普通对话，不把会话卡死在确认模式；
           // 挂起线程的检查点随 fail-open 一并弃（C2：无 resume 入口的快照即垃圾）
           this.pendingConfirms.delete(conversation.id);
@@ -531,7 +564,9 @@ export class LangGraphAgentService extends AgentService {
           userText,
           userId: conversation.userId,
           ...(entryDelegated ? { backtestDelegated: true } : {}),
-          messages: await this.prepareMessages(conversation, userText),
+          messages: resumeThread
+            ? [new HumanMessage({ content: userText })]
+            : await this.prepareMessages(conversation, userText),
         },
         { configurable: { thread_id: threadId, onProgress }, recursionLimit: 30 },
       );
@@ -540,7 +575,15 @@ export class LangGraphAgentService extends AgentService {
       if (!hasPendingInterrupt(state)) await this.discardCheckpoint(threadId);
       return reply;
     } catch (error) {
-      // 失败路径同样弃检查点：本轮已终止，不存在任何 resume 入口
+      if (isGlmRateLimitError(error)) {
+        // 限流耗尽：检查点恰好停在「工具刚完成」的断点 → 保留供下一问挂起恢复（C1 断点续跑）
+        this.pendingResumes.set(conversation.id, threadId);
+        const reply = this.errorReply(error, conversation.id);
+        reply.text = `${reply.text}` + String.fromCharCode(10, 10) + 'GLM 限流，进度已保存，直接回复即可继续。';
+        onProgress?.({ type: 'error', message: reply.text });
+        return reply;
+      }
+      // 非限流失败：本轮已终止且不应盲目续跑，弃检查点
       await this.discardCheckpoint(threadId);
       const reply = this.errorReply(error, conversation.id);
       onProgress?.({ type: 'error', message: reply.text });
@@ -1180,8 +1223,10 @@ export class LangGraphAgentService extends AgentService {
       const bottom = a.stocks.filter((s) => s.total < 0).slice(0, 5).map((s) => `${s.code} ${s.total}`).join('、');
       const rules = a.rules.map((r) => `${r.reason}:${r.count}笔${r.realized >= 0 ? '+' : ''}${Math.round(r.realized)}`).join('；');
       const dd = a.drawdowns.length ? `最深深 ${Math.round(Math.max(...a.drawdowns.map((d) => d.depthPct)))}%` : '无';
+      const llm = this.llm; // 收窄常量：闭包内可用
       try {
-        const output = (await this.llm.invoke([
+        const output = (await this.withLlmSlot(() =>
+          llm.invoke([
           new SystemMessage(
             '你是策略归因分析师。基于给定的归因聚合数据写一段归因解读（不超过 250 字）：' +
               '主要收益来源、主要亏损来源与亏损行为四分类的占比观察、规则贡献里哪条在持续放血、给一条改进方向。' +
@@ -1198,7 +1243,7 @@ export class LangGraphAgentService extends AgentService {
 回撤：${dd}
 尾部：最差5笔占总亏损 ${a.tail.top5SharePct}%，最大连亏 ${a.tail.maxLossStreak} 批`,
           ),
-        ])) as AIMessage;
+        ]))) as AIMessage;
         analysis = extractText(output).trim();
       } catch {
         analysis = undefined; // 解读失败不挡数据层
@@ -1506,6 +1551,51 @@ export class LangGraphAgentService extends AgentService {
     return run;
   }
 
+  /* ----- GLM 调用协调器（C1）：进程内信号量 + 限流退避重试 -----
+   * 并发源：跨会话并行（inflightRuns 只拦同会话）、归因/折叠摘要与前台对话叠加、
+   * 以及外部共享同一团队套餐 key 的流量（不可制约，只能自收）。
+   * 全部 GLM 调用点统一经 withLlmSlot：超并发排队等待；429 释放坑位退避后
+   * 重新排队重试（重试期间不占并发名额，不给团队窗口加压）。 */
+
+  private llmActive = 0;
+  private readonly llmWaiters: Array<() => void> = [];
+
+  private async acquireLlmSlot(): Promise<void> {
+    if (this.llmActive < this.llmMaxConcurrency) {
+      this.llmActive++;
+      return;
+    }
+    await new Promise<void>((resolve) => this.llmWaiters.push(() => { this.llmActive++; resolve(); }));
+  }
+
+  private releaseLlmSlot(): void {
+    this.llmActive = Math.max(0, this.llmActive - 1);
+    const next = this.llmWaiters.shift();
+    if (next) next();
+  }
+
+  /** GLM 调用统一入口：信号量限并发 + 429 指数退避重试（重试释放坑位，退避后重新排队）。
+   *  onRetry：进度管道回调（agent 节点传 onProgress 推「重试中」事件；其余调用点不传只落日志） */
+  private async withLlmSlot<T>(
+    fn: () => Promise<T>,
+    onRetry?: (attempt: number, delayMs: number) => void,
+  ): Promise<T> {
+    for (let attempt = 0; ; attempt++) {
+      await this.acquireLlmSlot();
+      try {
+        return await fn();
+      } catch (error) {
+        if (attempt >= this.llmRetryMax || !isGlmRateLimitError(error)) throw error;
+        const delayMs = Math.min(this.llmBackoffBaseMs * 2 ** attempt, 8000);
+        this.logger.warn(`GLM 限流退避 ${delayMs}ms（第 ${attempt + 1}/${this.llmRetryMax} 次）`);
+        onRetry?.(attempt + 1, delayMs);
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      } finally {
+        this.releaseLlmSlot();
+      }
+    }
+  }
+
   /** 长期记忆段（ADR-0013 记忆队列）：摘要段 + 未折叠条目按追加序注入；属用户上下文，闲聊会话也注入
    *  （与数据会话门"闲聊零注入"的分界见 GLOSSARY「长期记忆」）。会话未带 userId（理论不可达，
    *  编排层 prepare 必附加）或记忆为空 → 空串，prompt 与既往完全一致 */
@@ -1545,15 +1635,17 @@ export class LangGraphAgentService extends AgentService {
     const foldedSet = entries.slice(0, foldCount);
     const source = foldedSet.map((e) => `[${e.time}] ${e.title}：${e.content}`).join('\n');
     const job = (async () => {
-      const output = (await this.llm!.invoke([
-        new SystemMessage(
-          `你是记忆摘要器。把输入的记忆条目融合成不超过 ${this.memorySummaryChars} 字的要点，` +
-            '按三段组织：一、需求与结论；二、已确定的关键参数；三、未决事项。' +
-            '保留仍然有效的用户偏好与研究结论，语义重复的合并为一条；丢弃已经过时或被修正的旧值；' +
-            '只输出要点正文，不要任何评论或前后缀。',
-        ),
-        new HumanMessage(source),
-      ])) as AIMessage;
+      const output = (await this.withLlmSlot(() =>
+        this.llm!.invoke([
+          new SystemMessage(
+            `你是记忆摘要器。把输入的记忆条目融合成不超过 ${this.memorySummaryChars} 字的要点，` +
+              '按三段组织：一、需求与结论；二、已确定的关键参数；三、未决事项。' +
+              '保留仍然有效的用户偏好与研究结论，语义重复的合并为一条；丢弃已经过时或被修正的旧值；' +
+              '只输出要点正文，不要任何评论或前后缀。',
+          ),
+          new HumanMessage(source),
+        ]),
+      )) as AIMessage;
       const text = extractText(output).trim();
       if (!text) throw new Error('记忆摘要输出为空');
       // 折叠写回队首：新摘要条目 unshift 到位置 0（不要写在队尾）；锁内重读最新队列 + 尾部重切
@@ -1646,6 +1738,14 @@ export class LangGraphAgentService extends AgentService {
 export function hasPendingInterrupt(state: unknown): boolean {
   const slot = (state as { __interrupt__?: unknown } | null | undefined)?.__interrupt__;
   return Array.isArray(slot) && slot.length > 0;
+}
+
+/** 限流错误判定：智谱 429（SDK/包装层消息形态多变，按信号识别而非错误类型） */
+export function isGlmRateLimitError(error: unknown): boolean {
+  const status = (error as { status?: number; response?: { status?: number } } | null);
+  if (status?.status === 429 || status?.response?.status === 429) return true;
+  const msg = String((error as Error)?.message ?? error);
+  return msg.includes('429') || /rate.?limit/i.test(msg) || msg.includes('速率限制');
 }
 
 /* ----- 滚动摘要纯函数（ADR-0007 第 3 刀，导出供测试） ----- */

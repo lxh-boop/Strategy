@@ -311,6 +311,8 @@ export type ChatProgressEvent =
   | { type: "keepalive" }
   | { type: "tool_call"; name: string; stage: string; args: string }
   | { type: "tool_result"; name: string; stage: string; ok: boolean; detail: string }
+  /** GLM 限流退避重试中（并发治理 C1）：进度区渲染"第 N/M 次重试（Xs 后）" */
+  | { type: "retry"; attempt: number; max: number; delayMs: number }
   | { type: "confirm_pending"; kind: "backtest" | "analysis"; params: Record<string, string> };
 
 /* ----- 策略 ----- */

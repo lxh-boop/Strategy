@@ -313,6 +313,8 @@ export type AgentProgressEvent =
   /** 确认门挂起：confirm 节点 interrupt 等待用户决策（前端据此弹参数确认窗；
    *  一次性事件、不做历史恢复——刷新后不弹，历史里的确认提案只是普通消息） */
   | { type: 'confirm_pending'; kind: 'backtest' | 'analysis'; params: Record<string, string> }
+  /** GLM 限流退避重试中（C1）：前端进度区渲染"第 N/M 次重试（Xs 后）" */
+  | { type: 'retry'; attempt: number; max: number; delayMs: number }
   | { type: 'error'; message: string };
 
 /** 过程事件接收端（conversations 层写 SSE 用） */

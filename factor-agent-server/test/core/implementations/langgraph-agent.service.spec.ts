@@ -1,5 +1,5 @@
 import { BaseMessage, HumanMessage, SystemMessage, AIMessage, ToolMessage } from '@langchain/core/messages';
-import { Command } from '@langchain/langgraph';
+import { Annotation, Command, END, MemorySaver, START, StateGraph } from '@langchain/langgraph';
 import { ConfigService } from '@nestjs/config';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -9,6 +9,7 @@ import {
   bubbleChars,
   estimateTokens,
   formatTableCatalog,
+  isGlmRateLimitError,
   LangGraphAgentService,
   planHistoryWindow,
   projectMessagesForModel,
@@ -369,7 +370,7 @@ function buildTestGraph() {
   );
   const agent = { invoke: jest.fn() };
   const app = (service as unknown as { buildGraph(a: unknown): { invoke(input: object, config?: object): Promise<Record<string, unknown>> } }).buildGraph(agent);
-  return { app, agent, backtest, factorAnalysis };
+  return { app, agent, backtest, factorAnalysis, service };
 }
 
 /** 图入口：模拟 runGraph 的入口协议——userText 精确为"授权调优"时以已授权状态启动
@@ -634,5 +635,195 @@ describe('token 减负投影（prompt 分支）', () => {
   it('无工具轮的普通消息流原样返回', () => {
     const msgs = [new SystemMessage('无目录提示'), new HumanMessage('你好')];
     expect(projectMessagesForModel(msgs, true)).toEqual(msgs);
+  });
+});
+
+
+/* ==========================================================
+   并发治理 C1（限流退避 + 挂起恢复 + 确认门限流保留）+ LangGraph 恢复语义
+   ========================================================== */
+
+describe('isGlmRateLimitError（限流判定）', () => {
+  it('识别 429 状态码 / 消息信号 / 速率限制文案；其他错误不误判', () => {
+    expect(isGlmRateLimitError(new Error('429 您的账户已达到速率限制'))).toBe(true);
+    expect(isGlmRateLimitError(new Error('调用返回「Rate limit reached」'))).toBe(true);
+    expect(isGlmRateLimitError(new Error('RateLimitCapacityError: 超出'))).toBe(true);
+    expect(isGlmRateLimitError(Object.assign(new Error('x'), { status: 429 }))).toBe(true);
+    expect(isGlmRateLimitError(new Error('500 Internal Server Error'))).toBe(false);
+    expect(isGlmRateLimitError(new Error('参数不完整'))).toBe(false);
+  });
+});
+
+describe('withLlmSlot（信号量 + 限流退避重试）', () => {
+  function serviceWithSlot(): { service: LangGraphAgentService; runner: <T>(fn: () => Promise<T>) => Promise<T> } {
+    const service = newService();
+    (service as unknown as { llmRetryMax: number }).llmRetryMax = 3;
+    (service as unknown as { llmBackoffBaseMs: number }).llmBackoffBaseMs = 1;
+    const runner = <T,>(fn: () => Promise<T>): Promise<T> =>
+      (service as unknown as { withLlmSlot(f: () => Promise<T>): Promise<T> }).withLlmSlot(fn);
+    return { service, runner };
+  }
+
+  it('429 两次后成功：自动重试并返回', async () => {
+    const { runner } = serviceWithSlot();
+    let calls = 0;
+    const fn = async () => {
+      calls++;
+      if (calls < 3) throw new Error('429 您的账户已达到速率限制');
+      return 'ok';
+    };
+    await expect(runner(fn)).resolves.toBe('ok');
+    expect(calls).toBe(3);
+  });
+
+  it('重试耗尽：抛出原错误（初始 + retryMax 次尝试）', async () => {
+    const { runner } = serviceWithSlot();
+    let calls = 0;
+    const fn = async () => {
+      calls++;
+      throw new Error('429 速率限制');
+    };
+    await expect(runner(fn)).rejects.toThrow('429');
+    expect(calls).toBe(4); // 初始 1 + 重试 3
+  });
+
+  it('非限流错误不重试：一次抛出', async () => {
+    const { runner } = serviceWithSlot();
+    let calls = 0;
+    const fn = async () => {
+      calls++;
+      throw new Error('参数不完整');
+    };
+    await expect(runner(fn)).rejects.toThrow('参数不完整');
+    expect(calls).toBe(1);
+  });
+
+  it('并发上限：5 个并行任务在飞峰值 = 2', async () => {
+    const service = newService();
+    let active = 0;
+    let peak = 0;
+    const fn = async () => {
+      active++;
+      peak = Math.max(peak, active);
+      await new Promise((r) => setTimeout(r, 15));
+      active--;
+    };
+    const slots = (service as unknown as { withLlmSlot(f: () => Promise<void>): Promise<void> });
+    await Promise.all(Array.from({ length: 5 }, () => slots.withLlmSlot(fn)));
+    expect(peak).toBe(2);
+  });
+});
+
+describe('LangGraph 断点恢复语义（真实 StateGraph + MemorySaver，挂起恢复的支撑事实）', () => {
+  const VerifyState = Annotation.Root({
+    messages: Annotation<BaseMessage[]>({
+      reducer: (a, b) => a.concat(b),
+      default: () => [],
+    }),
+  });
+
+  function buildVerifyGraph() {
+    const checkpointer = new MemorySaver();
+    let bCalls = 0;
+    const seen: string[][] = [];
+    const graph = new StateGraph(VerifyState)
+      .addNode('a', async () => ({ messages: [new AIMessage('A完成')] }))
+      .addNode('b', async (state: typeof VerifyState.State) => {
+        bCalls++;
+        seen.push(state.messages.map((m) => String(m.content)));
+        if (bCalls === 1) throw new Error('429 您的账户已达到速率限制');
+        return { messages: [new AIMessage('B完成')] };
+      })
+      .addEdge(START, 'a')
+      .addEdge('a', 'b')
+      .addEdge('b', END)
+      .compile({ checkpointer });
+    const thread = (id: string) => ({ configurable: { thread_id: id } });
+    return { graph, thread, seen, calls: () => bCalls };
+  }
+
+  it('节点抛错：检查点停在最后完成节点（回执在场、next=[失败节点]）', async () => {
+    const { graph, thread } = buildVerifyGraph();
+    const t = thread('v1');
+    await expect(graph.invoke({ messages: [new HumanMessage('开始')] }, t)).rejects.toThrow('429');
+    const snap = await graph.getState(t);
+    expect((snap.values as { messages: BaseMessage[] }).messages.map((m) => String(m.content))).toEqual(['开始', 'A完成']);
+    expect(snap.next).toEqual(['b']);
+  });
+
+  it('invoke(null)：从检查点只重跑失败节点（已完成节点不重跑）', async () => {
+    const { graph, thread, calls } = buildVerifyGraph();
+    const t = thread('v2');
+    await expect(graph.invoke({ messages: [new HumanMessage('开始')] }, t)).rejects.toThrow('429');
+    const r = await graph.invoke(null, t);
+    expect(r.messages.map((m) => String(m.content))).toEqual(['开始', 'A完成', 'B完成']);
+    expect(calls()).toBe(2);
+  });
+
+  it('invoke(带新消息)：新消息并入检查点、整链重跑（thread 复用续跑的支撑语义）', async () => {
+    const { graph, thread, seen } = buildVerifyGraph();
+    const t = thread('v3');
+    await expect(graph.invoke({ messages: [new HumanMessage('开始')] }, t)).rejects.toThrow('429');
+    const r = await graph.invoke({ messages: [new HumanMessage('继续')] }, t);
+    // 失败节点重跑时：已完成节点的产出与新消息都在上下文（模型自行决定继续/调整/回答）
+    expect(seen.at(-1)).toEqual(['开始', 'A完成', '继续', 'A完成']);
+    expect(r.messages.map((m) => String(m.content))).toContain('继续');
+  });
+});
+
+describe('限流耗尽挂起恢复（C1 断点续跑，runGraph 级）', () => {
+  const convOf = (id: string): Conversation => ({ id, title: '', messages: [], updatedAt: 0 });
+  type RunGraph = { runGraph(c: Conversation, text: string): Promise<{ text: string }> };
+
+  it('限流耗尽：检查点保留 + pendingResumes 登记 + 回复引导；「继续」复用 thread 简化组装完成', async () => {
+    const { app, agent, backtest, service } = buildTestGraph();
+    (service as unknown as { llm: unknown }).llm = { invoke: jest.fn() };
+    (service as unknown as { app: unknown }).app = app;
+    Object.assign(service as unknown as Record<string, number>, { llmRetryMax: 1, llmBackoffBaseMs: 1 });
+    const runner = service as unknown as RunGraph;
+    const pending = () => (service as unknown as { pendingResumes: Map<string, string> }).pendingResumes;
+
+    agent.invoke
+      .mockRejectedValueOnce(new Error('429 您的账户已达到速率限制')) // 首次：限流
+      .mockRejectedValueOnce(new Error('429 您的账户已达到速率限制')) // 重试 1/1：仍限流 → 耗尽
+      .mockResolvedValueOnce(finalText('断点分析完成')); // 下一问恢复：直接出总结
+
+    const first = await runner.runGraph(convOf('c-resume'), '回测XX');
+    expect(first.text).toContain('进度已保存');
+    expect(first.text).toContain('直接回复即可继续');
+    expect(pending().has('c-resume')).toBe(true);
+
+    const resumed = await runner.runGraph(convOf('c-resume'), '继续');
+    expect(resumed.text).toBe('断点分析完成');
+    // 简化组装 + 检查点恢复：stub 收到的消息 = 首轮 system（检查点沿用）+ 首问 +「继续」（追加），
+    // 无历史窗口/记忆重组——现场与新消息都在，GLM 自行完成剩余任务
+    const resumedInput = agent.invoke.mock.calls[2][0] as BaseMessage[];
+    const contents = resumedInput.map((m) => String(m.content));
+    expect(contents[0]).toContain('因子智投');
+    expect(contents.at(-2)).toBe('回测XX');
+    expect(contents.at(-1)).toBe('继续');
+    expect(pending().has('c-resume')).toBe(false);
+    expect(backtest.runStrategyBacktest).not.toHaveBeenCalled(); // 续跑零工具重跑
+  });
+
+  it('非「继续」消息：弃断点走正常新提问流程', async () => {
+    const { app, agent, service } = buildTestGraph();
+    (service as unknown as { llm: unknown }).llm = { invoke: jest.fn() };
+    (service as unknown as { app: unknown }).app = app;
+    Object.assign(service as unknown as Record<string, number>, { llmRetryMax: 1, llmBackoffBaseMs: 1 });
+    const runner = service as unknown as RunGraph;
+    const pending = () => (service as unknown as { pendingResumes: Map<string, string> }).pendingResumes;
+
+    agent.invoke
+      .mockRejectedValueOnce(new Error('429 速率限制'))
+      .mockRejectedValueOnce(new Error('429 速率限制'))
+      .mockResolvedValueOnce(finalText('新问题的回答'));
+
+    await runner.runGraph(convOf('c-abandon'), '回测XX');
+    expect(pending().has('c-abandon')).toBe(true);
+
+    const second = await runner.runGraph(convOf('c-abandon'), '帮我查个数据');
+    expect(second.text).toBe('新问题的回答');
+    expect(pending().has('c-abandon')).toBe(false); // 断点弃置
   });
 });
