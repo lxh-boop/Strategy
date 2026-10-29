@@ -33,7 +33,7 @@ describe('B-INT-01 ConversationsServiceImpl（会话业务）', () => {
     appendMessages: jest.fn(),
     renameConversationFromFirstMessage: jest.fn(),
   };
-  const agent = { reply: jest.fn(), replyStream: jest.fn(), hasInflightRun: jest.fn() };
+  const agent = { reply: jest.fn(), replyStream: jest.fn(), hasInflightRun: jest.fn(), discardConversationState: jest.fn() };
   const memories = { clearSummary: jest.fn() };
   let svc: ConversationsService;
 

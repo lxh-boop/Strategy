@@ -6,10 +6,11 @@ import { todayStr } from '../../common/time';
 
 /* ==========================================================
    长期记忆队列文件实现（ADR-0013，唯一实现）：
-   <root>/<userId>/memory.md —— frontmatter(summary/foldedCount/updated) + 条目块：
+   <root>/<userId>/memory.md —— 纯条目队列（无 frontmatter）：
      ## [YYYY-MM-DD HH:MM] 标题
      内容一到两句……
-   追加 = 尾部插块；折叠 = 重写文件（新 summary + 剩余条目）；
+   队首条目可为折叠摘要（title 带【记忆摘要】前缀，content 为多行三段要点）。
+   追加 = 尾部插块；折叠 = 队头若干条替换为一条摘要条目写回队首；
    旧 <slug>.md 条目文件（ADR-0007 格式）首次读取时一次性迁移导入队尾后清除。
    读写全部同步 fs；解析只认自家写入格式 + 容忍人手微调，坏块跳过不炸。
    ========================================================== */
@@ -34,21 +35,19 @@ export class MemoryFileStoreService extends MemoryStoreService {
   }
 
   async appendEntry(userId: number, input: { title: string; content: string }): Promise<MemoryEntry> {
-    const queue = await this.readQueue(userId);
+    const entries = await this.readQueue(userId);
     const entry: MemoryEntry = {
       time: memoryStamp(),
       title: input.title.trim(),
       content: input.content.trim(),
     };
-    queue.entries.push(entry);
-    queue.updated = memoryStamp();
-    this.writeQueueFileSync(userId, queue);
+    entries.push(entry);
+    this.writeQueueFileSync(userId, entries);
     return entry;
   }
 
-  async writeQueue(userId: number, queue: MemoryQueue): Promise<void> {
-    queue.updated = memoryStamp();
-    this.writeQueueFileSync(userId, queue);
+  async writeQueue(userId: number, entries: MemoryQueue): Promise<void> {
+    this.writeQueueFileSync(userId, entries);
   }
 
   /* ----- 会话滚动摘要缓存（历史滚动窗口，ADR-0007 修订） ----- */
@@ -110,14 +109,10 @@ export class MemoryFileStoreService extends MemoryStoreService {
     }
   }
 
-  private writeQueueFileSync(userId: number, queue: MemoryQueue): void {
+  private writeQueueFileSync(userId: number, entries: MemoryQueue): void {
     fs.mkdirSync(this.userDir(userId), { recursive: true });
-    // summary 折成单行进 frontmatter（解析器按行读键值）
-    const head =
-      `---\nsummary: ${queue.summary.replace(/\s*\r?\n\s*/g, ' ')}\n` +
-      `foldedCount: ${queue.foldedCount}\nupdated: ${queue.updated}\n---\n`;
-    const body = queue.entries.map((e) => `## [${e.time}] ${e.title}\n${e.content}\n`).join('\n');
-    fs.writeFileSync(this.queuePath(userId), `${head}\n${body}`, 'utf8');
+    const body = entries.map((e) => `## [${e.time}] ${e.title}\n${e.content}\n`).join('\n');
+    fs.writeFileSync(this.queuePath(userId), body, 'utf8');
   }
 
   /** 旧 ADR-0007 条目文件（<slug>.md：frontmatter title/created/updated + 正文）一次性迁移：
@@ -141,14 +136,9 @@ export class MemoryFileStoreService extends MemoryStoreService {
       legacy.push({ time: updated.slice(0, 16), title, content: parsed.body, file: name });
     }
     legacy.sort((a, b) => (a.time < b.time ? -1 : 1));
-    const queue: MemoryQueue = {
-      summary: '',
-      foldedCount: 0,
-      updated: memoryStamp(),
-      entries: legacy.map(({ time, title, content }) => ({ time, title, content })),
-    };
+    const entries: MemoryQueue = legacy.map(({ time, title, content }) => ({ time, title, content }));
     if (legacy.length) {
-      this.writeQueueFileSync(userId, queue);
+      this.writeQueueFileSync(userId, entries);
       for (const item of legacy) {
         try {
           fs.unlinkSync(path.join(dir, item.file));
@@ -157,13 +147,13 @@ export class MemoryFileStoreService extends MemoryStoreService {
         }
       }
     }
-    return queue;
+    return entries;
   }
 }
 
-/* ----- 解析（容错口径：字段缺失/非法 → 跳过该条，不炸整体） ----- */
+/* ----- 解析（容错口径：块头非法/字段缺失 → 跳过该条，不炸整体） ----- */
 
-/** key: value 行的宽松解析（容忍空白与首尾引号），只认自家格式不追求 YAML 全集 */
+/** key: value 行的宽松解析（容忍空白与首尾引号），只用于旧条目迁移 */
 function parseFrontmatter(raw: string): { meta: Record<string, string>; body: string } | null {
   const match = FRONTMATTER_RE.exec(raw);
   if (!match) return null;
@@ -176,12 +166,9 @@ function parseFrontmatter(raw: string): { meta: Record<string, string>; body: st
 }
 
 function parseQueue(raw: string): MemoryQueue {
-  const parsed = parseFrontmatter(raw);
-  if (!parsed) return { summary: '', foldedCount: 0, updated: memoryStamp(), entries: [] };
-  const foldedCount = Number(parsed.meta.foldedCount);
   const entries: MemoryEntry[] = [];
   let cur: MemoryEntry | null = null;
-  for (const line of parsed.body.split(/\r?\n/)) {
+  for (const line of raw.split(/\r?\n/)) {
     const header = /^## \[([^\]]+)\] (.+)$/.exec(line.trim());
     if (header) {
       if (cur) entries.push(cur);
@@ -191,12 +178,7 @@ function parseQueue(raw: string): MemoryQueue {
     if (cur && line.trim()) cur.content = cur.content ? `${cur.content}\n${line.trim()}` : line.trim();
   }
   if (cur) entries.push(cur);
-  return {
-    summary: parsed.meta.summary ?? '',
-    foldedCount: Number.isFinite(foldedCount) && foldedCount >= 0 ? foldedCount : 0,
-    updated: parsed.meta.updated ?? memoryStamp(),
-    entries,
-  };
+  return entries;
 }
 
 function parseSummaryFile(raw: string): ConversationSummary | null {

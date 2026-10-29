@@ -18,6 +18,7 @@ import {
 } from '../../../src/agent/implementations/langgraph-agent.service';
 import { FactorDataService } from '../../../src/core/factor-data.service';
 import { MemoryUserStoreService } from '../../../src/core/implementations/memory-user-store.service';
+import { MemoryEntry } from '../../../src/core/memory-store.service';
 import { MemoryFileStoreService } from '../../../src/core/implementations/memory-file-store.service';
 import { FactorAnalysisService } from '../../../src/core/factor-analysis.service';
 import { StrategyBacktestService } from '../../../src/core/strategy-backtest.service';
@@ -116,11 +117,13 @@ describe('LangGraphAgentService（长期记忆注入，ADR-0013 记忆队列）'
     uid: number = userId,
   ): Promise<string> {
     const store = new MemoryFileStoreService(MEMORY_ROOT);
-    for (const item of seed) await store.appendEntry(uid, item);
+    const entries: MemoryEntry[] = [];
     if (opts?.summary) {
-      const q = await store.readQueue(uid);
-      await store.writeQueue(uid, { ...q, summary: opts.summary, foldedCount: 2 });
+      // 折叠摘要 = 队首条目（【记忆摘要】前缀，content 为三段要点）
+      entries.push({ time: '2026-10-28 08:00', title: '【记忆摘要】更早记忆的浓缩', content: opts.summary });
     }
+    for (const item of seed) entries.push({ time: '2026-10-29 09:00', title: item.title, content: item.content });
+    await store.writeQueue(uid, entries);
     const service = newService();
     const messages = await (service as unknown as PromptBuilder).prepareMessages(
       { ...conv('conv-mem'), userId: uid },
@@ -129,12 +132,12 @@ describe('LangGraphAgentService（长期记忆注入，ADR-0013 记忆队列）'
     return String((messages[0] as SystemMessage).content);
   }
 
-  it('有条目且带 userId：system 注入记忆块（摘要段 + 条目行按时间序）', async () => {
+  it('有条目且带 userId：system 注入记忆块（摘要条目 + 条目行按时间序）', async () => {
     const system = await systemWithQueue([{ title: '偏好动量', content: '只做 20 日动量。' }], {
       summary: '更早记忆的浓缩要点',
     });
     expect(system).toContain('【用户长期记忆】');
-    expect(system).toContain('- 摘要（更早记忆的浓缩）：更早记忆的浓缩要点');
+    expect(system).toContain('【记忆摘要】更早记忆的浓缩');
     expect(system).toContain('- [');
     expect(system).toContain('偏好动量：只做 20 日动量。');
   });
@@ -269,8 +272,8 @@ describe('save_memory（长期记忆写入闭环，ADR-0013 记忆队列）', ()
     const r = await (service as unknown as SaveRunner).execSaveMemory(add('偏好动量'), ctxOf(9));
     expect(r.result).toMatchObject({ ok: true, 回执: '已记住：偏好动量' });
     const q = await new MemoryFileStoreService(MEMORY_ROOT).readQueue(9);
-    expect(q.entries.map((e) => e.title)).toContain('偏好动量');
-    expect(q.entries[0].time).toMatch(/\d{4}-\d{2}-\d{2} \d{2}:\d{2}/);
+    expect(q.map((e) => e.title)).toContain('偏好动量');
+    expect(q[0].time).toMatch(/\d{4}-\d{2}-\d{2} \d{2}:\d{2}/);
   });
 
   it('重复确认同一主题：直接追加不判重（两条并存，追加即保鲜）', async () => {
@@ -278,7 +281,7 @@ describe('save_memory（长期记忆写入闭环，ADR-0013 记忆队列）', ()
     await (service as unknown as SaveRunner).execSaveMemory(add('偏好动量'), ctxOf(10));
     await (service as unknown as SaveRunner).execSaveMemory(add('偏好动量'), ctxOf(10));
     const q = await new MemoryFileStoreService(MEMORY_ROOT).readQueue(10);
-    expect(q.entries.filter((e) => e.title === '偏好动量')).toHaveLength(2);
+    expect(q.filter((e) => e.title === '偏好动量')).toHaveLength(2);
   });
 
   it('update 已并入 add：修正偏好=追加修正版', async () => {
@@ -289,47 +292,15 @@ describe('save_memory（长期记忆写入闭环，ADR-0013 记忆队列）', ()
     );
     expect(r.result).toMatchObject({ ok: true, 回执: '已记住：偏好动量' });
     const q = await new MemoryFileStoreService(MEMORY_ROOT).readQueue(11);
-    expect(q.entries).toHaveLength(1);
-    expect(q.entries[0].content).toBe('改用低波动。');
+    expect(q).toHaveLength(1);
+    expect(q[0].content).toBe('改用低波动。');
   });
 
-  it('delete：单条命中物理删除；零命中且无摘要报错；多命中列出待确认', async () => {
-    const service = newService();
-    const runner = service as unknown as SaveRunner;
-    await runner.execSaveMemory(add('只用动量因子'), ctxOf(12));
-    await runner.execSaveMemory(add('万三手续费'), ctxOf(12));
-    const ok = await runner.execSaveMemory({ op: 'delete', title: '动量' }, ctxOf(12));
-    expect(ok.result).toMatchObject({ ok: true, 回执: '已忘掉：只用动量因子' });
-    const miss = await runner.execSaveMemory({ op: 'delete', title: '不存在的' }, ctxOf(12));
-    expect(String(miss.result.error)).toContain('没有找到');
-    await runner.execSaveMemory(add('动量因子偏好'), ctxOf(12));
-    await runner.execSaveMemory(add('动量止损习惯'), ctxOf(12));
-    const multi = await runner.execSaveMemory({ op: 'delete', title: '动量' }, ctxOf(12));
-    expect(String(multi.result.需要确认)).toContain('2 条');
-  });
-
-  it('delete 零命中但摘要非空：追加作废条目（下次折叠消化）', async () => {
-    const service = newService();
-    const store = new MemoryFileStoreService(MEMORY_ROOT);
-    await store.writeQueue(15, {
-      summary: '旧要点：偏好动量。',
-      foldedCount: 3,
-      updated: '2026-10-29 09:00',
-      entries: [],
-    });
-    const r = await (service as unknown as SaveRunner).execSaveMemory({ op: 'delete', title: '动量' }, ctxOf(15));
-    expect(r.result).toMatchObject({ ok: true });
-    const q = await store.readQueue(15);
-    expect(q.entries.at(-1)?.title).toContain('已作废');
-  });
-
-  it('缺参与非法 op：逐项报错不落盘', async () => {
+  it('缺 content：逐项报错不落盘', async () => {
     const service = newService();
     const runner = service as unknown as SaveRunner;
     expect(String((await runner.execSaveMemory({ op: 'add', title: '只有标题' }, ctxOf(13))).result.error)).toContain('参数不完整');
-    expect(String((await runner.execSaveMemory({ op: 'delete' }, ctxOf(13))).result.error)).toContain('需要 title');
-    expect(String((await runner.execSaveMemory({ op: 'wat', title: 't', content: 'c' }, ctxOf(13))).result.error)).toContain('op 不合法');
-    await expect(new MemoryFileStoreService(MEMORY_ROOT).readQueue(13)).resolves.toMatchObject({ entries: [] });
+    await expect(new MemoryFileStoreService(MEMORY_ROOT).readQueue(13)).resolves.toEqual([]);
   });
 
   it('会话未携带 userId（防御口径）：报错不落盘', async () => {
@@ -353,7 +324,7 @@ describe('save_memory（长期记忆写入闭环，ADR-0013 记忆队列）', ()
     expect(toolMsg).toBeInstanceOf(ToolMessage);
     expect(JSON.parse(String((toolMsg as ToolMessage).content))).toMatchObject({ 回执: '已记住：图测条目' });
     const q = await new MemoryFileStoreService(MEMORY_ROOT).readQueue(14);
-    expect(q.entries.map((e) => e.title)).toContain('图测条目');
+    expect(q.map((e) => e.title)).toContain('图测条目');
   });
 });
 

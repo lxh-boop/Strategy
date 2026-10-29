@@ -36,7 +36,7 @@ import {
 } from '../../core/industry-engine';
 import { formatFnCall } from '../../core/weight-functions';
 import { UserStoreService } from '../../core/user-store.service';
-import { MemoryStoreService, ConversationSummary, MemoryQueue, queueText, renderQueueLine } from '../../core/memory-store.service';
+import { MemoryStoreService, ConversationSummary, MemoryEntry, MemoryQueue, memoryStamp, queueText, renderQueueLine } from '../../core/memory-store.service';
 import { todayStr } from '../../common/time';
 import { assertAnalysisParams, FactorAnalysisService, FactorCorrelationInput, RankAnalysisInput } from '../../core/factor-analysis.service';
 import { describeTimingOverlay } from '../../core/timing';
@@ -685,47 +685,15 @@ export class LangGraphAgentService extends AgentService {
     if (typeof ctx.userId !== 'number') {
       return { result: { error: '记忆功能不可用：会话未携带用户身份' } };
     }
-    const op = String(args.op ?? '').trim();
+    const userId = ctx.userId; // 收窄常量：闭包内可用（TS 对属性收窄不过闭包）
     const title = String(args.title ?? '').trim();
-    if (op === 'delete') {
-      if (!title) return { result: { error: 'op=delete 需要 title（要忘掉的记忆标题或关键词）' } };
-      const queue = await this.memoryStore.readQueue(ctx.userId);
-      const kw = title.toLowerCase();
-      const hits = queue.entries.filter(
-        (e) => e.title.toLowerCase().includes(kw) || e.content.toLowerCase().includes(kw),
-      );
-      if (hits.length > 1) {
-        return {
-          result: {
-            需要确认: `匹配到 ${hits.length} 条记忆，请让用户确认要忘掉哪一条后重试`,
-            候选: hits.map((e) => `[${e.time}] ${e.title}：${e.content}`),
-          },
-        };
-      }
-      if (hits.length === 1) {
-        queue.entries = queue.entries.filter((e) => e !== hits[0]);
-        await this.memoryStore.writeQueue(ctx.userId, queue);
-        return { result: { ok: true, 回执: `已忘掉：${hits[0].title}` } };
-      }
-      if (queue.summary) {
-        // 目标已折叠进摘要：追加作废声明，注入可见，下次折叠时摘要器消化
-        await this.memoryStore.appendEntry(ctx.userId, {
-          title: `已作废：${title}`,
-          content: `用户声明忘掉「${title}」相关的记忆，此前要点中的相关内容作废`,
-        });
-        return { result: { ok: true, 回执: `相关内容已折叠进记忆摘要，已记录作废声明` } };
-      }
-      return { result: { error: `没有找到与「${title}」相关的记忆` } };
-    }
-    // add（update 已并入：修正偏好=追加修正版，旧的由队头折叠消化）
-    if (op !== 'add' && op !== 'update') {
-      return { result: { error: 'op 不合法：只能是 add / delete' } };
-    }
     const content = String(args.content ?? '').trim();
     if (!title || !content) {
-      return { result: { error: '参数不完整：add 需要 title（一句话标题）与 content（一到两句具体事实）' } };
+      return { result: { error: '参数不完整：需要 title（一句话标题）与 content（一到两句具体事实）。忘掉某条记忆时，title 写「忘掉：XX」、content 写明作废哪条' } };
     }
-    const entry = await this.memoryStore.appendEntry(ctx.userId, { title, content });
+    // 唯一操作 = 追加（ADR-0013）：不判重；「忘掉」也是追加一条作废声明，
+    // 注入前导语"以最新为准"消歧，队头折叠时摘要器消化
+    const entry = await this.withMemoryLock(() => this.memoryStore.appendEntry(userId, { title, content }));
     return { result: { ok: true, 回执: `已记住：${entry.title}`, time: entry.time } };
   }
 
@@ -1525,54 +1493,61 @@ export class LangGraphAgentService extends AgentService {
     this.logger.log(`历史折叠重炼 会话=${conversation.id} 覆盖至 ${boundaryChars}/${bubbleChars(msgs)} 字，摘要 ${text.length} 字`);
   }
 
-  /** 摘要折叠去重：同会话并发只跑一次（ensureFoldedSummary 使用） */
+  /** 摘要折叠去重：同会话并发只跑一次（ensureFoldedSummary / foldQueueIfNeeded 使用） */
   private readonly summaryJobs = new Map<string, Promise<void>>();
+
+  /** 记忆文件互斥锁（C3/C4）：memory.md 的读改写（追加/折叠写回）串行化，
+   *  消除 read-modify-write await 缝隙的丢失更新；进程内有效（单进程部署形态） */
+  private memoryLock: Promise<unknown> = Promise.resolve();
+
+  private withMemoryLock<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.memoryLock.then(fn, fn);
+    this.memoryLock = run.catch(() => undefined);
+    return run;
+  }
 
   /** 长期记忆段（ADR-0013 记忆队列）：摘要段 + 未折叠条目按追加序注入；属用户上下文，闲聊会话也注入
    *  （与数据会话门"闲聊零注入"的分界见 GLOSSARY「长期记忆」）。会话未带 userId（理论不可达，
    *  编排层 prepare 必附加）或记忆为空 → 空串，prompt 与既往完全一致 */
   private async buildMemoryBlock(conversation: Conversation): Promise<string> {
     if (typeof conversation.userId !== 'number') return '';
-    let queue = await this.memoryStore.readQueue(conversation.userId);
-    queue = await this.foldQueueIfNeeded(conversation.userId, queue);
-    if (!queue.summary && !queue.entries.length) return '';
+    let entries = await this.memoryStore.readQueue(conversation.userId);
+    entries = await this.foldQueueIfNeeded(conversation.userId, entries);
+    if (!entries.length) return '';
     return [
       '【用户长期记忆】（跨会话保存的用户偏好与研究结论，按时间序排列，回答时恰当参考，不必复述；' +
         '与用户最新表述冲突时以最新为准）',
-      ...(queue.summary ? [`- 摘要（更早记忆的浓缩）：${queue.summary}`] : []),
-      ...queue.entries.map(renderQueueLine),
+      ...entries.map(renderQueueLine),
     ].join('\n');
   }
 
-  /** 记忆队列折叠（ADR-0013）：记忆区 token 估算超预算 → 队头最老的若干条并入记忆摘要
-   *  （LLM 融合旧摘要+被折条目，重写 ≤summaryChars 字三段要点），写回队列；单次 <1k tokens，
-   *  只在注入组装时 inline 发生（同用户去重），无后台任务。开发模式（无 LLM）不折叠，宁多勿失 */
-  private async foldQueueIfNeeded(userId: number, queue: MemoryQueue): Promise<MemoryQueue> {
-    if (!this.llm || !queue.entries.length) return queue;
-    if (estimateTokens(queueText(queue)) <= this.memoryQueueMaxTokens) return queue;
+  /** 记忆队列折叠（ADR-0013）：记忆区 token 估算超预算 → 队头最老的若干条（含旧摘要条目，
+   *  摘要的摘要）融合成一条【记忆摘要】条目写回队首；单次 <1k tokens，只在注入组装时 inline
+   *  发生（同用户去重），无后台任务。开发模式（无 LLM）不折叠，宁多勿失 */
+  private async foldQueueIfNeeded(userId: number, entries: MemoryQueue): Promise<MemoryQueue> {
+    if (!this.llm || !entries.length) return entries;
+    if (estimateTokens(queueText(entries)) <= this.memoryQueueMaxTokens) return entries;
     const key = `mem:${userId}`;
     const inflight = this.summaryJobs.get(key);
     if (inflight) await inflight.catch(() => undefined);
-    queue = await this.memoryStore.readQueue(userId); // 并发折叠后取最新
-    if (estimateTokens(queueText(queue)) <= this.memoryQueueMaxTokens) return queue;
+    entries = await this.memoryStore.readQueue(userId); // 并发折叠后取最新
+    if (estimateTokens(queueText(entries)) <= this.memoryQueueMaxTokens) return entries;
     // 从队头折：折到「剩余条目 token + 摘要预留」回到预算内为止（摘要按上限预留）
     const reserve = this.memorySummaryChars;
     let foldCount = 0;
     while (
-      queue.entries.length - foldCount > 0 &&
-      estimateTokens(queueText({ ...queue, entries: queue.entries.slice(foldCount + 1) })) + reserve >
-        this.memoryQueueMaxTokens
+      entries.length - foldCount > 0 &&
+      estimateTokens(queueText(entries.slice(foldCount + 1))) + reserve > this.memoryQueueMaxTokens
     ) {
       foldCount++;
     }
-    if (foldCount <= 0) return queue;
-    const foldedSet = queue.entries.slice(0, foldCount);
-    const existing = queue.summary ? `【此前摘要】${queue.summary}\n` : '';
-    const source = `${existing}【被折叠的记忆】${foldedSet.map((e) => `[${e.time}] ${e.title}：${e.content}`).join('\n')}`;
+    if (foldCount <= 0) return entries;
+    const foldedSet = entries.slice(0, foldCount);
+    const source = foldedSet.map((e) => `[${e.time}] ${e.title}：${e.content}`).join('\n');
     const job = (async () => {
       const output = (await this.llm!.invoke([
         new SystemMessage(
-          `你是记忆摘要器。把已有摘要与新折叠的记忆条目融合成不超过 ${this.memorySummaryChars} 字的要点，` +
+          `你是记忆摘要器。把输入的记忆条目融合成不超过 ${this.memorySummaryChars} 字的要点，` +
             '按三段组织：一、需求与结论；二、已确定的关键参数；三、未决事项。' +
             '保留仍然有效的用户偏好与研究结论，语义重复的合并为一条；丢弃已经过时或被修正的旧值；' +
             '只输出要点正文，不要任何评论或前后缀。',
@@ -1581,21 +1556,28 @@ export class LangGraphAgentService extends AgentService {
       ])) as AIMessage;
       const text = extractText(output).trim();
       if (!text) throw new Error('记忆摘要输出为空');
-      const next: MemoryQueue = {
-        summary: text,
-        foldedCount: queue.foldedCount + foldCount,
-        updated: queue.updated,
-        entries: queue.entries.slice(foldCount),
-      };
-      await this.memoryStore.writeQueue(userId, next);
-      this.logger.log(`记忆队列折叠 用户=${userId} 折叠 ${foldCount} 条，剩 ${next.entries.length} 条，摘要 ${text.length} 字`);
+      // 折叠写回队首：新摘要条目 unshift 到位置 0（不要写在队尾）；锁内重读最新队列 + 尾部重切
+      // （C3 双保险：折叠 LLM 期间新追加的条目在尾部无损保留）
+      await this.withMemoryLock(async () => {
+        const latest = await this.memoryStore.readQueue(userId);
+        const summaryEntry: MemoryEntry = {
+          time: memoryStamp(),
+          title: '【记忆摘要】更早记忆的浓缩',
+          content: text,
+        };
+        const next: MemoryQueue = [summaryEntry, ...latest.slice(foldCount)];
+        await this.memoryStore.writeQueue(userId, next);
+        this.logger.log(
+          `记忆队列折叠 用户=${userId} 折叠 ${foldCount} 条，剩 ${next.length} 条`,
+        );
+      });
     })();
     this.summaryJobs.set(key, job);
     try {
       await job;
     } catch (e) {
       this.logger.warn(`记忆队列折叠失败 用户=${userId}: ${String(e)}`);
-      return queue; // 折叠失败宁多勿失：本轮全量注入
+      return entries; // 折叠失败宁多勿失：本轮全量注入
     }
     return await this.memoryStore.readQueue(userId);
   }
