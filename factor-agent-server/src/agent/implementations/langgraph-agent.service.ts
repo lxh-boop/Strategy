@@ -238,13 +238,14 @@ export class LangGraphAgentService extends AgentService {
   private memoryMaxEntries = 30;
   private memoryBudgetChars = 800;
 
-  /** 会话滚动摘要阈值（ADR-0007 配置旋钮 memories.*，测试可改）：
-   *  总长超 triggerChars 触发压缩；压缩保留末尾约 tailChars 整条消息原文；
-   *  摘要目标 ≤summaryChars 字；原文超 refitCapChars 退化「旧摘要+增量」重炼防 prompt 无界 */
-  private memoryTriggerChars = 2000;
-  private memoryTailChars = 800;
-  private memorySummaryChars = 400;
-  private memoryRefitCapChars = 30_000;
+  /** 会话滚动摘要上限（ADR-0007 配置旋钮 memories.summaryChars，测试可改） */
+  private memorySummaryChars = 500;
+
+  /** 历史滚动窗口（prompt 分支改造，配置旋钮 history.*，测试可改）：
+   *  历史段超 maxTokens（estTokens 估算）触发折叠压缩；压缩保留最近 keepTurns 轮原文，
+   *  更早轮次增量折叠进摘要轮（摘要的摘要）。折叠只在 prepareMessages 组装时 inline 发生 */
+  private historyMaxTokens = 3000;
+  private historyKeepTurns = 2;
 
   /** 轮次序号：thread_id = `${conversationId}:${时间戳}:${seq}`，保证进程内唯一 */
   private turnSeq = 0;
@@ -304,10 +305,10 @@ export class LangGraphAgentService extends AgentService {
     // 长期记忆注入预算旋钮（ADR-0007；get 不可用的测试构造走字段缺省）
     this.memoryMaxEntries = Number(config.get<number>('memories.maxEntries') ?? 30);
     this.memoryBudgetChars = Number(config.get<number>('memories.budgetChars') ?? 800);
-    this.memoryTriggerChars = Number(config.get<number>('memories.triggerChars') ?? 2000);
-    this.memoryTailChars = Number(config.get<number>('memories.tailChars') ?? 800);
-    this.memorySummaryChars = Number(config.get<number>('memories.summaryChars') ?? 400);
-    this.memoryRefitCapChars = Number(config.get<number>('memories.refitCapChars') ?? 30_000);
+    this.memorySummaryChars = Number(config.get<number>('memories.summaryChars') ?? 500);
+    // 历史滚动窗口旋钮（prompt 分支改造）：历史段 token 预算 + 压缩时保留的原文问答轮数
+    this.historyMaxTokens = Number(config.get<number>('history.maxTokens') ?? 3000);
+    this.historyKeepTurns = Number(config.get<number>('history.keepTurns') ?? 2);
   }
 
   private buildGraph(agent: { invoke(messages: BaseMessage[]): Promise<unknown> }) {
@@ -516,8 +517,6 @@ export class LangGraphAgentService extends AgentService {
         { configurable: { thread_id: threadId, onProgress }, recursionLimit: 30 },
       );
       const reply = await this.collectReply(state, conversation.id, threadId, onProgress);
-      // 回复完成后滚动摘要维护（ADR-0007）：不挡响应、不抛，失败仅日志（无损不变式保证下轮仍正确）
-      this.maybeCompressInBackground(conversation);
       return reply;
     } catch (error) {
       const reply = this.errorReply(error, conversation.id);
@@ -558,8 +557,6 @@ export class LangGraphAgentService extends AgentService {
       recursionLimit: 30,
     });
     const reply = await this.collectReply(state, conversation.id, threadId, onProgress);
-    // 确认门恢复也是完整一轮：滚动摘要维护同 runGraph（ADR-0007）
-    this.maybeCompressInBackground(conversation);
     return reply;
   }
 
@@ -1399,123 +1396,95 @@ export class LangGraphAgentService extends AgentService {
   /* ----- 消息构造 ----- */
 
   private async prepareMessages(conversation: Conversation, userText: string): Promise<BaseMessage[]> {
-    const summary = await this.ensureSummary(conversation);
-    // 无损不变式的注入侧：coveredChars 之前的历史在摘要里，其后的原文照出；无摘要 → 全量原文。
-    // 会话不带 userId 的防御口径（理论不可达）取最近 triggerChars 内的原文，不读摘要不压缩
-    const recent = (typeof conversation.userId === 'number'
-      ? uncoveredSlice(conversation.messages, summary?.coveredChars ?? 0).msgs
-      : takeWithinChars(conversation.messages, this.memoryTriggerChars)
-    ).map((m: ChatMessage) =>
-      m.role === 'agent' ? new AIMessage({ content: m.bubble }) : new HumanMessage({ content: m.bubble }),
-    );
-    const summaryMsg = summary
-      ? [new SystemMessage(`【历史对话摘要】（此前对话的压缩要点，原始记录在库）\n${summary.summary}`)]
-      : [];
-
-    return [
-      new SystemMessage({ content: await this.buildSystemPrompt(conversation) }),
-      ...summaryMsg,
-      ...recent,
-      new HumanMessage({ content: userText }),
-    ];
-  }
-
-  /* ----- 会话滚动摘要（ADR-0007 第 3 刀）-----
-     长度制：气泡总字符数超 triggerChars 才压缩（非条数）；摘要替换 coveredChars 之前的一段历史、
-     注入为一条 SystemMessage；原始 messages（只追加日志）永不覆盖，摘要随时可从原文重炼。 */
-
-  /** 摘要维护去重：同会话并发只跑一次（后台维护与 prepare 懒兜底可能同时触发） */
-  private readonly summaryJobs = new Map<string, Promise<void>>();
-
-  /** prepare 时摘要保障：
-   *  - 总长未超触发线 → 无需摘要（短会话全量原文注入，优于旧 6 条硬截断）；
-   *  - 超线且无摘要 → 内联压缩（懒兜底：首轮超线当轮炼，一次性延迟）；
-   *  - 有摘要但未覆盖原文超硬上限（后台连续失败）→ 内联压缩封顶注入长度；
-   *  - 仅超滞后带（trigger-tail）→ 交后台炼，本轮不挡（无损不变式保证本轮注入仍正确）。
-   *  开发模式（无 LLM）返回 null：炼不了摘要就宁多勿失，全量原文注入 */
-  private async ensureSummary(conversation: Conversation): Promise<ConversationSummary | null> {
-    if (!this.llm || typeof conversation.userId !== 'number') return null;
-    const total = bubbleChars(conversation.messages);
-    if (total <= this.memoryTriggerChars) return null;
-    let summary = await this.memoryStore.readSummary(conversation.userId, conversation.id);
-    const uncovered = uncoveredSlice(conversation.messages, summary?.coveredChars ?? 0).chars;
-    if (!summary) {
-      await this.maintainSummary(conversation, 'inline');
-      summary = await this.memoryStore.readSummary(conversation.userId, conversation.id);
-    } else if (uncovered > this.memoryTriggerChars) {
-      await this.maintainSummary(conversation, 'inline');
-      summary = (await this.memoryStore.readSummary(conversation.userId, conversation.id)) ?? summary;
-    } else if (uncovered > this.memoryTriggerChars - this.memoryTailChars) {
-      this.maintainSummary(conversation, 'background').catch(() => undefined);
-    }
-    return summary;
-  }
-
-  /** 回复完成后的后台维护入口（不 await、不抛）：仅当总长超线且未覆盖原文超滞后带才值得炼 */
-  private maybeCompressInBackground(conversation: Conversation): void {
-    if (!this.llm || typeof conversation.userId !== 'number') return;
-    const total = bubbleChars(conversation.messages);
-    if (total <= this.memoryTriggerChars) return;
-    void (async () => {
-      const summary = await this.memoryStore.readSummary(conversation.userId!, conversation.id);
-      const uncovered = uncoveredSlice(conversation.messages, summary?.coveredChars ?? 0).chars;
-      if (uncovered > this.memoryTriggerChars - this.memoryTailChars) {
-        await this.maintainSummary(conversation, 'background');
+    const system = new SystemMessage({ content: await this.buildSystemPrompt(conversation) });
+    let history: BaseMessage[];
+    if (!this.llm || typeof conversation.userId !== 'number') {
+      // 开发模式 / 防御口径：炼不了折叠就宁多勿失，全量原文注入（ADR-0007 同款取舍）
+      history = conversation.messages.map((m) =>
+        m.role === 'agent' ? new AIMessage({ content: m.bubble }) : new HumanMessage({ content: m.bubble }),
+      );
+    } else {
+      const plan = planHistoryWindow(conversation.messages, {
+        maxTokens: this.historyMaxTokens,
+        keepTurns: this.historyKeepTurns,
+      });
+      const kept = plan.kept.map((m) =>
+        m.role === 'agent' ? new AIMessage({ content: m.bubble }) : new HumanMessage({ content: m.bubble }),
+      );
+      if (!plan.overflow) {
+        history = kept;
+      } else {
+        // 超预算：更早轮次折叠进摘要轮（inline，同会话去重）；摘要以「一问一答」对话轮形态注入
+        const summaryText = await this.ensureFoldedSummary(conversation, plan.boundaryChars);
+        history = summaryText
+          ? [
+              new HumanMessage('【历史归档】把之前咱们聊的内容整理成要点吧，整理完接着继续。'),
+              new AIMessage(`好的，此前对话要点如下：\n${summaryText}`),
+              ...kept,
+            ]
+          : kept; // 折叠失败宁多勿失：本轮退化为全量原文（无损不变式保证正确）
       }
-    })().catch((e) => this.logger.warn(`滚动摘要后台维护失败 会话=${conversation.id}: ${String(e)}`));
-  }
-
-  /** 同会话去重：inline 等待在跑的任务复用其结果，background 撞车直接让路 */
-  private async maintainSummary(conversation: Conversation, mode: 'inline' | 'background'): Promise<void> {
-    const key = `${conversation.userId}:${conversation.id}`;
-    const inflight = this.summaryJobs.get(key);
-    if (inflight) {
-      if (mode === 'inline') await inflight.catch(() => undefined);
-      return;
     }
-    const job = this.compressConversation(conversation).finally(() => this.summaryJobs.delete(key));
-    this.summaryJobs.set(key, job);
-    if (mode === 'inline') await job.catch(() => undefined);
+    return [system, ...history, new HumanMessage({ content: userText })];
   }
 
-  /** 重炼一条会话摘要。覆盖边界收在整条消息边界：保留末尾约 tailChars 的最小整条后缀原文，
-   *  coveredChars = 其前的累计字符数。源文本优先全量原文重炼（无"摘要的摘要"失真）；
-   *  超 refitCap 退化「旧摘要 + 其后增量原文」。快照时机：回复完成即炼，此时本轮消息尚未落库，
-   *  差的一轮由下一轮维护自然收敛（coveredChars 是前缀坐标，不受影响） */
-  private async compressConversation(conversation: Conversation): Promise<void> {
+  /* ----- 历史滚动窗口（prompt 分支改造，ADR-0007 修订）-----
+   * 老设计：字符阈值触发 + 后台全量重炼（triggerChars/tailChars/refitCapChars 三旋钮）。
+   * 新设计：历史段按 token 预算触发；超限后保留最近 keepTurns 轮原文，更早轮次「旧摘要+被挤出轮」
+   * 增量折叠成摘要轮（压缩次数 = 年龄 = 重要度衰减）；只保留 inline 折叠，background 路径删除。 */
+
+  /** 折叠摘要保障：boundary 之前的历史确保已折叠进摘要（增量：只炼新被挤出的部分）。
+   *  返回摘要正文；失败抛出由调用方退化处理。同会话并发只跑一次 */
+  private async ensureFoldedSummary(conversation: Conversation, boundaryChars: number): Promise<string | null> {
+    const userId = conversation.userId as number;
+    if (boundaryChars <= 0) return null;
+    const key = `${userId}:${conversation.id}`;
+    const inflight = this.summaryJobs.get(key);
+    if (inflight) await inflight.catch(() => undefined);
+    let summary = await this.memoryStore.readSummary(userId, conversation.id);
+    if (summary && summary.coveredChars >= boundaryChars) return summary.summary; // 已覆盖，无需折叠
+    const job = this.summaryJobs.get(key) ?? this.foldConversation(conversation, boundaryChars)
+      .finally(() => this.summaryJobs.delete(key));
+    this.summaryJobs.set(key, job);
+    try {
+      await job;
+    } catch (e) {
+      this.logger.warn(`历史折叠失败 会话=${conversation.id}: ${String(e)}`);
+      return null; // 宁多勿失：本轮全量原文
+    }
+    summary = await this.memoryStore.readSummary(userId, conversation.id);
+    return summary?.summary ?? null;
+  }
+
+  /** 重炼折叠摘要。覆盖边界收在整条轮边界（planHistoryWindow 给出）；折叠源 = 旧摘要 + 新被挤出轮原文，
+   *  恒小无界风险；原始 messages 只追加永不覆盖，摘要随时可从原文重炼 */
+  private async foldConversation(conversation: Conversation, boundaryChars: number): Promise<void> {
     const userId = conversation.userId as number;
     const msgs = conversation.messages;
-    const total = bubbleChars(msgs);
-    if (total === 0) return;
-    const coveredChars = bubbleChars(msgs.slice(0, suffixStartIndex(msgs, this.memoryTailChars)));
-    const source = await this.summarySource(conversation, total);
+    const existing = await this.memoryStore.readSummary(userId, conversation.id);
+    const coveredChars = existing?.coveredChars ?? 0;
+    // 折叠源：coveredChars 到 boundaryChars 之间的整条消息（两端都收在整条消息边界）
+    const delta = sliceBetween(msgs, coveredChars, boundaryChars)
+      .map((m) => `${m.role === 'agent' ? '助手' : '用户'}：${m.bubble}`)
+      .join('\n');
+    const source = existing ? `【此前摘要】${existing.summary}\n【其后对话】${delta}` : delta;
     const output = (await this.llm!.invoke([
       new SystemMessage(
-        `你是对话摘要器。把输入的多因子选股对话历史压缩成不超过 ${this.memorySummaryChars} 字的要点：` +
+        `你是对话摘要器。把输入的历史对话增量和已有摘要融合成不超过 ${this.memorySummaryChars} 字的要点，` +
+          '按三段组织：一、需求与结论；二、已确定的关键参数；三、未决事项。' +
           '保留用户的偏好与结论、已确定的关键参数与决策、未完成的事项；丢弃寒暄与过程性描述；' +
-          '只输出摘要正文，不要任何评论或前后缀。',
+          '只输出要点正文，不要任何评论或前后缀。',
       ),
       new HumanMessage(source),
     ])) as AIMessage;
     const text = extractText(output).trim();
     if (!text) throw new Error('摘要输出为空');
-    await this.memoryStore.writeSummary(userId, conversation.id, text, coveredChars);
-    this.logger.log(`滚动摘要重炼 会话=${conversation.id} 覆盖 ${coveredChars}/${total} 字，摘要 ${text.length} 字`);
+    await this.memoryStore.writeSummary(userId, conversation.id, text, boundaryChars);
+    this.logger.log(`历史折叠重炼 会话=${conversation.id} 覆盖至 ${boundaryChars}/${bubbleChars(msgs)} 字，摘要 ${text.length} 字`);
   }
 
-  /** 摘要源文本：全量原文（缺省）；超 refitCap 退化为「旧摘要 + 其后增量」或近段原文截断 */
-  private async summarySource(conversation: Conversation, total: number): Promise<string> {
-    const transcript = conversation.messages
-      .map((m) => `${m.role === 'agent' ? '助手' : '用户'}：${m.bubble}`)
-      .join('\n');
-    if (total <= this.memoryRefitCapChars) return transcript;
-    const existing = await this.memoryStore.readSummary(conversation.userId as number, conversation.id);
-    if (!existing) return transcript.slice(-this.memoryRefitCapChars);
-    const delta = uncoveredSlice(conversation.messages, existing.coveredChars)
-      .msgs.map((m) => `${m.role === 'agent' ? '助手' : '用户'}：${m.bubble}`)
-      .join('\n');
-    return `【此前摘要】${existing.summary}\n【其后对话】${delta}`;
-  }
+  /** 摘要折叠去重：同会话并发只跑一次（ensureFoldedSummary 使用） */
+  private readonly summaryJobs = new Map<string, Promise<void>>();
 
   /** 长期记忆段（ADR-0007）：条目式事实全量注入、预算封顶；属用户上下文，闲聊会话也注入
    *  （与数据会话门"闲聊零注入"的分界见 GLOSSARY「长期记忆」）。会话未带 userId（理论不可达，
@@ -1599,6 +1568,83 @@ export function bubbleChars(messages: ChatMessage[]): number {
   return messages.reduce((sum, m) => sum + m.bubble.length, 0);
 }
 
+/* ----- 历史滚动窗口纯函数（prompt 分支改造，导出供测试）-----
+ * 未超预算：全部原文照出；超预算：保留最近 keepTurns 轮原文，更早轮次折叠进摘要轮。
+ * token 估算与 usage 日志同口径（中文≈1/字、ASCII≈1/4），参数值可直接对照真实消耗。 */
+
+export interface ChatTurn {
+  /** 轮内第一条消息下标（含） */
+  startIndex: number;
+  /** 轮内最后一条消息下标（含） */
+  endIndex: number;
+  /** 轮文本（"用户：…
+助手：…"，折叠源与 token 估算口径） */
+  text: string;
+}
+
+/** 把气泡消息序列切成问答轮：用户气泡开轮，后续相邻助手气泡归入本轮。
+ *  防御畸形序列（开头无用户、连续用户）：按"遇用户开新轮、其余归当前轮"容错 */
+export function splitChatTurns(messages: ChatMessage[]): ChatTurn[] {
+  const turns: ChatTurn[] = [];
+  for (let i = 0; i < messages.length; i++) {
+    const m = messages[i];
+    const line = `${m.role === 'agent' ? '助手' : '用户'}：${m.bubble}`;
+    if (m.role !== 'agent' || turns.length === 0) {
+      turns.push({ startIndex: i, endIndex: i, text: line });
+    } else {
+      const t = turns[turns.length - 1];
+      t.endIndex = i;
+      t.text += `\n${line}`;
+    }
+  }
+  return turns;
+}
+
+/** token 估算：中文（含全角）≈1 token/字，ASCII ≈1 token/4 字符 */
+export function estimateTokens(text: string): number {
+  const cjk = (text.match(/[一-鿿　-〿＀-￯]/g) || []).length;
+  return Math.round(cjk + (text.length - cjk) / 4);
+}
+
+export interface HistoryWindowPlan {
+  /** 注入的原文段（未超预算=全部；超预算=最近 keepTurns 轮） */
+  kept: ChatMessage[];
+  /** 是否触发折叠（false = 未超预算或单轮击穿例外，kept 即全部） */
+  overflow: boolean;
+  /** 折叠边界（kept 起点的字符坐标，收在整条轮边界）；overflow=false 时为 0 */
+  boundaryChars: number;
+}
+
+/** 历史窗口规划：历史段 token 超预算 → 保留最近 keepTurns 轮原文、其余折叠；
+ *  例外：仅剩的原文轮自身就超预算（单轮巨长）→ 如实保留不折叠（尾部保真优先） */
+export function planHistoryWindow(
+  messages: ChatMessage[],
+  opts: { maxTokens: number; keepTurns: number },
+): HistoryWindowPlan {
+  if (!messages.length) return { kept: [], overflow: false, boundaryChars: 0 };
+  const turns = splitChatTurns(messages);
+  const totalTokens = estimateTokens(turns.map((t) => t.text).join('\n'));
+  if (totalTokens <= opts.maxTokens) return { kept: messages, overflow: false, boundaryChars: 0 };
+  const keepCount = Math.min(opts.keepTurns, turns.length);
+  const keptTurns = turns.slice(-keepCount);
+  const kept = messages.slice(keptTurns[0].startIndex);
+  const boundaryChars = bubbleChars(messages.slice(0, keptTurns[0].startIndex));
+  if (boundaryChars <= 0) return { kept: messages, overflow: false, boundaryChars: 0 }; // 单轮击穿例外
+  return { kept, overflow: true, boundaryChars };
+}
+
+/** 取 char 区间 [coveredChars, boundaryChars) 内的整条消息（两端均收整条边界） */
+export function sliceBetween(messages: ChatMessage[], coveredChars: number, boundaryChars: number): ChatMessage[] {
+  const out: ChatMessage[] = [];
+  let start = 0;
+  for (const m of messages) {
+    const end = start + m.bubble.length;
+    if (start >= coveredChars && end <= boundaryChars) out.push(m);
+    start = end;
+  }
+  return out;
+}
+
 /* ----- token 减负纯函数（prompt 分支，导出供测试） -----
  * 投影只发生在喂模型边界（agent 节点），图状态保持全量：
  *  - 表目录（哨兵包裹段）仅在本次提问的首次模型调用注入，后续轮整段撤除；
@@ -1661,38 +1707,6 @@ export function projectMessagesForModel(messages: BaseMessage[], isFirstModelCal
   });
 }
 
-/** 无损不变式的注入侧：累计字符越过 coveredChars 边界的消息（边界落在整条消息上，
- *  恰好压线时多注入一条原文——宁可多注入不可丢失） */
-export function uncoveredSlice(messages: ChatMessage[], coveredChars: number): { msgs: ChatMessage[]; chars: number } {
-  let cum = 0;
-  let start = messages.length;
-  for (let i = 0; i < messages.length; i++) {
-    if (cum + messages[i].bubble.length > coveredChars) {
-      start = i;
-      break;
-    }
-    cum += messages[i].bubble.length;
-  }
-  const msgs = messages.slice(start);
-  return { msgs, chars: msgs.reduce((s, m) => s + m.bubble.length, 0) };
-}
-
-/** 压缩覆盖边界：从尾部累计到 ≥ minChars 的最小整条后缀，返回其起始下标 */
-export function suffixStartIndex(messages: ChatMessage[], minChars: number): number {
-  let sum = 0;
-  let start = messages.length;
-  for (let i = messages.length - 1; i >= 0; i--) {
-    sum += messages[i].bubble.length;
-    start = i;
-    if (sum >= minChars) break;
-  }
-  return start;
-}
-
-/** 防御口径（会话无 userId 时）：从尾部取 ≤ maxChars 的最近整条消息 */
-export function takeWithinChars(messages: ChatMessage[], maxChars: number): ChatMessage[] {
-  return messages.slice(suffixStartIndex(messages, maxChars));
-}
 
 /** 今天日期行（注入 system prompt）：模型没有当前时间感知，相对时间表达
  *  （"最近两年""今年"）全靠这行换算成纯数字区间，免去反问用户的弯路 */

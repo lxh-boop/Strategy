@@ -7,13 +7,14 @@ import * as path from 'node:path';
 import { Conversation } from '../../../src/types';
 import {
   bubbleChars,
+  estimateTokens,
   formatTableCatalog,
   LangGraphAgentService,
+  planHistoryWindow,
   projectMessagesForModel,
+  splitChatTurns,
   stripTableCatalog,
   summarizeToolReceipt,
-  suffixStartIndex,
-  uncoveredSlice,
 } from '../../../src/agent/implementations/langgraph-agent.service';
 import { FactorDataService } from '../../../src/core/factor-data.service';
 import { MemoryUserStoreService } from '../../../src/core/implementations/memory-user-store.service';
@@ -157,141 +158,93 @@ describe('LangGraphAgentService（长期记忆注入，ADR-0007 第 1 刀）', (
   });
 });
 
-describe('会话滚动摘要（长度制，ADR-0007 第 3 刀）', () => {
+describe('历史滚动窗口（prompt 分支，ADR-0007 修订）', () => {
   const msg = (role: 'user' | 'agent', text: string) =>
     ({ role, bubble: text, time: '10:00' }) as Conversation['messages'][number];
   type PromptBuilder = { prepareMessages(c: Conversation, text: string): Promise<BaseMessage[]> };
 
-  it('bubbleChars：气泡字符累计（卡片不参与）', () => {
-    const msgs = [msg('user', '12345'), msg('agent', '678')];
-    expect(bubbleChars(msgs)).toBe(8);
+  it('splitChatTurns：用户开轮、助手归轮；开头无用户时助手自成一轮', () => {
+    const turns = splitChatTurns([msg('user', 'q1'), msg('agent', 'a1'), msg('user', 'q2'), msg('agent', 'a2')]);
+    expect(turns).toHaveLength(2);
+    expect(turns[0]).toMatchObject({ startIndex: 0, endIndex: 1 });
+    expect(turns[1].text).toBe('用户：q2' + '\n' + '助手：a2');
+    const weird = splitChatTurns([msg('agent', 'hi'), msg('user', 'q')]);
+    expect(weird).toHaveLength(2);
+    expect(weird[0].startIndex).toBe(0);
   });
 
-  it('uncoveredSlice：边界收整条消息，压线时多注入不丢失', () => {
-    const msgs = [msg('user', 'a'.repeat(6)), msg('agent', 'b'.repeat(6))];
-    // covered=10 落在第二条消息中间 → 第二条整条注入（多注入安全）
-    expect(uncoveredSlice(msgs, 10).msgs).toEqual([msgs[1]]);
-    // covered ≥ 总长 → 空；covered=0 → 全量
-    expect(uncoveredSlice(msgs, 12).msgs).toEqual([]);
-    expect(uncoveredSlice(msgs, 0).msgs).toEqual(msgs);
+  it('estimateTokens：中文≈1/字、ASCII≈1/4', () => {
+    expect(estimateTokens('回测策略')).toBe(4);
+    expect(estimateTokens('abcd')).toBe(1);
+    expect(estimateTokens('回测abcd')).toBe(3);
   });
 
-  it('suffixStartIndex：从尾部累计到 ≥ minChars 的最小整条后缀', () => {
-    const msgs = [msg('user', 'x'.repeat(5)), msg('agent', 'y'.repeat(5)), msg('user', 'z'.repeat(5))];
-    expect(suffixStartIndex(msgs, 8)).toBe(1);
-    expect(suffixStartIndex(msgs, 1)).toBe(2);
-    expect(suffixStartIndex(msgs, 15)).toBe(0);
+  it('planHistoryWindow：未超预算全量保留；超预算保最近 2 轮、边界收整条轮', () => {
+    const msgs = [
+      msg('user', '一'.repeat(600)), msg('agent', '二'.repeat(600)),
+      msg('user', '三'.repeat(600)), msg('agent', '四'.repeat(600)),
+      msg('user', '五'.repeat(600)), msg('agent', '六'.repeat(600)),
+    ];
+    const ok = planHistoryWindow(msgs, { maxTokens: 10_000, keepTurns: 2 });
+    expect(ok).toMatchObject({ overflow: false, boundaryChars: 0 });
+    expect(ok.kept).toHaveLength(6);
+    const plan = planHistoryWindow(msgs, { maxTokens: 3000, keepTurns: 2 });
+    expect(plan.overflow).toBe(true);
+    expect(plan.kept).toHaveLength(4);
+    expect(plan.boundaryChars).toBe(bubbleChars(msgs.slice(0, 2)));
   });
 
-  it('无损性质：任意消息序列与尾部预算下，摘要覆盖段 ∪ 原文段 = 全部消息且不重叠', () => {
-    const lengths = [3, 7, 2, 9, 4, 6, 1, 8, 5];
-    const msgs = lengths.map((n, i) => msg(i % 2 ? 'agent' : 'user', String(i).repeat(n)));
-    const total = bubbleChars(msgs);
-    for (const tail of [0, 5, 12, 20, total]) {
-      const covered = bubbleChars(msgs.slice(0, suffixStartIndex(msgs, tail)));
-      const { msgs: uncovered } = uncoveredSlice(msgs, covered);
-      const expected = msgs.slice(suffixStartIndex(msgs, tail));
-      expect(uncovered).toEqual(expected);
-      // 覆盖段与原文段拼接 = 原序列（顺序不变、无遗漏）
-      expect(bubbleChars(msgs.slice(0, suffixStartIndex(msgs, tail))) + uncovered.length).toBeGreaterThanOrEqual(0);
-      expect(msgs.slice(0, msgs.length - uncovered.length).every((m, i) => msgs[i] === m)).toBe(true);
-    }
+  it('planHistoryWindow：单轮巨长击穿预算 → 如实保留不折叠', () => {
+    const msgs = [msg('user', '长'.repeat(5000))];
+    const plan = planHistoryWindow(msgs, { maxTokens: 100, keepTurns: 2 });
+    expect(plan).toMatchObject({ overflow: false, boundaryChars: 0 });
+    expect(plan.kept).toHaveLength(1);
   });
 
-  it('slice(-6) 退役：短会话 12 条全量原文注入', async () => {
+  it('短会话全量原文注入（无摘要轮）', async () => {
     const service = newService();
     const conv: Conversation = {
-      id: 'conv-long-short',
+      id: 'conv-window-short',
       title: '',
       updatedAt: 0,
       userId: 20,
-      messages: Array.from({ length: 12 }, (_, i) => msg(i % 2 ? 'agent' : 'user', `第${i}轮`)),
+      messages: Array.from({ length: 6 }, (_, i) => msg(i % 2 ? 'agent' : 'user', `第${i}轮`)),
     };
     const messages = await (service as unknown as PromptBuilder).prepareMessages(conv, '新问题');
-    // system + 12 条原文 + 当前问题；旧 slice(-6) 只会有 8 条
-    expect(messages).toHaveLength(14);
-    expect(messages.filter((m) => m instanceof HumanMessage || m instanceof AIMessage)).toHaveLength(13);
+    expect(messages).toHaveLength(8); // system + 6 原文 + 当前问题
     expect(messages.map((m) => String(m.content))).toContain('第0轮');
-    expect(messages.map((m) => String(m.content))).toContain('第11轮');
+    expect(messages.map((m) => String(m.content))).toContain('第5轮');
   });
 
-  it('无 userId 长会话（防御口径）：只注入最近 triggerChars 内的原文', async () => {
-    const service = newService();
-    (service as unknown as { memoryTriggerChars: number }).memoryTriggerChars = 100;
-    const conv: Conversation = {
-      id: 'conv-nouser-long',
-      title: '',
-      updatedAt: 0,
-      messages: Array.from({ length: 10 }, (_, i) => msg('user', 'x'.repeat(30) + `#${i}`)),
-    };
-    const messages = await (service as unknown as PromptBuilder).prepareMessages(conv, '新问题');
-    const contents = messages.map((m) => String(m.content));
-    expect(contents.some((c) => c.includes('#0'))).toBe(false);
-    expect(contents.some((c) => c.includes('#9'))).toBe(true);
-  });
-
-  describe('摘要闭环（假 LLM）', () => {
+  it('超预算：注入 = system + 摘要轮(一问一答) + 最近 2 轮原文 + 新问题；折叠落盘且幂等', async () => {
     const userId = 30;
-    const SUMMARY = '用户在调优动量策略，已确认 20 日动量、日频调仓。';
-
-    function serviceWithLlm(): { service: LangGraphAgentService; invoke: jest.Mock } {
-      const service = newService();
-      const invoke = jest.fn().mockResolvedValue({ content: SUMMARY, additional_kwargs: {} });
-      (service as unknown as { llm: unknown }).llm = { invoke };
-      Object.assign(service as unknown as Record<string, number>, {
-        memoryTriggerChars: 100,
-        memoryTailChars: 40,
-        memorySummaryChars: 50,
-        memoryRefitCapChars: 30_000,
-      });
-      return { service, invoke };
-    }
-
-    const longConv = (id: string): Conversation => ({
-      id,
+    const SUMMARY = '一、需求与结论：调优动量策略。二、已确定的关键参数：20 日动量。三、未决事项：无。';
+    const service = newService();
+    const invoke = jest.fn().mockResolvedValue({ content: SUMMARY, additional_kwargs: {} });
+    (service as unknown as { llm: unknown }).llm = { invoke };
+    Object.assign(service as unknown as Record<string, number>, { historyMaxTokens: 80, historyKeepTurns: 2 });
+    const conv: Conversation = {
+      id: 'conv-window-fold',
       title: '',
       updatedAt: 0,
       userId,
-      messages: Array.from({ length: 6 }, (_, i) => msg(i % 2 ? 'agent' : 'user', `${i}`.repeat(30))),
-    });
-
-    it('懒兜底：超触发线且无摘要 → 内联压缩落盘，注入 = 摘要 SystemMessage + 尾部原文', async () => {
-      const { service, invoke } = serviceWithLlm();
-      const conv = longConv('conv-summ-a');
-      const messages = await (service as unknown as PromptBuilder).prepareMessages(conv, '新问题');
-      expect(invoke).toHaveBeenCalledTimes(1);
-      const store = new MemoryFileStoreService(MEMORY_ROOT);
-      const summary = await store.readSummary(userId, 'conv-summ-a');
-      expect(summary).not.toBeNull();
-      expect(summary!.coveredChars).toBe(120); // 6×30，尾部保留 2 条（60 字 ≥ tail 40）
-      // 注入形态：system + 摘要 + 2 条尾部原文 + 当前问题
-      expect(messages).toHaveLength(5);
-      expect(String((messages[1] as SystemMessage).content)).toContain(SUMMARY);
-      expect(String(messages[2].content)).toBe('4'.repeat(30));
-      expect(String(messages[3].content)).toBe('5'.repeat(30));
-      // 无损不变式：前 4 条在摘要覆盖段，后 2 条原文在场
-      expect(summary!.coveredChars).toBe(bubbleChars(conv.messages.slice(0, 4)));
-    });
-
-    it('滞后带内不炼：有摘要且未覆盖原文 ≤ trigger-tail → 直接注入，LLM 零调用', async () => {
-      const { service, invoke } = serviceWithLlm();
-      const store = new MemoryFileStoreService(MEMORY_ROOT);
-      await store.writeSummary(userId, 'conv-summ-b', SUMMARY, 180); // 全覆盖：未覆盖 0 字
-      const messages = await (service as unknown as PromptBuilder).prepareMessages(longConv('conv-summ-b'), '新问题');
-      expect(invoke).not.toHaveBeenCalled();
-      expect(String((messages[1] as SystemMessage).content)).toContain(SUMMARY);
-    });
-
-    it('硬上限：有旧摘要但未覆盖原文超 triggerChars → 内联重炼封顶', async () => {
-      const { service, invoke } = serviceWithLlm();
-      const store = new MemoryFileStoreService(MEMORY_ROOT);
-      await store.writeSummary(userId, 'conv-summ-c', '旧摘要', 0); // covered=0：未覆盖 = 全部 180 字 > 100
-      const messages = await (service as unknown as PromptBuilder).prepareMessages(longConv('conv-summ-c'), '新问题');
-      expect(invoke).toHaveBeenCalledTimes(1);
-      const summary = await store.readSummary(userId, 'conv-summ-c');
-      expect(summary!.summary).toBe(SUMMARY); // 已被重炼覆盖
-      expect(String((messages[1] as SystemMessage).content)).toContain(SUMMARY);
-    });
+      messages: Array.from({ length: 6 }, (_, i) => msg(i % 2 ? 'agent' : 'user', '长'.repeat(60))),
+    };
+    const messages = await (service as unknown as PromptBuilder).prepareMessages(conv, '新问题');
+    expect(invoke).toHaveBeenCalledTimes(1);
+    expect(messages).toHaveLength(8); // system + 摘要问/答 + 2 轮原文(4) + 新问题
+    expect(String(messages[1].content)).toContain('【历史归档】');
+    expect(String(messages[2].content)).toContain('好的，此前对话要点如下');
+    expect(String(messages[2].content)).toContain(SUMMARY);
+    expect(String(messages[3].content)).toBe('长'.repeat(60));
+    expect(String(messages[6].content)).toBe('长'.repeat(60));
+    const store = new MemoryFileStoreService(MEMORY_ROOT);
+    const summary = await store.readSummary(userId, 'conv-window-fold');
+    expect(summary).not.toBeNull();
+    expect(summary!.coveredChars).toBe(bubbleChars(conv.messages.slice(0, 2)));
+    // 再组装一次：摘要已覆盖边界，LLM 零新调用（折叠幂等）
+    await (service as unknown as PromptBuilder).prepareMessages(conv, '再来一问');
+    expect(invoke).toHaveBeenCalledTimes(1);
   });
 });
 
