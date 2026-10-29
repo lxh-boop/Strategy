@@ -442,6 +442,25 @@ export class LangGraphAgentService extends AgentService {
     return this.inflightRuns.has(conversationId);
   }
 
+  /** 丢弃 thread 检查点（C2 收尾清理）：吞错——检查点本就是可用可弃的内存缓存 */
+  private async discardCheckpoint(threadId: string | undefined | null): Promise<void> {
+    if (!threadId) return;
+    try {
+      await this.checkpointer.deleteThread(threadId);
+    } catch {
+      /* 不存在/已弃 → 忽略 */
+    }
+  }
+
+  /** 会话删除/清空时的挂起检查点清理（ADR-0013 阶段并入）：有挂起确认则连检查点一起弃 */
+  async discardConversationState(conversationId: string): Promise<void> {
+    const pendingThread = this.pendingConfirms.get(conversationId);
+    if (pendingThread) {
+      this.pendingConfirms.delete(conversationId);
+      await this.discardCheckpoint(pendingThread);
+    }
+  }
+
   private async runGraph(conversation: Conversation, userText: string, onProgress?: AgentProgressSink): Promise<AgentReply> {
     // ① 未配置 Key：开发模式，纯文本提示
     if (!this.app || !this.llm) {
@@ -482,16 +501,18 @@ export class LangGraphAgentService extends AgentService {
           }
         }, this.keepaliveMs)
       : null;
+    // thread 按轮分配；检查点（确认门暂停存档）生命周期：图收尾/失败即弃，仅确认挂起中保留（C2）
+    const threadId = `${conversation.id}:${Date.now()}:${this.turnSeq++}`;
     try {
-      // ③ tool-calling 主链路：thread 按轮分配，快照只活一轮（消息真相仍以 conversations 表为准）
-      const threadId = `${conversation.id}:${Date.now()}:${this.turnSeq++}`;
       if (pendingThread) {
         this.inflightResumes.add(conversation.id);
         try {
           return await this.resumeConfirm(conversation, userText, pendingThread, onProgress);
         } catch (error) {
-          // fail-open：恢复失败（GLM 报错等）清掉挂起映射退回普通对话，不把会话卡死在确认模式
+          // fail-open：恢复失败（GLM 报错等）清掉挂起映射退回普通对话，不把会话卡死在确认模式；
+          // 挂起线程的检查点随 fail-open 一并弃（C2：无 resume 入口的快照即垃圾）
           this.pendingConfirms.delete(conversation.id);
+          await this.discardCheckpoint(pendingThread);
           this.logger.warn(`确认门恢复失败，已退出确认模式 会话=${conversation.id}: ${String(error)}`);
           throw error;
         } finally {
@@ -515,8 +536,12 @@ export class LangGraphAgentService extends AgentService {
         { configurable: { thread_id: threadId, onProgress }, recursionLimit: 30 },
       );
       const reply = await this.collectReply(state, conversation.id, threadId, onProgress);
+      // 检查点收尾（C2）：图走到 END（无挂起确认）→ 快照永不再用，弃；interrupt 挂起则保留等 resume
+      if (!hasPendingInterrupt(state)) await this.discardCheckpoint(threadId);
       return reply;
     } catch (error) {
+      // 失败路径同样弃检查点：本轮已终止，不存在任何 resume 入口
+      await this.discardCheckpoint(threadId);
       const reply = this.errorReply(error, conversation.id);
       onProgress?.({ type: 'error', message: reply.text });
       return reply;
@@ -555,6 +580,9 @@ export class LangGraphAgentService extends AgentService {
       recursionLimit: 30,
     });
     const reply = await this.collectReply(state, conversation.id, threadId, onProgress);
+    // 多组确认是多次 interrupt：还有挂起（__interrupt__ 非空）→ 保留检查点等下一次 resume；
+    // 图真正收尾 → 弃（C2）
+    if (!hasPendingInterrupt(state)) await this.discardCheckpoint(threadId);
     return reply;
   }
 
@@ -1630,6 +1658,12 @@ export class LangGraphAgentService extends AgentService {
       .filter(Boolean)[0] ?? '未知错误';
     return `调用返回「${firstLine.length > 120 ? firstLine.slice(0, 120) + '…' : firstLine}」`;
   }
+}
+
+/** 图执行结束态判定：interrupt 挂起（确认门等决策）→ true，检查点必须保留 */
+export function hasPendingInterrupt(state: unknown): boolean {
+  const slot = (state as { __interrupt__?: unknown } | null | undefined)?.__interrupt__;
+  return Array.isArray(slot) && slot.length > 0;
 }
 
 /* ----- 滚动摘要纯函数（ADR-0007 第 3 刀，导出供测试） ----- */

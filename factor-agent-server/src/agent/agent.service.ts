@@ -26,6 +26,11 @@ export abstract class AgentService {
    */
   abstract hasInflightRun(conversationId: string): boolean;
 
+  /** 会话删除/清空时的智能体侧清理：确认门挂起线程的检查点弃置（C2 收尾清理） */
+  async discardConversationState(conversationId: string): Promise<void> {
+    void conversationId;
+  }
+
   /**
    * reply 的流式形态：执行过程经 onProgress 推送节点级事件
    * （看表/看字段/读数/回测的 tool_call 与 tool_result，见 AgentProgressEvent），

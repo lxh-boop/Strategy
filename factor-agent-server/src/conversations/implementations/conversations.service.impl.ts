@@ -36,15 +36,19 @@ export class ConversationsServiceImpl extends ConversationsService {
     if (!(await this.users.deleteConversation(userId, id))) {
       throw new ApiException('NOT_FOUND', 404, `会话不存在: ${id}`);
     }
-    // 会话滚动摘要随会话删除清理（ADR-0007）；长期记忆条目是跨对话本体，不随会话删
+    // 会话滚动摘要随会话删除清理（ADR-0007）；长期记忆条目是跨对话本体，不随会话删；
+    // 确认门挂起线程的检查点一并弃（C2 收尾清理）
     await this.memories.clearSummary(userId, id);
+    await this.agent.discardConversationState(id);
   }
 
   async clear(userId: number, id: string): Promise<Conversation> {
     const conv = await this.users.clearConversation(userId, id);
     if (!conv) throw new ApiException('NOT_FOUND', 404, `会话不存在: ${id}`);
-    // 消息已清空，摘要必须同步清（否则摘要提及已删消息，注入与现实脱节）——ADR-0007
+    // 消息已清空，摘要必须同步清（否则摘要提及已删消息，注入与现实脱节）——ADR-0007；
+    // 挂起检查点同弃（C2）
     await this.memories.clearSummary(userId, id);
+    await this.agent.discardConversationState(id);
     return conv;
   }
 
