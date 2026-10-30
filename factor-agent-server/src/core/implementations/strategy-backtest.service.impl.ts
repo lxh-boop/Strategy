@@ -15,6 +15,7 @@ function industryEngine(): typeof import('../industry-engine') {
 }
 
 import { buildAttribution } from '../attribution';
+import PQueue from 'p-queue';
 import { ApiException } from '../../common/api.exception';
 import {
   aggregateNav,
@@ -150,7 +151,15 @@ export class StrategyBacktestServiceImpl extends StrategyBacktestService {
     return coverage;
   }
 
+  /** 回测闸（并发治理 MU3）：回测是重操作（DB 大查询+逐日模拟），进程内并发 2——
+   *  多人同时回测排队执行，避免计算段互卡与连接池打满 */
+  private readonly backtestQueue = new PQueue({ concurrency: 2 });
+
   async runStrategyBacktest(input: StrategyBacktestInput, onProgress?: AgentProgressSink): Promise<StrategyBacktestOutput> {
+    return this.backtestQueue.add(() => this.runStrategyBacktestOnce(input, onProgress));
+  }
+
+  private async runStrategyBacktestOnce(input: StrategyBacktestInput, onProgress?: AgentProgressSink): Promise<StrategyBacktestOutput> {
     const p = assertStrategyInput(input);
     if (p.rebalanceIntervalDays === 0 && (p.weightFn || p.positionFn || p.pool)) {
       throw new ApiException(

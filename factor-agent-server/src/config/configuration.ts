@@ -24,7 +24,8 @@ export default () => ({
     user: process.env.MYSQL_USER ?? '',
     password: process.env.MYSQL_PASSWORD ?? '',
     database: process.env.MYSQL_DATABASE ?? 'herms_data',
-    connectionLimit: Number(process.env.MYSQL_CONNECTION_LIMIT ?? 5),
+    // 多人同时回测读大数据集（并发治理 v1.4：池 5→20）
+    connectionLimit: Number(process.env.MYSQL_CONNECTION_LIMIT ?? 20),
   },
   // 用户库（M13，可写）：与上面只读因子库分开配置
   userDb: {
@@ -33,7 +34,7 @@ export default () => ({
     user: process.env.USER_DB_USER ?? '',
     password: process.env.USER_DB_PASSWORD ?? '',
     database: process.env.USER_DB_DATABASE ?? 'alphasage_user',
-    connectionLimit: Number(process.env.USER_DB_CONNECTION_LIMIT ?? 5),
+    connectionLimit: Number(process.env.USER_DB_CONNECTION_LIMIT ?? 20),
   },
   // 登录鉴权 JWT（M13）：留空 secret 用内置开发密钥，团队联调建议 .env 统一配置
   userJwt: {

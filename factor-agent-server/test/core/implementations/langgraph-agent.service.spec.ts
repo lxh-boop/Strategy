@@ -16,6 +16,7 @@ import {
   splitChatTurns,
   stripTableCatalog,
   summarizeToolReceipt,
+  extractBestCardMarker,
 } from '../../../src/agent/implementations/langgraph-agent.service';
 import { FactorDataService } from '../../../src/core/factor-data.service';
 import { MemoryUserStoreService } from '../../../src/core/implementations/memory-user-store.service';
@@ -825,5 +826,61 @@ describe('限流耗尽挂起恢复（C1 断点续跑，runGraph 级）', () => {
     const second = await runner.runGraph(convOf('c-abandon'), '帮我查个数据');
     expect(second.text).toBe('新问题的回答');
     expect(pending().has('c-abandon')).toBe(false); // 断点弃置
+  });
+});
+
+/* ==========================================================
+   展示卡标记行（卡片错位修复）：【最优组: card_N】解析
+   - 括号字面量子串匹配（黏行/独立行都算），不猜散文；重复取最后一个；
+   - 命中后剥离标记子串；无标记/格式不符 → 原文返回、seq=null（回落卡片通道）。
+   ========================================================== */
+describe('extractBestCardMarker（展示卡标记行解析）', () => {
+  it('命中：提取编号并剥离标记行', () => {
+    const text = '本轮调优结果对比：\n\n最优组为 card_9。\n\n【最优组: card_9】';
+    const { text: out, seq, markerCount } = extractBestCardMarker(text);
+    expect(seq).toBe(9);
+    expect(markerCount).toBe(1);
+    expect(out).toBe('本轮调优结果对比：\n\n最优组为 card_9。');
+  });
+
+  it('无标记：原文原样返回', () => {
+    const text = '回测完成，年化 +4.1%。';
+    const { text: out, seq, markerCount } = extractBestCardMarker(text);
+    expect(seq).toBeNull();
+    expect(markerCount).toBe(0);
+    expect(out).toBe(text);
+  });
+
+  it('重复标记：取最后一个，全部剥离', () => {
+    const text = '对比见上。【最优组: card_4】\n【最优组: card_10】';
+    const { text: out, seq, markerCount } = extractBestCardMarker(text);
+    expect(seq).toBe(10);
+    expect(markerCount).toBe(2);
+    expect(out).toBe('对比见上。');
+  });
+
+  it('黏在行尾的标记同样命中（只剥离子串，保留前文）', () => {
+    const { text: out, seq, markerCount } = extractBestCardMarker('最优组为 card_9【最优组: card_9】');
+    expect(seq).toBe(9);
+    expect(markerCount).toBe(1);
+    expect(out).toBe('最优组为 card_9');
+  });
+
+  it('格式不符不命中：缺编号/无括号散文/旧标记/标签不同', () => {
+    for (const bad of [
+      '【最优组: card】', // 缺编号
+      '最优组为 card_9', // 无括号散文
+      '【展示卡片: card_9】', // 旧标记（已废除）
+      '【最佳组: card_9】', // 标签不同
+    ]) {
+      const { seq, markerCount } = extractBestCardMarker(bad);
+      expect(seq).toBeNull();
+      expect(markerCount).toBe(0);
+    }
+  });
+
+  it('全角冒号与首尾空格变体命中', () => {
+    const { seq } = extractBestCardMarker('结论如上。\n 【最优组：card_12】 ');
+    expect(seq).toBe(12);
   });
 });

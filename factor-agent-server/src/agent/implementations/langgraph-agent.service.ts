@@ -37,6 +37,7 @@ import {
 import { formatFnCall } from '../../core/weight-functions';
 import { UserStoreService } from '../../core/user-store.service';
 import { MemoryStoreService, ConversationSummary, MemoryEntry, MemoryQueue, memoryStamp, queueText, renderQueueLine } from '../../core/memory-store.service';
+import PQueue from 'p-queue';
 import { todayStr } from '../../common/time';
 import { assertAnalysisParams, FactorAnalysisService, FactorCorrelationInput, RankAnalysisInput } from '../../core/factor-analysis.service';
 import { describeTimingOverlay } from '../../core/timing';
@@ -247,10 +248,28 @@ export class LangGraphAgentService extends AgentService {
   private historyKeepTurns = 2;
 
   /** GLM 调用协调（C1 配置旋钮 zhipu.maxConcurrency/retryMax/backoffBaseMs，测试可改）：
-   *  在飞上限/限流重试次数/退避基数 */
+   *  glm 队列并发/限流重试次数/退避基数 */
   private llmMaxConcurrency = 2;
   private llmRetryMax = 10;
   private llmBackoffBaseMs = 1000;
+
+  /** 资源闸（并发治理）：按资源名维护 p-queue 队列——
+   *  glm=GLM 调用并发 2（团队 key 配额）、memory-file=memory.md 互斥、backtest=回测任务。
+   *  统一观测：各队列 size/pending 可查（并发治理方案 v1.4） */
+  private readonly queues = new Map<string, PQueue>();
+
+  private queue(resource: string, concurrency: number): PQueue {
+    let q = this.queues.get(resource);
+    if (!q) {
+      q = new PQueue({ concurrency });
+      this.queues.set(resource, q);
+    }
+    return q;
+  }
+
+  private withResource<T>(resource: string, concurrency: number, fn: () => Promise<T>): Promise<T> {
+    return this.queue(resource, concurrency).add(fn);
+  }
 
   /** 挂起恢复（C1 断点续跑）：限流耗尽的 thread 检查点保留，等用户下一问从断点完成。
    *  与 pendingConfirms 互斥——一轮只会挂一种；会话删除/清空时随 discardConversationState 清弃 */
@@ -661,10 +680,25 @@ export class LangGraphAgentService extends AgentService {
     }
     this.pendingConfirms.delete(conversationId);
     const last = state.messages[state.messages.length - 1] as AIMessage;
-    const text = extractText(last).trim();
-    if (!text) throw new LlmTextError('返回内容为空');
-    // 展示卡 = card 通道最后写入（本轮最新回测，或模型经 get_backtest_run 调取的历史卡）
-    return { text, card: state.card };
+    const rawText = extractText(last).trim();
+    if (!rawText) throw new LlmTextError('返回内容为空');
+    // 展示卡选取：回复末行【最优组: card_N】标记优先（确定性指认），
+    // 无标记/编号查无 → 回落卡片通道最后写入（本轮最新回测或 get_backtest_run 调取的历史卡）。
+    // 覆盖护栏：标记卡与卡片通道现状都必须是 backtest 卡，防止顶掉归因/分析卡。
+    const { text, seq, markerCount } = extractBestCardMarker(rawText);
+    if (markerCount > 1) this.logger.warn(`最优组标记重复 会话=${conversationId} 取最后一个: card_${seq}`);
+    let card = state.card;
+    if (seq !== null) {
+      const run = await this.userStore.getBacktestRunBySeq(conversationId, seq);
+      const runCard = run?.card as AgentCard | undefined;
+      if (runCard?.type === 'backtest' && (!card || card.type === 'backtest')) {
+        if (card !== runCard) this.logger.log(`展示卡按标记切换 会话=${conversationId} → card_${seq}`);
+        card = runCard;
+      } else {
+        this.logger.warn(`最优组标记无效 会话=${conversationId} card_${seq}（查无或卡型不符），回落卡片通道`);
+      }
+    }
+    return { text, card };
   }
 
   /** GLM 失败 → 回复仅含失败原因（与前端展示约定一致），并同步记入会话日志 */
@@ -1541,57 +1575,33 @@ export class LangGraphAgentService extends AgentService {
   /** 摘要折叠去重：同会话并发只跑一次（ensureFoldedSummary / foldQueueIfNeeded 使用） */
   private readonly summaryJobs = new Map<string, Promise<void>>();
 
-  /** 记忆文件互斥锁（C3/C4）：memory.md 的读改写（追加/折叠写回）串行化，
-   *  消除 read-modify-write await 缝隙的丢失更新；进程内有效（单进程部署形态） */
-  private memoryLock: Promise<unknown> = Promise.resolve();
-
+  /** 记忆文件互斥（C3/C4）：memory.md 的读改写（追加/折叠写回）串行化，
+   *  消除 read-modify-write await 缝隙的丢失更新；内部 = memory-file 队列（并发 1） */
   private withMemoryLock<T>(fn: () => Promise<T>): Promise<T> {
-    const run = this.memoryLock.then(fn, fn);
-    this.memoryLock = run.catch(() => undefined);
-    return run;
+    return this.withResource('memory-file', 1, fn);
   }
 
-  /* ----- GLM 调用协调器（C1）：进程内信号量 + 限流退避重试 -----
+  /* ----- GLM 调用协调器（C1）：glm 队列并发 2 + 限流退避重试 -----
    * 并发源：跨会话并行（inflightRuns 只拦同会话）、归因/折叠摘要与前台对话叠加、
    * 以及外部共享同一团队套餐 key 的流量（不可制约，只能自收）。
-   * 全部 GLM 调用点统一经 withLlmSlot：超并发排队等待；429 释放坑位退避后
+   * 全部 GLM 调用点统一经 withLlmSlot：超并发排队等待；429 退避后
    * 重新排队重试（重试期间不占并发名额，不给团队窗口加压）。 */
 
-  private llmActive = 0;
-  private readonly llmWaiters: Array<() => void> = [];
-
-  private async acquireLlmSlot(): Promise<void> {
-    if (this.llmActive < this.llmMaxConcurrency) {
-      this.llmActive++;
-      return;
-    }
-    await new Promise<void>((resolve) => this.llmWaiters.push(() => { this.llmActive++; resolve(); }));
-  }
-
-  private releaseLlmSlot(): void {
-    this.llmActive = Math.max(0, this.llmActive - 1);
-    const next = this.llmWaiters.shift();
-    if (next) next();
-  }
-
-  /** GLM 调用统一入口：信号量限并发 + 429 指数退避重试（重试释放坑位，退避后重新排队）。
+  /** GLM 调用统一入口：glm 队列限并发 + 429 指数退避重试（重试释放队列位，退避后重新排队）。
    *  onRetry：进度管道回调（agent 节点传 onProgress 推「重试中」事件；其余调用点不传只落日志） */
   private async withLlmSlot<T>(
     fn: () => Promise<T>,
     onRetry?: (attempt: number, delayMs: number) => void,
   ): Promise<T> {
     for (let attempt = 0; ; attempt++) {
-      await this.acquireLlmSlot();
       try {
-        return await fn();
+        return await this.withResource('glm', this.llmMaxConcurrency, fn);
       } catch (error) {
         if (attempt >= this.llmRetryMax || !isGlmRateLimitError(error)) throw error;
         const delayMs = Math.min(this.llmBackoffBaseMs * 2 ** attempt, 8000);
         this.logger.warn(`GLM 限流退避 ${delayMs}ms（第 ${attempt + 1}/${this.llmRetryMax} 次）`);
         onRetry?.(attempt + 1, delayMs);
         await new Promise((resolve) => setTimeout(resolve, delayMs));
-      } finally {
-        this.releaseLlmSlot();
       }
     }
   }
@@ -1711,7 +1721,8 @@ export class LangGraphAgentService extends AgentService {
         '给出优化建议后，结尾固定加一句：回复"授权调优"可按建议连续多组回测对比择优（前端会渲染授权按钮）；',
       '- 每次回测的回执带「卡片编号」（card_N = 本会话第 N 次回测，编号跨轮稳定、永不重置）：card_N 必须原样引用回执或 list_backtest_runs 查询结果，禁止按"第 N 组=card_N"自行推算；' +
         '用户要求回看/列出/调出某次历史回测时，先调 list_backtest_runs 查清单，再调 get_backtest_run（传卡片编号）把该次结果调出展示；' +
-        '本轮多组对比确定最优后，同样调 get_backtest_run 把最优组调出展示；',
+        '本轮多组对比确定最优后，同样调 get_backtest_run 把最优组调出展示，且最终回复末行固定写【最优组: card_N】指认最优组' +
+        '（编号原样取自回执、单独成行；系统按该标记决定展示哪张卡，未写则展示最后跑的一组）；不要声称卡片"已在上方展示"——展示由系统按标记决定；',
       '- 长期记忆维护（save_memory）：用户陈述值得跨会话记住的稳定偏好/研究结论、重新确认了已有记忆的内容、或明说"记住 XX"时，' +
         '用 op=add 追加一条（title 一句话标题、content 一到两句具体事实；同一主题重复确认也直接追加，不判重——追加即保鲜）；' +
         '偏好变化同样用 op=add 追加修正版（记忆按时间序注入，以最新为准）；用户说"忘掉 XX"时用 op=delete；' +
@@ -1738,6 +1749,24 @@ export class LangGraphAgentService extends AgentService {
 export function hasPendingInterrupt(state: unknown): boolean {
   const slot = (state as { __interrupt__?: unknown } | null | undefined)?.__interrupt__;
   return Array.isArray(slot) && slot.length > 0;
+}
+
+/* ----- 展示卡标记行纯函数（卡片错位修复，导出供测试）-----
+ * 多组对比回复以【最优组: card_N】确定性指认展示卡；卡片通道"最后写入者胜"
+ * 会让批量 get 或最后跑的一组占住展示位，与文字推荐错位（实测 card_9/card_10 与 card_4/card_8 两起）。
+ * 按括号字面量子串匹配（黏行/独立行都算，散文"最优组为 card_N"永不误命中）；
+ * 重复标记取最后一个；命中后从正文剥离子串（标记不落库不上屏）。 */
+
+const BEST_CARD_MARKER_RE = /【最优组[:：]\s*card_(\d+)】/g;
+
+export function extractBestCardMarker(text: string): { text: string; seq: number | null; markerCount: number } {
+  const seqs: number[] = [];
+  const stripped = text.replace(BEST_CARD_MARKER_RE, (_m, n: string) => {
+    seqs.push(Number(n));
+    return '';
+  });
+  if (!seqs.length) return { text, seq: null, markerCount: 0 };
+  return { text: stripped.trim(), seq: seqs[seqs.length - 1], markerCount: seqs.length };
 }
 
 /** 限流错误判定：智谱 429（SDK/包装层消息形态多变，按信号识别而非错误类型） */

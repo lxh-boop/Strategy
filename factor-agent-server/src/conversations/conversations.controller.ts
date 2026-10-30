@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Param, Post, Res } from '@nestjs/common';
+import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Logger, Param, Post, Res } from '@nestjs/common';
 import { Response } from 'express';
 import { ChatMessage, Conversation } from '../types';
 import { UserId } from '../common/current-user.decorator';
@@ -9,6 +9,8 @@ import { SendMessageDto } from './dto';
 /** API-02 ~ API-07（M13 起需 Bearer，数据按 token 用户隔离） */
 @Controller('api/conversations')
 export class ConversationsController {
+  private readonly logger = new Logger(ConversationsController.name);
+
   constructor(private readonly conversations: ConversationsService) {}
 
   @Get()
@@ -68,8 +70,20 @@ export class ConversationsController {
     res.setHeader('Connection', 'keep-alive');
     res.setHeader('X-Accel-Buffering', 'no'); // 关闭反向代理缓冲，事件即时到达
     res.flushHeaders();
+    // 提前断连检测（排查"界面没反应、刷新才出现"类事故）：write 在死 socket 上静默成功，
+    // 只有连接 close 事件能暴露"客户端早已不在、事件全丢"的流
+    const streamStart = Date.now();
+    let lastEvent = 'open';
+    res.on('close', () => {
+      if (lastEvent !== 'final' && lastEvent !== 'error') {
+        this.logger.warn(
+          `流式连接提前断开 会话=${id} 最后事件=${lastEvent} 历时=${Date.now() - streamStart}ms`,
+        );
+      }
+    });
     const write = (event: unknown): void => {
       try {
+        lastEvent = (event as { type?: string }).type ?? 'unknown';
         res.write(`data: ${JSON.stringify(event)}\n\n`);
       } catch {
         /* 客户端已断开：静默丢弃后续事件 */
