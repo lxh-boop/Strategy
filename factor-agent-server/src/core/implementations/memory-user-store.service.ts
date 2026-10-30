@@ -96,6 +96,29 @@ export class MemoryUserStoreService extends UserStoreService {
     return this.strategies.delete(this.key(userId, id));
   }
 
+  /* ----- 因子使用统计（ADR-0013 并发治理批次：与 MySQL 实现同语义，内存 Map） ----- */
+
+  private readonly factorUsage = new Map<string, { count: number; lastUsedAt: string }>();
+
+  async incrementFactorUsage(userId: number, refs: Array<{ table: string; field: string }>): Promise<void> {
+    const now = new Date();
+    const stamp = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+    for (const r of refs) {
+      const key = this.key(userId, `${r.table}.${r.field}`);
+      const cur = this.factorUsage.get(key) ?? { count: 0, lastUsedAt: stamp };
+      this.factorUsage.set(key, { count: cur.count + 1, lastUsedAt: stamp });
+    }
+  }
+
+  async listFactorUsage(userId: number, limit = 50): Promise<Array<{ factorKey: string; count: number; lastUsedAt: string }>> {
+    const prefix = `${userId}|`;
+    return [...this.factorUsage.entries()]
+      .filter(([k]) => k.startsWith(prefix))
+      .map(([k, v]) => ({ factorKey: k.slice(prefix.length), count: v.count, lastUsedAt: v.lastUsedAt }))
+      .sort((x, y) => y.count - x.count || (x.lastUsedAt < y.lastUsedAt ? 1 : x.lastUsedAt > y.lastUsedAt ? -1 : 0))
+      .slice(0, limit);
+  }
+
   /* ----- 会话 ----- */
   async listConversations(userId: number): Promise<Conversation[]> {
     return [...this.conversations.entries()]

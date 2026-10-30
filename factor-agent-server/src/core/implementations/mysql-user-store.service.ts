@@ -191,6 +191,52 @@ export class MysqlUserStoreService extends UserStoreService {
     return result.affectedRows > 0;
   }
 
+  /* ----- 因子使用统计（用户保存策略时后台计数） ----- */
+
+  private factorUsageEnsured = false;
+
+  /** 懒建表：零迁移工具形态下，首次访问自动建（已存在则跳过） */
+  private async ensureFactorUsageTable(): Promise<void> {
+    if (this.factorUsageEnsured) return;
+    await this.exec(
+      `CREATE TABLE IF NOT EXISTS factor_usage (
+        user_id BIGINT NOT NULL,
+        factor_key VARCHAR(160) NOT NULL,
+        count INT NOT NULL DEFAULT 0,
+        last_used_at DATETIME NOT NULL,
+        PRIMARY KEY (user_id, factor_key)
+      )`,
+      [],
+      '创建因子使用统计表失败',
+    );
+    this.factorUsageEnsured = true;
+  }
+
+  async incrementFactorUsage(userId: number, refs: Array<{ table: string; field: string }>): Promise<void> {
+    await this.ensureFactorUsageTable();
+    // 同一次保存内的重复因子去重（排序+过滤+卖出同用某因子只计一次）
+    const keys = [...new Set(refs.map((r) => `${r.table}.${r.field}`))];
+    for (const key of keys) {
+      await this.exec(
+        `INSERT INTO factor_usage (user_id, factor_key, count, last_used_at)
+         VALUES (?, ?, 1, NOW())
+         ON DUPLICATE KEY UPDATE count = count + 1, last_used_at = NOW()`,
+        [userId, key],
+        '因子使用计数失败',
+      );
+    }
+  }
+
+  async listFactorUsage(userId: number, limit = 50): Promise<Array<{ factorKey: string; count: number; lastUsedAt: string }>> {
+    await this.ensureFactorUsageTable();
+    const rows = await this.selectRows<{ factor_key: string; count: number; last_used_at: string }>(
+      'SELECT factor_key, count, DATE_FORMAT(last_used_at, "%Y-%m-%d %H:%i") AS last_used_at FROM factor_usage WHERE user_id = ? ORDER BY count DESC, last_used_at DESC LIMIT ?',
+      [userId, limit],
+      '查询因子使用统计失败',
+    );
+    return rows.map((r) => ({ factorKey: r.factor_key, count: Number(r.count), lastUsedAt: String(r.last_used_at) }));
+  }
+
   /* ----- 归因分析档案（ADR-0010 配套）：一天一份，同日覆盖、跨日追加，删策略级联 ----- */
 
   async saveStrategyAttribution(userId: number, strategyId: string, attribution: StrategyAttributionDay): Promise<void> {

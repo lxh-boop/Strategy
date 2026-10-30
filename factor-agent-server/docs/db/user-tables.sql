@@ -104,3 +104,13 @@ CREATE TABLE IF NOT EXISTS pool_refs (
   created_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   KEY idx_pool_conv (conversation_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='股票池筛选句柄';
+
+
+-- 因子使用统计（用户保存策略时后台计数：常用因子画像，频次=使用强度）
+CREATE TABLE IF NOT EXISTS factor_usage (
+  user_id       BIGINT       NOT NULL COMMENT '用户',
+  factor_key    VARCHAR(160) NOT NULL COMMENT '因子键 table.field',
+  count         INT UNSIGNED NOT NULL DEFAULT 0 COMMENT '累计使用次数（每次保存策略 +1）',
+  last_used_at  DATETIME     NOT NULL COMMENT '最近使用时间',
+  PRIMARY KEY (user_id, factor_key)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='因子使用统计';

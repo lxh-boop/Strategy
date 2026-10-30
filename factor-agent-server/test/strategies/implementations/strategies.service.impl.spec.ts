@@ -62,6 +62,7 @@ describe('B-INT-02 StrategiesServiceImpl（策略业务，收口对话真引擎�
     listStrategies: jest.fn(),
     getStrategy: jest.fn(),
     saveStrategy: jest.fn(),
+    incrementFactorUsage: jest.fn().mockResolvedValue(undefined),
     deleteStrategy: jest.fn(),
   };
   const strategyBt = { runStrategyBacktest: jest.fn(), checkRange: jest.fn(), preflight: jest.fn() };

@@ -1,13 +1,15 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { ApiException } from '../../common/api.exception';
 import { normalizeWeights } from '../../core/metrics';
 import {
   BENCHMARKS,
   BenchmarkKey,
   ClarificationSignal,
+  assertStrategyInput,
   legacyConfigToInput,
   StrategyBacktestInput,
   StrategyBacktestService,
+  collectFactorRefs,
 } from '../../core/strategy-backtest.service';
 import { todayStr } from '../../common/time';
 import { UserStoreService } from '../../core/user-store.service';
@@ -73,6 +75,7 @@ function factorWeights(config: BacktestRunConfig | StrategyRunConfig): FactorWei
 
 @Injectable()
 export class StrategiesServiceImpl extends StrategiesService {
+  private readonly logger = new Logger(StrategiesService.name);
   constructor(
     private readonly users: UserStoreService,
     private readonly strategyBacktest: StrategyBacktestService,
@@ -129,6 +132,10 @@ export class StrategiesServiceImpl extends StrategiesService {
       backtestConfig: config,
     };
     await this.users.saveStrategy(userId, strategy);
+    // 因子使用统计（后台计数，失败不挡保存）：常用因子画像的频次来源
+    void this.users.incrementFactorUsage(userId, collectFactorRefs(assertStrategyInput(input))).catch((e) =>
+      this.logger.warn(`因子使用统计失败 用户=${userId}: ${String(e)}`),
+    );
     return strategy;
   }
 
@@ -190,6 +197,10 @@ export class StrategiesServiceImpl extends StrategiesService {
     if (strategy.status === 'draft') strategy.status = 'done';
     strategy.updatedAt = todayStr();
     await this.users.saveStrategy(userId, strategy);
+    // 重跑保存同样是"还在用这些因子"的信号：后台计数（失败不挡）
+    void this.users.incrementFactorUsage(userId, collectFactorRefs(assertStrategyInput(toStrategyInput(strategy.backtestConfig)))).catch((e) =>
+      this.logger.warn(`因子使用统计失败 用户=${userId}: ${String(e)}`),
+    );
     return strategy;
   }
 

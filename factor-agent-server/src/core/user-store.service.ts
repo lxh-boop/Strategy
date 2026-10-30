@@ -55,9 +55,14 @@ export abstract class UserStoreService {
   abstract saveStrategy(userId: number, strategy: Strategy): Promise<void>;
   /** 归因分析档案保存（ADR-0010 配套）：同日覆盖、跨日追加的语义由调用方保证 */
   abstract saveStrategyAttribution(userId: number, strategyId: string, attribution: StrategyAttributionDay): Promise<void>;
-  /** 归因分析档案保存（ADR-0010 配套）：同日覆盖、跨日追加的语义由调用方保证 */
-  abstract saveStrategyAttribution(userId: number, strategyId: string, attribution: StrategyAttributionDay): Promise<void>;
   abstract deleteStrategy(userId: number, id: string): Promise<boolean>;
+
+  /* ----- 因子使用统计（用户保存策略时后台计数，常用于因子画像：频次=使用强度） ----- */
+
+  /** 按因子键 upsert 计数 +1（同一次保存内的重复因子先由调用方去重） */
+  abstract incrementFactorUsage(userId: number, refs: Array<{ table: string; field: string }>): Promise<void>;
+  /** 常用因子清单（按计数降序，limit 缺省 50） */
+  abstract listFactorUsage(userId: number, limit?: number): Promise<Array<{ factorKey: string; count: number; lastUsedAt: string }>>;
 
   /* ----- 会话（按用户隔离，方法集镜像 SVC-D05~D11） ----- */
   abstract listConversations(userId: number): Promise<Conversation[]>;
