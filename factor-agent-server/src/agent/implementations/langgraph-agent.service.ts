@@ -50,7 +50,7 @@ import {
   loadTableFields,
 } from '../../core/factor-schema';
 import { AgentService } from '../agent.service';
-import { AGENT_TOOL_SPECS, FactorProfileArgs, ListFactorFieldsArgs, ReadFactorDataArgs, SaveMemoryArgs } from './tool-specs';
+import { AGENT_TOOL_SPECS, ListFactorFieldsArgs, ReadFactorDataArgs, SaveMemoryArgs } from './tool-specs';
 
 /** 工具 → 进度事件里的阶段名（前端可直接展示的中文） */
 const TOOL_STAGE: Record<string, string> = {
@@ -61,7 +61,6 @@ const TOOL_STAGE: Record<string, string> = {
   run_rank_analysis: '排名分析计算',
   run_factor_correlation: '因子相关性计算',
   run_daily_screen: '每日选股查询',
-  factor_profile: '因子画像统计',
   screen_stock_pool: '股票池筛选',
   list_backtest_runs: '查询回测存档',
   get_backtest_run: '调取历史回测',
@@ -729,7 +728,6 @@ export class LangGraphAgentService extends AgentService {
     read_factor_data: async (args) => ({ result: await this.execReadData(args as ReadFactorDataArgs) }),
     run_strategy_backtest: async (args, ctx) => this.execRunBacktest(args as StrategyBacktestInput, ctx),
     run_rank_analysis: async (args) => this.execRunRankAnalysis(args as Record<string, unknown>),
-    factor_profile: async (args) => this.execFactorProfile(args as FactorProfileArgs),
     run_factor_correlation: async (args) => this.execRunFactorCorrelation(args as Record<string, unknown>),
     list_backtest_runs: async (_args, ctx) => this.execListBacktestRuns(ctx.conversationId),
     get_backtest_run: async (args, ctx) => this.execGetBacktestRun(String((args as { card?: string }).card ?? ''), ctx.conversationId),
@@ -1394,36 +1392,6 @@ export class LangGraphAgentService extends AgentService {
         解读指引: '请基于以上聚合数字写归因解读（哪类决策在重复亏钱/赚钱的来源），只准引用本回执数字',
       },
       card,
-    };
-  }
-
-  /** 因子画像：单因子截面基础统计（覆盖 + 分布分位 + 分档均值），只读零副作用、免确认 */
-  private async execFactorProfile(args: FactorProfileArgs): Promise<ToolOutcome> {
-    const table = String(args.table ?? '').trim();
-    const field = String(args.field ?? '').trim();
-    if (!table || !field) {
-      return { result: { error: '参数不完整：需要 table（表名，来自表目录）与 field（字段名，来自 list_factor_fields）' } };
-    }
-    const date = args.date != null ? String(args.date).trim() : undefined;
-    const securityIds = Array.isArray(args.securityIds) ? args.securityIds.map(String) : undefined;
-    const r = await this.factorAnalysis.describeFactor({
-      table,
-      field,
-      ...(date ? { date } : {}),
-      ...(securityIds ? { securityIds } : {}),
-    });
-    return {
-      result: {
-        ok: true,
-        表: r.table,
-        因子: r.field,
-        截面日: r.date,
-        数据区间: `${r.dataRange.min}~${r.dataRange.max}`,
-        覆盖股票数: r.stockCount,
-        分布: r.stats,
-        分档均值: r.buckets.map((b) => `${b.range}（${b.count} 只）均值 ${b.mean}`),
-        提示: '截面即查即得；如需评估该因子的选股有效性，可继续调 run_rank_analysis',
-      },
     };
   }
 
