@@ -1085,6 +1085,13 @@ export class LangGraphAgentService extends AgentService {
       }
       throw error;
     }
+    // 因子使用统计（对话中执行的每次回测都计数；fire-and-forget 失败不挡回执）：
+    // 频次 = 使用强度——常跑的因子计数持续上涨，在常用因子榜保鲜。策略页重跑/归因重放不经此处，不计数
+    if (typeof ctx.userId === 'number') {
+      void this.userStore
+        .incrementFactorUsage(ctx.userId, collectAllRefs(p))
+        .catch((e) => this.logger.warn(`因子使用统计失败 会话=${ctx.conversationId}: ${String(e)}`));
+    }
     return {
       result: {
         ...output.summary,
