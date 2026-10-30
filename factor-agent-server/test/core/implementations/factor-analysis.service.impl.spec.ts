@@ -2,7 +2,9 @@ import {
   FactorAnalysisServiceImpl,
 } from '../../../src/core/implementations/factor-analysis.service.impl';
 import {
+  bucketMeansOf,
   monotonicityR2,
+  quantileAt,
   segmentCrossSection,
   spearmanOnCrossSection,
 } from '../../../src/core/factor-analysis.service';
@@ -192,5 +194,88 @@ describe('FactorAnalysisServiceImpl（相关性矩阵，全流程 stub）', () =
         startDate: '20240101', endDate: '20240131',
       }),
     ).rejects.toThrow(/因子重复/);
+  });
+});
+
+
+/* ==========================================================
+   因子画像（describeFactor，简单统计）：覆盖 + 分布分位 + 分档均值
+   ========================================================== */
+
+describe('因子画像纯函数（quantileAt / bucketMeansOf）', () => {
+  it('quantileAt：最近秩位取值（1..10 的 P50 = 第 5 个）', () => {
+    const sorted = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+    expect(quantileAt(sorted, 0)).toBe(1);
+    expect(quantileAt(sorted, 0.5)).toBe(5);
+    expect(quantileAt(sorted, 1)).toBe(10);
+    expect(quantileAt([7], 0.9)).toBe(7);
+  });
+
+  it('bucketMeansOf：排序等分 5 档（1..10 → 每档 2 只，均值 1.5/3.5/5.5/7.5/9.5）', () => {
+    const buckets = bucketMeansOf([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], 5);
+    expect(buckets.map((b) => b.mean)).toEqual([1.5, 3.5, 5.5, 7.5, 9.5]);
+    expect(buckets.every((b) => b.count === 2)).toBe(true);
+    expect(buckets[0].range).toBe('1 ~ 2');
+  });
+
+  it('bucketMeansOf：余数摊给前面的档；空档不计', () => {
+    const buckets = bucketMeansOf([1, 2, 3, 4], 5);
+    expect(buckets.map((b) => b.count)).toEqual([1, 1, 1, 1]);
+    expect(bucketMeansOf([], 5)).toEqual([]);
+  });
+});
+
+describe('describeFactor（因子画像，全流程 stub）', () => {
+  /** 截面数据：20240102~20240105 每日 10 只股票，值 1..10 */
+  function profileService(): FactorAnalysisServiceImpl {
+    const sections: Record<number, Record<string, number>> = {};
+    for (const day of [20240102, 20240103, 20240104, 20240105]) {
+      const sec: Record<string, number> = {};
+      for (let i = 1; i <= 10; i++) sec[`0000${i}.XSHE`.slice(-11)] = i;
+      sections[day] = sec;
+    }
+    const factorData = {
+      readTradeDates: async () => ({ min: 20240102, max: 20240105, dates: [20240102, 20240103, 20240104, 20240105] }),
+      readFactorSection: async (_t: string, _f: string, date: string, codes: string[] | null) => {
+        const key = Number(date.replaceAll('-', ''));
+        const sec = sections[key] ?? {};
+        return Object.entries(sec)
+          .filter(([code]) => !codes || codes.includes(code))
+          .map(([securityId, value]) => ({ securityId, value }));
+      },
+    } as unknown as FactorDataService;
+    return new FactorAnalysisServiceImpl(factorData);
+  }
+
+  it('覆盖 + 分布分位：10 只 1..10 的截面 → stockCount=10、中位=5、均值=5.5', async () => {
+    const service = profileService();
+    const out = await service.describeFactor({ table: 'equ_factor_obos', field: 'REVS20' });
+    expect(out.date).toBe(20240105); // 缺省回落到最近交易日
+    expect(out.stockCount).toBe(10);
+    expect(out.dataRange).toEqual({ min: 20240102, max: 20240105 });
+    expect(out.stats.min).toBe(1);
+    expect(out.stats.median).toBe(5);
+    expect(out.stats.max).toBe(10);
+    expect(out.stats.mean).toBe(5.5);
+    expect(out.buckets).toHaveLength(5);
+    expect(out.buckets[0]).toMatchObject({ count: 2, mean: 1.5 });
+  });
+
+  it('指定日期与非交易日回落：请求 20240106 → 实际截面 20240105', async () => {
+    const service = profileService();
+    const out = await service.describeFactor({ table: 't', field: 'f', date: '20240106' });
+    expect(out.date).toBe(20240105);
+  });
+
+  it('截面日早于数据起点 → 400', async () => {
+    const service = profileService();
+    await expect(service.describeFactor({ table: 't', field: 'f', date: '20200101' })).rejects.toThrow('早于数据范围');
+  });
+
+  it('空截面 → 400 指路调整', async () => {
+    const service = profileService();
+    await expect(
+      service.describeFactor({ table: 'equ_factor_obos', field: 'REVS20', securityIds: ['999999.XSHE'] }),
+    ).rejects.toThrow('因子截面为空');
   });
 });

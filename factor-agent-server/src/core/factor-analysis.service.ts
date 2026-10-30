@@ -157,6 +157,41 @@ export function segmentCrossSection(values: Map<string, number>, direction: 1 | 
 
 /* ----- 契约 ----- */
 
+/** 因子画像入参：单因子截面统计（date 缺省 = 表内最近交易日，非交易日自动回落） */
+export interface FactorProfileInput {
+  table: string;
+  field: string;
+  /** 纯数字 YYYYMMDD；缺省 = 最近交易日 */
+  date?: string;
+  /** 股票池（null/缺省 = 截面有值的全部股票） */
+  securityIds?: string[] | null;
+}
+
+export interface FactorProfileOutput {
+  table: string;
+  field: string;
+  /** 实际统计截面日（纯数字 YYYYMMDD，缺省回落后的交易日） */
+  date: number;
+  /** 因子表可用区间（覆盖度） */
+  dataRange: { min: number; max: number };
+  /** 截面有值股票数 */
+  stockCount: number;
+  /** 分布统计（有值样本；分位为最近秩位取值） */
+  stats: {
+    min: number;
+    p10: number;
+    p25: number;
+    median: number;
+    p75: number;
+    p90: number;
+    max: number;
+    mean: number;
+    std: number;
+  };
+  /** 分档均值：按排序等分 5 档的各档均值与成员数（低 → 高，档 1 = 值最小档） */
+  buckets: { range: string; mean: number; count: number }[];
+}
+
 @Injectable()
 export abstract class FactorAnalysisService {
   /** 排名分析：单因子分段有效性评估（IC/单调性/分段收益/多空价差） */
@@ -164,6 +199,37 @@ export abstract class FactorAnalysisService {
 
   /** 因子相关性：一批因子两两截面秩相关矩阵（逐采样期计算后取均值） */
   abstract runFactorCorrelation(input: FactorCorrelationInput): Promise<FactorCorrelationOutput>;
+
+  /** 因子画像：单因子截面基础统计（覆盖 + 分布分位 + 分档均值），只读免确认 */
+  abstract describeFactor(input: FactorProfileInput): Promise<FactorProfileOutput>;
+}
+
+/** 分位取值：最近秩位（ceil(p×n)−1），n≥1 */
+export function quantileAt(sorted: number[], p: number): number {
+  if (!sorted.length) return NaN;
+  const idx = Math.min(sorted.length - 1, Math.max(0, Math.ceil(p * sorted.length) - 1));
+  return sorted[idx];
+}
+
+/** 排序等分 N 档的各档均值（余数摊给前面的档）；空档不计 */
+export function bucketMeansOf(sorted: number[], buckets: number): { range: string; mean: number; count: number }[] {
+  const out: { range: string; mean: number; count: number }[] = [];
+  const base = Math.floor(sorted.length / buckets);
+  const rem = sorted.length % buckets;
+  let cursor = 0;
+  for (let k = 0; k < buckets; k++) {
+    const take = base + (k < rem ? 1 : 0);
+    if (take <= 0) continue;
+    const seg = sorted.slice(cursor, cursor + take);
+    cursor += take;
+    const mean = seg.reduce((s, x) => s + x, 0) / seg.length;
+    out.push({
+      range: seg.length > 1 ? `${seg[0]} ~ ${seg[seg.length - 1]}` : `${seg[0]}`,
+      mean: +mean.toFixed(4),
+      count: seg.length,
+    });
+  }
+  return out;
 }
 
 /** 护栏：分段数与采样间隔（与引擎护栏同风格，中文文案面向模型） */

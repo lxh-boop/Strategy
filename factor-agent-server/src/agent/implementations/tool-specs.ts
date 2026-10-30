@@ -534,6 +534,30 @@ const RUN_ATTRIBUTION_ANALYSIS_SPEC = {
   },
 } as const;
 
+/** 因子画像：单因子截面基础统计（覆盖 + 分布分位 + 分档均值），只读免确认 */
+const FACTOR_PROFILE_SPEC = {
+  type: 'function' as const,
+  function: {
+    name: 'factor_profile',
+    description:
+      '因子画像：单因子截面的基础统计——覆盖股票数、min/分位/中位/max/均值/标准差、五档分档均值；用户问"这个因子分布怎么样/做个画像/值都在什么区间"时用',
+    parameters: {
+      type: 'object',
+      properties: {
+        table: { type: 'string', description: '数据表名，来自系统提示中的表目录' },
+        field: { type: 'string', description: '字段名，来自 list_factor_fields 的返回' },
+        date: { type: 'string', description: '截面日，纯数字 YYYYMMDD；缺省 = 最近交易日（非交易日自动回落前一交易日，回执注明实际截面日）' },
+        securityIds: {
+          type: 'array',
+          items: { type: 'string' },
+          description: '股票池（000002.XSHE 形态）；缺省 = 全市场截面',
+        },
+      },
+      required: ['table', 'field'],
+    },
+  },
+} as const;
+
 /** 会话回测存档清单：编号/日期/标题索引（ADR-0010 F7）——模型据此跨轮回看，
  *  目标确认后用 get_backtest_run 调出展示；只给索引级摘要，完整卡片绕过 LLM（只信卡片） */
 const LIST_BACKTEST_RUNS_SPEC = {
@@ -565,6 +589,7 @@ export const AGENT_TOOL_SPECS = [
   LIST_FACTOR_TABLES_SPEC,
   LIST_FACTOR_FIELDS_SPEC,
   READ_FACTOR_DATA_SPEC,
+  FACTOR_PROFILE_SPEC,
   RUN_STRATEGY_BACKTEST_SPEC,
   RUN_RANK_ANALYSIS_SPEC,
   RUN_FACTOR_CORRELATION_SPEC,
@@ -591,6 +616,13 @@ export interface ReadFactorDataArgs {
   distinct?: unknown;
   /** 去重读收窄：包含匹配 */
   keyword?: unknown;
+}
+
+export interface FactorProfileArgs {
+  table?: unknown;
+  field?: unknown;
+  date?: unknown;
+  securityIds?: unknown;
 }
 
 export interface SaveMemoryArgs {

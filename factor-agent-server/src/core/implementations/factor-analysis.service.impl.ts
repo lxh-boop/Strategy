@@ -3,10 +3,14 @@ import { ApiException } from '../../common/api.exception';
 import { FactorDataService } from '../factor-data.service';
 import {
   assertAnalysisParams,
+  bucketMeansOf,
   FactorAnalysisService,
   FactorCorrelationInput,
   FactorCorrelationOutput,
+  FactorProfileInput,
+  FactorProfileOutput,
   monotonicityR2,
+  quantileAt,
   RankAnalysisInput,
   RankAnalysisOutput,
   segmentCrossSection,
@@ -242,5 +246,66 @@ export class FactorAnalysisServiceImpl extends FactorAnalysisService {
       }),
     );
     return { factors, matrix, periodCount: periodValues.length };
+  }
+
+  /** 因子画像：单因子截面基础统计（覆盖 + 分布分位 + 分档均值），只读零副作用 */
+  async describeFactor(input: FactorProfileInput): Promise<FactorProfileOutput> {
+    // ① 日历（因子表作日历源）：缺省/非交易日自动回落到 ≤ date 的最近交易日
+    const coverage = await this.factorData.readTradeDates(input.table, '19000101', '20991231');
+    if (!coverage.dates.length) {
+      throw new ApiException('INVALID_ARGUMENT', 400, `因子表 ${input.table} 无任何交易日数据`);
+    }
+    let date = Number(input.date ?? coverage.dates.at(-1));
+    if (date < coverage.min) {
+      throw new ApiException('INVALID_ARGUMENT', 400, `截面日早于数据范围：${input.table} 数据起点 ${coverage.min}`);
+    }
+    // 超出 max 的日期（未来/节假日）回落到 ≤ date 的最近交易日（与 run_daily_screen 同口径）
+    if (!coverage.dates.includes(date)) {
+      const fallback = coverage.dates.filter((d) => d <= date).at(-1);
+      if (fallback === undefined) {
+        throw new ApiException('INVALID_ARGUMENT', 400, `截面日 ${date} 早于 ${input.table} 数据起点 ${coverage.min}`);
+      }
+      date = fallback; // 非交易日回落前一交易日（与 run_daily_screen 同口径）
+    }
+
+    // ② 截面读数 → 分布统计（只留有限数值）
+    const section = await this.factorData.readFactorSection(
+      input.table,
+      input.field,
+      String(date),
+      input.securityIds ?? null,
+    );
+    const values = section
+      .map((r) => r.value)
+      .filter((v) => Number.isFinite(v))
+      .sort((a, b) => a - b);
+    if (!values.length) {
+      throw new ApiException('INVALID_ARGUMENT', 400, `因子截面为空（${input.table}.${input.field} 在 ${date} 无任何股票有值），请调整因子/股票池/日期`);
+    }
+
+    const n = values.length;
+    const mean = values.reduce((s, x) => s + x, 0) / n;
+    const std = Math.sqrt(values.reduce((s, x) => s + (x - mean) ** 2, 0) / n);
+    const quant = (p: number) => quantileAt(values, p);
+
+    return {
+      table: input.table,
+      field: input.field,
+      date,
+      dataRange: { min: coverage.min, max: coverage.max },
+      stockCount: n,
+      stats: {
+        min: values[0],
+        p10: quant(0.1),
+        p25: quant(0.25),
+        median: quant(0.5),
+        p75: quant(0.75),
+        p90: quant(0.9),
+        max: values[n - 1],
+        mean: +mean.toFixed(4),
+        std: +std.toFixed(4),
+      },
+      buckets: bucketMeansOf(values, 5),
+    };
   }
 }
