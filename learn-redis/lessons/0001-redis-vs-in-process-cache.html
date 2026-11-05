@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>0001 · Redis 与你进程里那块缓存</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<main>
+
+<div class="kicker">Lesson 0001 · Redis</div>
+<h1>Redis 与你进程里那块缓存</h1>
+<div class="lesson-meta">
+  预计 20 分钟 · 动手环境：<a href="https://redis.io/try/sandbox">官方沙盒</a>（零安装） ·
+  绑定 mission：多实例演进时亲手接入 Redis ·
+  <a href="../reference/redis-string-cache-cheatsheet.html">配套速查表</a>
+</div>
+
+<h2>1 · 从你的代码讲起</h2>
+
+<p>你在 <code>mysql-factor-data.service.ts</code> 里手写了一个进程内缓存——历史上行情落库后不变，重复回测没必要反复打库：</p>
+
+<pre class="plain"><code>// factor-agent-server/src/core/implementations/mysql-factor-data.service.ts（简化）
+private readonly cache   = new Map&lt;string, FactorCacheEntry&gt;();    // LRU：命中删了重插，超容从队首删
+private readonly inflight = new Map&lt;string, Promise&lt;unknown[]&gt;&gt;(); // 同 key 并发查询去重
+
+private async query(sql, params) {
+  const key = sql + '§' + JSON.stringify(params);
+  const hit = this.cache.get(key);
+  if (hit &amp;&amp; Date.now() - hit.at &lt; 10 * 60_000) return hit.rows;   // TTL 10 分钟
+  // …未命中 → 打库 → 回插缓存
+}</code></pre>
+
+<p>三层机制你都很熟：<strong>TTL</strong>（10 分钟兜底数据商修正）、<strong>LRU</strong>（200 条防内存膨胀）、<strong>inflight 去重</strong>（并发同查询搭车）。单实例下它工作得很好。</p>
+
+<p>现在只问一个问题——<strong>如果明天起有两个实例跑这套代码</strong>（《并发治理方案》第八节的 100 人演进路径），这个 Map 会怎样？</p>
+
+<div class="twin">
+  <div>
+    <h4>单实例（今天）</h4>
+    所有请求共享同一块 Map：命中率稳定，同 key 并发必然搭车，重启丢缓存但很快热身回来。
+  </div>
+  <div>
+    <h4>两个实例（明天）</h4>
+    各自一块 Map：<strong>互不知晓</strong>。同一查询打两遍库；LRU 容量与热身成本 ×2；每次部署两块缓存同时清零。命中率不升反降。
+  </div>
+</div>
+
+<p>进程内缓存的三个天然边界，全都来自同一个事实——<strong>它活在你的进程里</strong>：随进程生、随进程死、只有你的进程看得见。</p>
+
+<h2>2 · Redis 一句话定位</h2>
+
+<div class="callout">
+  <span class="label">本课核心心智模型</span>
+  Redis = 把你进程里那个 <code>Map</code> 搬进一个<strong>独立进程</strong>，让所有实例通过网络连上去共享同一块键空间。
+</div>
+
+<p>四个事实支撑这个模型，每个都和进程内 Map 形成精确对照：</p>
+
+<table>
+  <tr><th>维度</th><th>你的 Map</th><th>Redis</th></tr>
+  <tr><td>生命周期</td><td>随进程重启全丢</td><td>独立进程；可选持久化，重启服务不丢缓存</td></tr>
+  <tr><td>可见范围</td><td>仅本进程</td><td>所有实例连同一块键空间</td></tr>
+  <tr><td>值类型</td><td>任意对象引用</td><td><strong>有类型的</strong>：string / list / hash / set / zset…（本课只用 string）</td></tr>
+  <tr><td>并发模型</td><td>你自己加闸（inflight）</td><td>单线程事件循环，<strong>每条命令天然原子</strong></td></tr>
+</table>
+
+<p>「单线程」值得停一下：Redis 处理命令是<strong>逐条串行</strong>的，所以一条命令执行期间不会被别的命令插入。你在代码里用 <code>inflight</code> Map 手工解决的「check-then-set 竞态」，在 Redis 里往往一条原子命令就消失了。</p>
+
+<h2>3 · 本课命令面：7 条</h2>
+
+<p>所有类型里 string 是最常用的缓存形态（值可以是任意字节串，比如一段 JSON）。本课 7 条命令全部 O(1)：</p>
+
+<table>
+  <tr><th>命令</th><th>作用</th><th>对照你的代码</th></tr>
+  <tr><td><code>SET k v</code></td><td>写键</td><td><code>this.cache.set(key, …)</code></td></tr>
+  <tr><td><code>SET k v EX 600</code></td><td>写键 + TTL，<strong>原子</strong>一步完成</td><td>set + <code>hit.at</code> 时间戳两步合一</td></tr>
+  <tr><td><code>GET k</code></td><td>读键（无则返回 <code>nil</code>）</td><td><code>this.cache.get(key)</code></td></tr>
+  <tr><td><code>DEL k</code></td><td>删键</td><td><code>this.cache.delete(key)</code></td></tr>
+  <tr><td><code>EXISTS k</code></td><td>键是否存在（0/1）</td><td><code>this.cache.has(key)</code></td></tr>
+  <tr><td><code>EXPIRE k 600</code></td><td>给已有键设 TTL</td><td>—（你的 TTL 只能写入时定死）</td></tr>
+  <tr><td><code>TTL k</code></td><td>看剩余秒数（-1 无 TTL / -2 键不存在）</td><td><code>hit.at</code> 的手工比对</td></tr>
+</table>
+
+<div class="callout warn">
+  <span class="label">一个容易误判的点</span>
+  TTL 归零的那一刻，键<strong>不会</strong>被立刻从内存移除。Redis 以惰性删除为主（下次访问发现过期才删），后台再定期抽样补删。这和你代码里「过期条目不回插、下次重查」是同一种最终一致的口味——副作用都是过期数据可能短暂占着位置。
+</div>
+
+<h2>4 · 动手：把一条缓存键跑完一生</h2>
+
+<div class="callout task">
+  <span class="label">动手任务 · 约 8 分钟</span>
+  打开 <a href="https://redis.io/try/sandbox">redis.io/try/sandbox</a>（免安装免注册），按步骤执行。每步都给了<strong>你应该看到什么</strong>——对不上就停下来问 agent。
+</div>
+
+<ol class="steps">
+  <li>写入一条「因子缓存」，带 600 秒 TTL：
+    <pre><code>SET factor:PE:600030:20260930 '{"pe":21.4}' EX 600</code></pre>
+    <span class="expect">应看到：<code>OK</code>。注意值是 JSON 字符串——string 类型不关心内容结构。</span>
+  </li>
+  <li>从三个角度确认它存在：
+    <pre><code>EXISTS factor:PE:600030:20260930
+TYPE  factor:PE:600030:20260930
+GET   factor:PE:600030:20260930</code></pre>
+    <span class="expect">应看到：<code>1</code>、<code>string</code>、原样返回的 JSON。</span>
+  </li>
+  <li>看 TTL 在流动——连跑两次：
+    <pre><code>TTL factor:PE:600030:20260930</code></pre>
+    <span class="expect">两次结果不同、在递减（如 597 → 589）。TTL 是<strong>服务端时钟</strong>在走，不是你的代码在算 <code>Date.now()</code>。</span>
+  </li>
+  <li>看一条键真正过期。写一条只活 10 秒的，然后等它：
+    <pre><code>SET flash:demo ok EX 10
+TTL flash:demo
+（等 10 秒）
+EXISTS flash:demo
+GET   flash:demo</code></pre>
+    <span class="expect">应看到 <code>0</code> 和 <code>nil</code>。这就是缓存的完整一生：写入 → 存活 → 过期消失，全程无你的代码参与。</span>
+  </li>
+  <li>顺手体验原子计数器（string 类型内置整数语义）：
+    <pre><code>INCR demo:hits
+INCR demo:hits
+GET demo:hits</code></pre>
+    <span class="expect">应看到 <code>1</code>、<code>2</code>、<code>"2"</code>。两次 INCR 之间即使有一万个并发客户端，也不会丢计数——单线程原子性，无需你加闸。</span>
+  </li>
+  <li>清理现场：
+    <pre><code>DEL factor:PE:600030:20260930 demo:hits</code></pre>
+    <span class="expect">应看到 <code>2</code>（删除的键数）。</span>
+  </li>
+</ol>
+
+<p>选做挑战（和你熟悉的限流退避同源）：用 <code>SET rl:u1 1 EX 60 NX</code> + <code>INCR rl:u1</code> 实现一个 60 秒窗口计数器。<code>NX</code> 的语义问 agent，两分钟讲清。</p>
+
+<h2>5 · 检索练习</h2>
+
+<p>不看上文，凭记忆答——答错可以换选项重试：</p>
+
+<div class="quiz" data-quiz>
+  <div class="quiz-q">
+    <p class="quiz-prompt">Q1 · 单实例下，把你的 LRU Map 原样搬到 Redis，下一次回测的缓存命中率会——</p>
+    <div class="quiz-opts">
+      <button class="quiz-opt" data-correct>基本不变</button>
+      <button class="quiz-opt">明显上升</button>
+      <button class="quiz-opt">明显下降</button>
+    </div>
+    <div class="quiz-explain" data-when="wrong">再想想：单实例下请求模式没变，只是缓存换了个存放位置，行为等价——还多付一次网络往返。Redis 的收益从第二个实例出现才开始。</div>
+    <div class="quiz-explain" data-when="right">对。命中率由请求模式决定，不由缓存位置决定。单实例迁移是纯开销（网络往返），收益要等第二个实例出现——这正是方案文档说「当前不引入」的原因。</div>
+  </div>
+  <div class="quiz-q">
+    <p class="quiz-prompt">Q2 · Redis 服务端处理命令的方式，最准确的说法是——</p>
+    <div class="quiz-opts">
+      <button class="quiz-opt" data-correct>单线程原子执行</button>
+      <button class="quiz-opt">多线程并发执行</button>
+      <button class="quiz-opt">事务化批量执行</button>
+    </div>
+    <div class="quiz-explain" data-when="wrong">不对。回忆第 2 节的对照表：你在代码里手工解决的那类竞态，在 Redis 里为什么不需要手工解决？</div>
+    <div class="quiz-explain" data-when="right">对。单线程事件循环意味着命令逐条串行、天然原子。你的 <code>inflight</code> Map 解决的 check-then-set 竞态，在 Redis 里常被 <code>SET NX</code>、<code>INCR</code> 这类原子命令直接吸收。</div>
+  </div>
+  <div class="quiz-q">
+    <p class="quiz-prompt">Q3 · <code>SET k v EX 600</code> 之后客户端进程重启了三次，600 秒内 <code>GET k</code> 会——</p>
+    <div class="quiz-opts">
+      <button class="quiz-opt" data-correct>仍然是那个值</button>
+      <button class="quiz-opt">返回空或报错</button>
+      <button class="quiz-opt">键已经不存在</button>
+    </div>
+    <div class="quiz-explain" data-when="wrong">回忆第 3 步动手观察：TTL 走的是谁的时钟？客户端进程的生死影响服务端的键吗？</div>
+    <div class="quiz-explain" data-when="right">对。TTL 与过期都记录在服务端，与任何客户端进程无关。这正是「你的 Map 一重启全丢」的反面——缓存可以活得比某次部署更久。</div>
+  </div>
+  <div class="quiz-q">
+    <p class="quiz-prompt">Q4 · 键的 TTL 归零的那一刻，Redis 会——</p>
+    <div class="quiz-opts">
+      <button class="quiz-opt" data-correct>通常不会立刻删</button>
+      <button class="quiz-opt">立即从内存删除</button>
+      <button class="quiz-opt">通知客户端来删</button>
+    </div>
+    <div class="quiz-explain" data-when="wrong">回忆「容易误判的点」那条提示框——惰性删除。你代码里过期条目的处理方式其实是同一个设计哲学。</div>
+    <div class="quiz-explain" data-when="right">对。惰性删除为主（下次访问发现过期才真删）+ 后台定期抽样补删。和你「过期条目不回插」的写法一样，都是用最终一致换实现简单——过期键会短暂占内存，靠定期抽样兜底。</div>
+  </div>
+</div>
+
+<h2>6 · 主线阅读</h2>
+
+<p>本课的 primary source——官方 string 类型教程，10 分钟读完，覆盖今天全部命令的正式语义：</p>
+
+<p><a href="https://redis.io/docs/latest/develop/data-types/strings">Redis Docs · Redis strings</a>（同页有 <a href="https://redis.io/docs/latest/develop/data-types">五种基础数据类型总览</a>，为后面几课预留坐标）。</p>
+
+<div class="callout">
+  <span class="label">随时问 agent</span>
+  任何一步对不上、任何术语卡住（RESP、原子性、nil、NX…），直接向对话里的 agent 提问——它是你的老师，随问随答，不用攒着。
+</div>
+
+<h2>下一课预告</h2>
+
+<p><strong>0002 · 本地跑起来，接进 NestJS</strong>：Windows 上用 Docker 跑一个真 Redis 实例，用 node-redis 把 <code>MysqlFactorDataService</code> 的缓存层改写成「Map 与 Redis 双写」的第一版——为将来第二实例出现时的无缝切换做准备。<strong>0003 · 第二个实例到来的那天</strong>：盘点代码库里全部进程内状态（缓存、资源闸、检查点、挂起映射、记忆文件）在多实例下的坏点与修法，部署拓扑词汇一次性讲透。在此之前，先把今天的沙盒任务跑完。</p>
+
+<div class="lesson-footer">
+  <span>Lesson 0001 / Redis 入门</span>
+  <a href="../reference/redis-string-cache-cheatsheet.html">配套速查表 →</a>
+  <a href="../reference/glossary.html">术语表 →</a>
+  <span>下一课（0002）未建</span>
+</div>
+
+</main>
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

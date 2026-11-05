@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>术语表 · learn-redis</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<main>
+
+<div class="kicker">Reference · Glossary</div>
+<h1>术语表</h1>
+<div class="lesson-meta">所有课程共用，持续生长 · 定义尽量落到 factor-agent 项目做例子</div>
+
+<h2>部署拓扑词汇</h2>
+
+<table>
+  <tr><th>术语</th><th>定义与例子</th></tr>
+  <tr><td><strong>进程</strong>（process）</td><td>操作系统里一份正在运行的程序。终端里执行一次 <code>node dist/main.js</code> = 一个进程，任务管理器里能看到它。</td></tr>
+  <tr><td><strong>实例</strong>（instance）</td><td>同一个程序跑起来的一份拷贝，通常就是一个进程。<code>factor-agent-server</code> 现在是 <strong>1 个实例</strong>服务全部用户；把同一份程序在另一台机器/容器再跑一份 = 第 2 个实例。这个词用在谁身上就指谁：server 实例、Redis 实例（沙盒里连的就是一个远程跑着的 Redis 实例）。</td></tr>
+  <tr><td><strong>客户端</strong>（client）</td><td>发起请求的一方。用户的浏览器（factor-agent-react 页面）是 server 的客户端；将来 server 用 node-redis 连 Redis 时，server 又是 Redis 的客户端。</td></tr>
+  <tr><td><strong>会话</strong>（session / conversation）</td><td>一个用户的一段对话上下文。多个用户、多个会话可以<strong>同时共享同一个实例</strong>——用户多不等于实例多。</td></tr>
+  <tr><td><strong>单实例边界</strong></td><td>进程内状态（p-queue 资源闸、MemorySaver 检查点、pendingResumes、LRU 缓存）只在单个实例内成立。《并发治理方案》第八节的部署边界说的就是它。两个实例 = 两套互相看不见的进程内状态。</td></tr>
+  <tr><td><strong>水平扩容</strong>（horizontal scaling）</td><td>靠<strong>加实例数</strong>扛负载（而不是换更强的机器）。前提：网关把同一用户固定路由到同一实例（sticky session），否则进程内状态失效——多实例化时才需要 Redis 的根本原因。</td></tr>
+</table>
+
+<h2>Redis 基础词汇（Lesson 0001 起）</h2>
+
+<table>
+  <tr><th>术语</th><th>定义与例子</th></tr>
+  <tr><td><strong>键空间</strong>（keyspace）</td><td>一个 Redis 实例里所有键的集合。扁平、无目录，层级靠冒号约定（<code>factor:PE:600030:20260930</code>）；所有客户端实例连的是<strong>同一块</strong>键空间。</td></tr>
+  <tr><td><strong>TTL</strong>（time to live）</td><td>键的剩余存活秒数，由 <strong>Redis 服务端时钟</strong>计时，与客户端进程生死无关。<code>TTL k</code> 返回剩余秒；<code>-1</code> = 无 TTL；<code>-2</code> = 键不存在。</td></tr>
+  <tr><td><strong>原子性</strong>（atomicity）</td><td>一条命令执行期间不会被其他命令插入。Redis 单线程逐条执行命令，所以 <code>INCR</code>、<code>SET … EX</code> 天然原子——你代码里 <code>inflight</code> Map 手工解决的竞态，在这里往往一条命令消失。</td></tr>
+  <tr><td><strong>nil</strong></td><td>「键不存在」的返回值（不是空字符串、不是报错）。GET 一个没有的键得到 nil。</td></tr>
+</table>
+
+<h2>Docker / 部署词汇（deploy 轨 Lesson 0001 起）</h2>
+
+<table>
+  <tr><th>术语</th><th>定义与例子</th></tr>
+  <tr><td><strong>镜像</strong>（image）</td><td>只读模板：代码 + 运行环境的打包件（如 <code>factor-server:0.1</code>）。同一镜像可同时跑出多个容器——多实例的物理基础。</td></tr>
+  <tr><td><strong>容器</strong>（container）</td><td>镜像的一次运行实例：独立进程 + 隔离的文件系统与网络栈（所以容器里 127.0.0.1 不是宿主机）。</td></tr>
+  <tr><td><strong>分层</strong>（layer）</td><td>镜像按 Dockerfile 指令逐层叠成；某层变化，它及之后的层重跑、之前的层走缓存——依赖 COPY 在前、源码 COPY 在后的原因。</td></tr>
+  <tr><td><strong>卷</strong>（volume）</td><td>宿主机管理的持久存储，挂进容器某路径（如 memories/、logs/、Redis /data）。容器删了卷还在；<code>down -v</code> 才删。</td></tr>
+  <tr><td><strong>编排</strong>（orchestration）</td><td>按一份蓝图描述全部角色并拉起/自愈。载体：Docker Compose（单机一页蓝图）→ Kubernetes（集群，远期概念）。</td></tr>
+  <tr><td><strong>sticky session</strong>（会话粘住）</td><td>网关把同一用户固定转发到同一实例，进程内状态（挂起映射、检查点）才继续成立。本地用 <code>ip_hash</code>，生产建议按会话 cookie hash。</td></tr>
+  <tr><td><strong>健康检查</strong>（healthcheck）</td><td>定期探测服务是否应答（如戳 /api/docs），连续失败标记为 unhealthy。单机 Docker 里它只是状态标记，<strong>不会触发重启</strong>（restart 策略只看进程退出）；编排平台（K8s 等）才会据此重启或摘流量。</td></tr>
+  <tr><td><strong>OverlayFS</strong>（联合文件系统）</td><td>Linux 内核自带的文件系统，不用安装：把几个普通目录叠成一个目录看。镜像层是只读的下层目录（lowerdir），容器可写层是上层目录（upperdir），容器里看到的 / 是叠出来的合并视图（merged）。</td></tr>
+  <tr><td><strong>copy-up</strong></td><td>第一次修改下层文件时，先把<strong>整个文件</strong>复制到上层再改（哪怕只改一个字节）；之后再写就不复制了。这是写时复制的具体实现，大文件、写密集的数据因此应放卷。</td></tr>
+  <tr><td><strong>whiteout</strong></td><td>删除下层文件时，在上层放的"已删除"遮挡标记：容器里看不到了，但下层原文件还在，所以镜像不会变小。</td></tr>
+  <tr><td><strong>存储驱动</strong> / overlay2</td><td>Docker 里负责"镜像层和容器层怎么存在硬盘上、怎么叠起来"的模块；overlay2 是用 OverlayFS 实现的那个，长期是默认选择。containerd 里同类组件叫 snapshotter。</td></tr>
+  <tr><td><strong>containerd</strong></td><td>Docker 背后真正管镜像和容器的后台程序：拉取和存储镜像、启动和监管容器。设计上嵌入更大的系统使用，不直接面向开发者；Kubernetes 也直接用它。CNCF 毕业项目。</td></tr>
+  <tr><td><strong>containerd image store</strong></td><td>"由 containerd 来存镜像"的模式。全新安装的 Docker Engine 29+ 默认启用，从旧版本升级上来的继续用 overlay2；默认 snapshotter 仍是 overlayfs，叠层原理不变。</td></tr>
+  <tr><td><strong>runc</strong></td><td>最底层真正创建容器进程的工具：设置 namespace、cgroup 并启动进程。链路：docker 命令 → Docker Engine → containerd → runc。</td></tr>
+</table>
+
+<div class="lesson-footer">
+  <a href="../lessons/0001-redis-vs-in-process-cache.html">← Lesson 0001</a>
+  <a href="../reference/redis-string-cache-cheatsheet.html">命令速查表 →</a>
+</div>
+
+</main>
+</body>
+</html>

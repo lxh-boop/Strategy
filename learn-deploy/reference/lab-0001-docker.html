@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>0001 · 多实例的 Docker 部署与管理：完整工作谱</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<main>
+
+<div class="kicker">Lesson 0001 · 多实例部署</div>
+<h1>多实例的 Docker 部署与管理：完整工作谱</h1>
+<div class="lesson-meta">
+  约 40 分钟（含动手则 1.5 小时） ·
+  本课是<strong>参考谱</strong>：所有配置都按你的真实项目写好，装好 Docker 后（Redis 轨 0002）逐段跑通即可 ·
+  配套 <a href="../reference/docker-ops-cheatsheet.html">管理命令速查表</a> ·
+  <a href="../../learn-redis/reference/glossary.html">共享术语表</a>
+</div>
+
+<div class="callout">
+  <span class="label">你部署过单实例全栈？走这条读法</span>
+  你已知道镜像/容器/run/端口/卷——<strong>§2 速览即可</strong>（分层缓存值得 30 秒，它约束 Dockerfile 写法）；<strong>§3 只看红色提示框</strong>（两个贴你项目的真实决定：duckdb → bookworm-slim、logs/memories 挂卷）；<strong>§4 只看 host.docker.internal 那行注释</strong>（容器网络栈独立，是后面一切的前提）；<strong>§5 是速查表</strong>，用到再翻。<strong>§6 开始才是你的新疆界</strong>：同镜像多容器、网关分流 + sticky、滚动发布下的状态问题——逐行读。§10 的 quiz 建议全做，检索练习对已会内容同样有效。
+<div class="callout"><span class="label">归档说明</span>本页已并入对应的面试课，作为<strong>实操参考谱</strong>保留：面试讲项目前把它跑通，项目故事才经得起追问。交互式自评见主课页面。</div></div>
+
+<h2>1 · 蓝图：从单实例到目标拓扑</h2>
+
+<p>今天整套系统是一个进程，浏览器直连它：</p>
+
+<pre><code>浏览器 ×20 ──HTTP──> node 进程（factor-agent-server :3000）──> MySQL
+                         └── 进程内存：LRU 缓存 · p-queue 闸 · 检查点
+                         └── 本地文件：logs/ · memories/</code></pre>
+
+<p>你们《并发治理方案》第八节的 100 人目标形态：</p>
+
+<pre><code>浏览器 ×100
+   │
+   ▼
+nginx（唯一入口 :80）                ← 网关，履行负载均衡职能
+   │  分流 + 会话粘住（sticky）
+   ├──────────────┬──────────┐
+   ▼                         ▼
+server 实例 A              server 实例 B      ← 同一镜像跑出的两个容器
+   └────────┬─────────────────────┘
+            ▼
+   MySQL（共享，仍在公司机房）
+   Redis（共享状态，本轨配合 Redis 轨接入）</code></pre>
+
+<p>记住三件套的层次：<strong>负载均衡</strong>是网关承担的一项职能，<strong>nginx</strong> 是承载它的软件，<strong>Docker / Compose</strong> 是把这一切装盒拉起的运行方式。本课自底向上：先把一个实例装进容器（§3–4），学会管理它（§5），再复制出第二个（§6），然后把它们编成一套（§7–8）。</p>
+
+<h2>2 · Docker 最小概念集</h2>
+
+<table>
+  <tr><th>概念</th><th>是什么</th><th>类比 npm 世界</th></tr>
+  <tr><td><strong>镜像</strong>（image）</td><td>只读模板：代码 + 运行环境打包件</td><td>发布到 registry 的 tarball</td></tr>
+  <tr><td><strong>容器</strong>（container）</td><td>镜像的一次运行实例（进程 + 隔离的文件/网络）</td><td>node_modules 里跑起来的那次执行</td></tr>
+  <tr><td><strong>仓库</strong>（registry）</td><td>存镜像的地方（Docker Hub / 公司私有）</td><td>npmjs.com</td></tr>
+  <tr><td><strong>分层</strong>（layer）</td><td>镜像由多层叠成，每条指令一层，未变层的缓存直接复用</td><td>无——这是 Docker 特有的构建缓存</td></tr>
+</table>
+
+<div class="callout">
+  <span class="label">分层缓存是写 Dockerfile 的核心约束</span>
+  每条指令一层；某层变了，<strong>它和它之后的所有层</strong>重跑。所以依赖清单（package-lock.json）先 COPY、装依赖，源码最后 COPY——改业务代码时几千个依赖不重装，几秒出镜像。§3 的 Dockerfile 每个顺序都是为此服务。
+</div>
+
+<h2>3 · 给 factor-agent-server 写 Dockerfile</h2>
+
+<p>在 <code>factor-agent-server/</code> 根目录新建 <code>Dockerfile</code>（两段式：构建段出编译产物，运行段只带生产依赖——镜像更小、攻击面更小）：</p>
+
+<pre class="plain"><code># ---------- 构建段 ----------
+FROM node:22-bookworm-slim AS build
+WORKDIR /app
+# 先只拷依赖清单 → 这层不常变，npm ci 结果被长期缓存
+COPY package-lock.json package.json ./
+RUN npm ci
+# 再拷源码 → 改业务代码只重建这里以下的层
+COPY tsconfig.json tsconfig.build.json nest-cli.json ./
+COPY src ./src
+RUN npm run build          # nest build → dist/
+
+# ---------- 运行段 ----------
+FROM node:22-bookworm-slim
+WORKDIR /app
+ENV NODE_ENV=production
+COPY package-lock.json package.json ./
+RUN npm ci --omit=dev      # 只装生产依赖（jest/ts 等全不要）
+COPY --from=build /app/dist ./dist
+# logs/ 与 memories/ 不打进镜像：运行时挂卷（§4）
+EXPOSE 3000
+CMD ["node", "dist/main.js"]</code></pre>
+
+<div class="callout warn">
+  <span class="label">两个贴着你项目的真实决定</span>
+  ① 基础镜像用 <code>bookworm-slim</code>（Debian/glibc）而不是更小的 <code>alpine</code>（musl）：你的依赖里有 <code>@duckdb/node-api</code> 原生模块，musl 下的预编译二进制经常装不上或跑不起来——这是真实项目才踩得到的坑。② <code>logs/</code>（FileConsoleLogger 落盘）和 <code>memories/</code>（ADR-0007 记忆文件）是运行时状态，进卷不进镜像——否则一重建容器，日志和记忆全没。
+</div>
+
+<p>另建一个 <code>.dockerignore</code>（同目录），防止把宿主机的脏东西拷进构建段：</p>
+
+<pre class="plain"><code>node_modules
+dist
+logs
+memories
+.env          # 密钥绝不进镜像！配置靠 §4 的 -e / env_file 注入
+test</code></pre>
+
+<h2>4 · 构建并跑起第一个实例</h2>
+
+<div class="callout task">
+  <span class="label">动手（前置：Docker 已装）</span>
+  终端进入 <code>factor-agent-server/</code> 目录。每条命令的预期结果都标了——对不上就把输出带给 agent。
+</div>
+
+<ol class="steps">
+  <li>构建镜像：
+    <pre><code>docker build -t factor-server:0.1 .</code></pre>
+    <span class="expect">首次几分钟（拉基础镜像 + 装依赖）；立刻改一行 <code>src</code> 再 build 一次——观察依赖层直接 <code>CACHED</code> 跳过，这就是 §2 的分层缓存。</span>
+  </li>
+  <li>跑起实例 A：
+    <pre><code>docker run -d --name server-a -p 3001:3000 \
+  -e MYSQL_HOST=host.docker.internal \
+  -e USER_DB_HOST=host.docker.internal \
+  -e ZHIPU_API_KEY=填你的 \
+  -v factor-logs:/app/logs \
+  -v factor-memories:/app/memories \
+  factor-server:0.1</code></pre>
+    <span class="expect">返回一串容器 ID。<code>-d</code> 后台跑；<code>-p 3001:3000</code> = 宿主机 3001 → 容器 3000；<code>-v</code> 把两个运行时目录挂成<strong>卷</strong>（宿主机管理的持久存储）。</span>
+  </li>
+  <li>验证活着：
+    <pre><code>docker ps                 # 列表里应有 server-a，状态 Up
+docker logs -f server-a   # 应看到 Nest 启动日志；Ctrl-C 退出跟随
+curl http://localhost:3001/api/docs -I   # Swagger 页应答 200</code></pre>
+    <span class="expect">注意 MySQL 的 host 写了 <code>host.docker.internal</code>——容器里的 <code>127.0.0.1</code> 是容器自己，不是你的 Windows；这是 Docker 网络的第一课。</span>
+  </li>
+</ol>
+
+<h2>5 · 管理一个容器：日常命令面</h2>
+
+<p>「部署」之外你点名要「管理」。单个容器的日常管理就这六组命令（完整版见<a href="../reference/docker-ops-cheatsheet.html">速查表</a>）：</p>
+
+<table>
+  <tr><th>想做什么</th><th>命令</th><th>要点</th></tr>
+  <tr><td>看谁在跑</td><td><code>docker ps</code> / <code>ps -a</code></td><td><code>-a</code> 连退出的也列；STATUS 列 Up/Exited 一眼定生死</td></tr>
+  <tr><td>看日志</td><td><code>docker logs -f --tail 100 server-a</code></td><td><code>-f</code> 跟随；stdout/stderr 都收——所以应用要往 stdout 打日志</td></tr>
+  <tr><td>看资源占用</td><td><code>docker stats</code></td><td>每个容器的 CPU/内存实时表；Node 服务内存缓慢爬升 = 排查起点</td></tr>
+  <tr><td>进容器排查</td><td><code>docker exec -it server-a sh</code></td><td>进去后就是容器内的 shell；<code>exit</code> 出来，容器不受影响</td></tr>
+  <tr><td>停止/删除</td><td><code>docker stop server-a && docker rm server-a</code></td><td>删容器不清卷——<code>factor-memories</code> 卷里的记忆还在</td></tr>
+  <tr><td>开机自启 + 崩溃自愈</td><td>run 时加 <code>--restart unless-stopped</code></td><td>进程崩了/宿主机重启了自动拉起，除非你手动 stop 过——长驻服务基本盘</td></tr>
+</table>
+
+<h2>6 · 第二个实例：多实例的物理诞生</h2>
+
+<p>多实例的秘密朴素得惊人——<strong>同一条 <code>docker run</code> 再执行一次</strong>，换个名字、换个宿主端口：</p>
+
+<pre><code>docker run -d --name server-b -p 3002:3000 \
+  -e MYSQL_HOST=host.docker.internal -e USER_DB_HOST=host.docker.internal \
+  -e ZHIPU_API_KEY=填你的 \
+  -v factor-logs-b:/app/logs -v factor-memories-b:/app/memories \
+  factor-server:0.1
+
+docker ps        # server-a 和 server-b 并排 Up——这就是「两个实例」
+curl http://localhost:3002/api/docs -I</code></pre>
+
+<div class="callout">
+  <span class="label">此刻你已经把第一课（Redis 轨）的假设变成了实物</span>
+  容器 A 和容器 B 是两个独立进程、两套独立内存：A 里的 LRU Map 完全看不见 B 的。同一查询打两遍库、互不知晓——「进程内缓存的三个天然边界」现在跑在你的机器上，不再是示意图。它们能同时跑，靠的是<strong>宿主端口不同（3001/3002）、容器端口相同（都是 3000）</strong>——镜像不需要任何改动。
+</div>
+
+<p>卷名也分开了（<code>-b</code> 后缀）——两个实例的 <code>memories/</code> 各写各的，正是坏点清单里「记忆文件分叉」的实物版。多实例时代码侧要改什么，见 §9。</p>
+
+<h2>7 · 编排：docker compose 把它们编成一套</h2>
+
+<p>逐条 <code>docker run</code> 写命令行撑不过三个容器。compose 用<strong>一份 YAML 蓝图</strong>描述全部角色，一条命令拉起整套。新建目录 <code>D:\cht\work\deploy-lab\</code>，放三个文件：</p>
+
+<h3>compose.yaml</h3>
+
+<pre class="plain"><code>services:
+  server-a:
+    build: ../factor-agent-server          # 直接用 §3 的 Dockerfile 构建
+    image: factor-server:0.1
+    env_file: ../factor-agent-server/.env  # 密钥从宿主机 .env 注入，不进镜像
+    environment:                           # environment 覆盖 env_file 同名变量
+      MYSQL_HOST: host.docker.internal     # .env 里若写 127.0.0.1，在容器里是错的
+      USER_DB_HOST: host.docker.internal
+    volumes:
+      - server-a-logs:/app/logs
+      - server-a-memories:/app/memories
+    restart: unless-stopped
+    mem_limit: 1g                          # 资源上限：防单实例拖垮宿主机
+    healthcheck:                           # 健康检查：见下注
+      test: ["CMD", "node", "-e",
+             "fetch('http://127.0.0.1:3000/api/docs').then(r=>process.exit(0)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s                    # Nest 启动期不算失败
+
+  server-b:
+    image: factor-server:0.1               # 不再写 build：直接复用同一镜像
+    env_file: ../factor-agent-server/.env
+    environment:
+      MYSQL_HOST: host.docker.internal
+      USER_DB_HOST: host.docker.internal
+    volumes:
+      - server-b-logs:/app/logs
+      - server-b-memories:/app/memories
+    restart: unless-stopped
+    mem_limit: 1g
+
+  redis:                                   # 为 Redis 轨 0003 预留的座位
+    image: redis:7-alpine
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+
+  nginx:
+    image: nginx:1.27-alpine
+    ports:
+      - "8080:80"                          # 用户唯一入口
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - server-a
+      - server-b
+    restart: unless-stopped
+
+volumes:
+  server-a-logs: {}
+  server-a-memories: {}
+  server-b-logs: {}
+  server-b-memories: {}
+  redis-data: {}</code></pre>
+
+<div class="callout warn">
+  <span class="label">健康检查的语义</span>
+  healthcheck 让 Docker 定期戳一下 <code>/api/docs</code>，连续失败标记为 unhealthy——它是<strong>状态标记</strong>和重启依据（配合编排工具），不是「挂了立刻重启」的开关；「崩了拉起」由 <code>restart</code> 负责。两者是互补的两层保障。
+</div>
+
+<h3>compose 日常管理命令</h3>
+
+<pre><code>docker compose up -d          # 按蓝图拉起整套（缺的建，变了的重配）
+docker compose ps             # 全家桶状态一目了然
+docker compose logs -f server-a   # 只跟某个服务的日志
+docker compose restart server-a   # 只动一个角色
+docker compose down           # 全套停下删容器（卷保留！数据安全）
+docker compose down -v        # 连卷一起删——核选项，记忆/Redis 数据没了</code></pre>
+
+<p>进阶一步：compose 还支持 <code>docker compose up -d --scale server-a=3</code> 一条命令横向加实例——但需要 nginx 改用 Docker 内置 DNS 动态发现（<code>resolver 127.0.0.11</code>），本课先不展开，问 agent 可拿到完整改法。</p>
+
+<h2>8 · 网关：nginx 配置逐行讲</h2>
+
+<p>deploy-lab 目录里第三个文件 <code>nginx.conf</code>——所有用户的流量从 8080 进来，被分给两个实例：</p>
+
+<pre class="plain"><code>upstream factor_server {
+    # —— 会话粘住（sticky）——
+    # ip_hash：同一来源 IP 固定转发到同一实例。本地实验够用；
+    # 生产建议改 hash $cookie_你的会话cookie名;，按登录会话粘（NAT 下同一出口 IP
+    # 的所有用户会挤到同一实例，ip_hash 在办公室网络里有这个坑）
+    ip_hash;
+
+    # 服务名直接写 compose 服务名——Docker 内置 DNS 把 server-a/server-b
+    # 解析成容器内部 IP。这就是 §7 网络编排的红利：不写死 IP
+    server server-a:3000;
+    server server-b:3000;
+}
+
+server {
+    listen 80;
+
+    location / {
+        proxy_pass http://factor_server;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+
+        # —— 流式响应三件套（你们的对话进度事件是流式推送）——
+        # 不关缓冲，nginx 会把事件攒在自己内存里，憋到超时才一次性吐出
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 300s;   # 长回答 + GLM 限流退避（~63s 窗口）不读超时
+    }
+}</code></pre>
+
+<p>启动并验证 sticky：<code>docker compose up -d</code> 后浏览器访问 <code>http://localhost:8080/api/docs</code>，然后分别看两个实例的日志——正常会话请求应稳定出现在<strong>同一个</strong>实例的 <code>docker logs server-a</code> 里（换网络/清 cookie 才可能跳到 B）。</p>
+
+<div class="callout">
+  <span class="label">分流是自动的，策略是你要选的</span>
+  写好 <code>upstream</code> + <code>proxy_pass</code>，nginx 默认就自动<strong>轮询</strong>分流——这部分确实不用管。但默认轮询会把同一用户的请求拆到两个实例（§9 的状态问题全来了），所以 <code>ip_hash;</code> 是本配置里最不能删的一行。策略谱系：轮询（默认）/ <code>least_conn</code>（最少连接优先——你们的 GLM 调用长且耗时不均，它比轮询分得匀）/ <code>ip_hash</code>（按来源 IP 粘）/ <code>hash $cookie_会话名;</code>（按登录会话粘，生产首选）。另一个分工要知道：开源版 nginx 的故障摘除是<strong>被动式</strong>的（转发失败 <code>max_fails</code> 次才暂时拉黑，默认探不出"活着但很慢"）；主动定时探测是商业版功能——所以运维上是两层各管一半：compose 的 <code>restart</code> + <code>healthcheck</code> 负责把死容器拉起来，nginx 被动摘除负责别把请求发给刚死的那个。
+</div>
+
+<h2>9 · 多实例时代码侧要注意什么</h2>
+
+<p>拓扑搭好后，你代码里的进程内状态就是坏点清单（Redis 轨 0003 会逐个修）。先有一张对照表，动手时知道自己在修哪个：</p>
+
+<table>
+  <tr><th>代码里的进程内状态</th><th>双容器下的症状</th><th>修法（哪一轨负责）</th></tr>
+  <tr><td>LRU 缓存（MysqlFactorDataService）</td><td>各缓存各的，命中率掉、重复打库</td><td>共享 Redis 缓存（Redis 轨）</td></tr>
+  <tr><td>MemorySaver 检查点 / pendingResumes / pendingConfirms</td><td>这一问在 A 登记挂起，下一问被分到 B → 挂起恢复失效</td><td>本课的 sticky 先兜住；彻底解 = 外置 Redis（Redis 轨 + BullMQ 阶段）</td></tr>
+  <tr><td>p-queue 资源闸（glm=2 / backtest=2）</td><td>变成 2+2=4，全局限流失效</td><td>接受每实例限额，或分布式限流（远期）</td></tr>
+  <tr><td>memories/ 记忆文件</td><td>两个卷各写各的，记忆分叉</td><td>共享卷或迁入 Redis/DB（Redis 轨）</td></tr>
+  <tr><td>MySQL 连接池 20 ×2 实例</td><td>40 连接逼近 max_connections=150 的一半</td><td>注意余量，多实例前和 DBA 对一遍（部署轨意识点）</td></tr>
+</table>
+
+<div class="callout warn">
+  <span class="label">单实例从不遇到的问题：发布窗口</span>
+  多实例下更新版本是<strong>滚动进行</strong>的：A 还跑 v1、B 已上 v2 的窗口里，两版代码同时连着同一个库。所以 DB 迁移必须<strong>向后兼容</strong>（先加列 → 双版共存 → 再删旧列，拆成多次发布）——一条 ALTER 连删带改的迁移会在窗口期打崩旧版。这是"每个服务只跑过一个实例"从未遇到过的坑，0003 课（滚动更新与零停机发布）的主角。
+</div>
+
+<h2>10 · 检索练习</h2>
+
+<div class="quiz" data-quiz>
+  <div class="quiz-q">
+    <p class="quiz-prompt">Q1 · 改了 src 里一行代码重新 docker build，哪些层会重新执行？</p>
+    <div class="quiz-opts">
+      <button class="quiz-opt" data-correct>源码层和其后</button>
+      <button class="quiz-opt">所有的层重跑</button>
+      <button class="quiz-opt">只有基础镜像</button>
+    </div>
+    <div class="quiz-explain" data-when="wrong">回忆 §2 的分层缓存规则：某层变了，什么范围的层要重跑？为什么 Dockerfile 要把依赖 COPY 放在源码 COPY 前面？</div>
+    <div class="quiz-explain" data-when="right">对。缓存逐层复用，直到第一个变化层——所以 package-lock 没变时 npm ci 层直接 CACHED，改业务代码秒级出镜像。依赖在前、源码在后的顺序就是为这个服务的。</div>
+  </div>
+  <div class="quiz-q">
+    <p class="quiz-prompt">Q2 · docker run -p 3001:3000 里两个数字的含义是——</p>
+    <div class="quiz-opts">
+      <button class="quiz-opt" data-correct>前宿主后容器</button>
+      <button class="quiz-opt">前容器后宿主</button>
+      <button class="quiz-opt">前内网后外网</button>
+    </div>
+    <div class="quiz-explain" data-when="wrong">回忆 §6：server-a 用 3001:3000，server-b 用 3002:3000——两个实例容器端口一样，宿主端口不一样。谁冒号前谁冒号后？</div>
+    <div class="quiz-explain" data-when="right">对。浏览器访问宿主机的 3001/3002，各自转发到两个容器里相同监听的 3000——「同镜像多实例，宿主端口不同、容器端口相同」，端口映射是多实例并存的第一根杠杆。</div>
+  </div>
+  <div class="quiz-q">
+    <p class="quiz-prompt">Q3 · 容器里连 MySQL 用 host.docker.internal 而不是 127.0.0.1，因为——</p>
+    <div class="quiz-opts">
+      <button class="quiz-opt" data-correct>容器有独立网络</button>
+      <button class="quiz-opt">宿主防火墙拦截</button>
+      <button class="quiz-opt">数据库要求域名</button>
+    </div>
+    <div class="quiz-explain" data-when="wrong">回忆 §4 验证那步的注释：容器里的 127.0.0.1 是谁？每个容器有自己的什么？</div>
+    <div class="quiz-explain" data-when="right">对。每个容器有独立的网络栈，127.0.0.1 指容器自己——MySQL 跑在你的 Windows 宿主机上，得用 Docker 提供的 host.docker.internal 指回宿主。这是容器化改动 .env 的第一个必踩点。</div>
+  </div>
+  <div class="quiz-q">
+    <p class="quiz-prompt">Q4 · compose 里同一变量在 env_file 和 environment 都写了，谁生效？</p>
+    <div class="quiz-opts">
+      <button class="quiz-opt" data-correct>环境块那份值</button>
+      <button class="quiz-opt">文件里那份值</button>
+      <button class="quiz-opt">先出现的生效</button>
+    </div>
+    <div class="quiz-explain" data-when="wrong">回忆 §7 compose.yaml 里的注释：environment 的角色是「覆盖」——MYSQL_HOST 为什么要在 environment 里再写一遍？</div>
+    <div class="quiz-explain" data-when="right">对。environment 优先级高于 env_file——组合用法就是「.env 放共同密钥，environment 放每个服务需要覆盖的值」（如把 127.0.0.1 覆盖成 host.docker.internal）。</div>
+  </div>
+  <div class="quiz-q">
+    <p class="quiz-prompt">Q5 · nginx upstream 不配 ip_hash，用户 A 相邻两次请求可能——</p>
+    <div class="quiz-opts">
+      <button class="quiz-opt" data-correct>落到不同实例</button>
+      <button class="quiz-opt">被网关所拒绝</button>
+      <button class="quiz-opt">打到数据库层</button>
+    </div>
+    <div class="quiz-explain" data-when="wrong">回忆 §9 第二行：默认的分流策略是什么？A 的挂起状态登记在实例 1 的内存里，第二次请求到了实例 2 会发生什么？</div>
+    <div class="quiz-explain" data-when="right">对。默认轮询分流，相邻请求落不同实例——A 的 pendingResumes 在实例 1，下一问到实例 2 就找不到挂起现场，挂起恢复失效。sticky 不是性能优化，是进程内状态的保命符。</div>
+  </div>
+  <div class="quiz-q">
+    <p class="quiz-prompt">Q6 · restart: unless-stopped 的行为是——</p>
+    <div class="quiz-opts">
+      <button class="quiz-opt" data-correct>挂掉会自动拉起</button>
+      <button class="quiz-opt">永远不会重启它</button>
+      <button class="quiz-opt">只有手动才启动</button>
+    </div>
+    <div class="quiz-explain" data-when="wrong">回忆 §5 表格最后一行：这个策略管的是哪两件事（进程崩溃、宿主机重启）之外唯一的例外？</div>
+    <div class="quiz-explain" data-when="right">对。容器进程崩溃或宿主机重启都会自动恢复，唯一例外是你手动 docker stop 过——「除非手动停」。它和 healthcheck（标记状态）是互补的两层保障。</div>
+  </div>
+</div>
+
+<h2>11 · 主线阅读</h2>
+
+<p>本课 primary source，按本课顺序对应章节：</p>
+
+<table>
+  <tr><th>本课段落</th><th>主线读物</th></tr>
+  <tr><td>§2–3 镜像/容器/Dockerfile</td><td><a href="https://docker-practice.github.io/zh-cn/latest/">《Docker——从入门到实践》</a>第 1–2 章（基本概念）、Dockerfile 章节；官方 <a href="https://docs.docker.com/get-started">Get Started</a> 对应模块</td></tr>
+  <tr><td>§7 编排</td><td>同书 Compose 章节；官方 <a href="https://docs.docker.com/compose/">Compose 文档</a></td></tr>
+  <tr><td>§8 负载均衡与 sticky</td><td><a href="https://nginx.org/en/docs/http/load_balancing.html">nginx 官方 HTTP 负载均衡指南</a>（upstream / ip_hash / session persistence 全部出自这里）</td></tr>
+</table>
+
+<div class="callout">
+  <span class="label">随时问 agent</span>
+  跑谱时任何一步输出对不上、任何配置行看不懂（healthcheck、resolver、ip_hash、卷……），直接把报错或问题丢给对话里的 agent——谱子是它写的，它最清楚每一行为什么在那。
+</div>
+
+<h2>课程地图（本轨）</h2>
+
+<pre class="plain"><code>0001 多实例 Docker 部署与管理完整工作谱（本课，参考谱）
+0002 实操实验课：装好 Docker 后把谱子逐段跑通，观察双实例（动手）
+0003 与 Redis 轨会合：Redis 进 compose，状态外置，拆掉 sticky 的必要性（动手）
+0004 生产化：HTTPS、日志聚合、数据备份、发布流程（动手）</code></pre>
+
+<div class="lesson-footer">
+  <span>Lesson 0001 / 多实例部署</span>
+  <a href="../reference/docker-ops-cheatsheet.html">管理命令速查表 →</a>
+  <a href="../../learn-redis/reference/glossary.html">共享术语表 →</a>
+  <span>下一课（0002）未建 · 前置：装 Docker（Redis 轨 0002）</span>
+</div>
+
+</main>
+
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

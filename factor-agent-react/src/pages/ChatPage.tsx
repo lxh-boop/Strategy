@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import type { AgentCard, BacktestCard, ChatMessage, Conversation } from "../types";
 import { CHAT_SUGGESTIONS } from "../data/mock";
+import { reportClientLog } from "../api";
 import { fmtYmd, fmtConvDate } from "../utils/format";
 import { IcChart, PerfChart, Sparkline } from "../components/charts";
 import { ConfirmModal, MetricGrid, Modal, ParamsBlock } from "../components/ui";
@@ -459,10 +460,12 @@ export function ChatPage(props: {
   const gate = confirmGate && confirmGate.convId === current?.id ? confirmGate : null;
   const gateVisible = !!gate && gate !== dismissedGate && !typingHere;
   const closeGate = () => {
+    reportClientLog("info", "确认门被关闭", { convId: gate?.convId, kind: gate?.kind });
     setDismissedGate(gate);
     setGateText("");
   };
   const gateAct = (text: string) => {
+    reportClientLog("info", "确认门回发反馈", { convId: gate?.convId, kind: gate?.kind, textLength: text.length });
     closeGate();
     onSubmit(text);
   };

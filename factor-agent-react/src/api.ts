@@ -231,6 +231,14 @@ export async function sendMessageStream(
   let buffer = "";
   /** final 经闭包赋值，用对象属性承载——局部变量会被 TS 控制流收窄成 never */
   const collected: { final: SendMessageResult | null } = { final: null };
+  const streamStart = Date.now();
+  /** 帧序追踪：记录每帧类型/大小/到达时刻，流异常收尾时随日志上报——
+   *  "界面没反应、刷新才出现"类事故的浏览器侧唯一证据（事件到没到、到在哪一步） */
+  const frameTrace: string[] = [];
+  const noteFrame = (frame: ChatStreamFrame, byteLen: number) => {
+    frameTrace.push(`${frame.type}(${byteLen}B)+${((Date.now() - streamStart) / 1000).toFixed(1)}s`);
+    if (frameTrace.length > 80) frameTrace.shift();
+  };
 
   /** 处理一行 `data: {…}`；final 只记录，error 抛出，其余推给调用方 */
   const handleLine = (line: string): void => {
@@ -241,9 +249,11 @@ export async function sendMessageStream(
     } catch {
       return; /* 非 JSON 行（如注释/心跳），忽略 */
     }
+    noteFrame(frame, line.length);
     if (frame.type === "final") {
       collected.final = { userMessage: frame.userMessage, agentMessage: frame.agentMessage };
     } else if (frame.type === "error") {
+      reportClientLog("warn", "服务端 error 帧收尾", { frames: frameTrace, reason: frame.message.slice(0, 200) });
       throw new ApiError(frame.code ?? "AGENT_ERROR", frame.message);
     } else {
       onEvent(frame);
@@ -266,7 +276,11 @@ export async function sendMessageStream(
     if (buffer.trim()) handleLine(buffer.trim()); // 残包兜底（正常：final 后服务端即结束流）
   } catch (e) {
     if (e instanceof DOMException && e.name === "AbortError") {
-      if (userAborted) throw new ApiError("ABORTED", "已停止生成");
+      if (userAborted) {
+        reportClientLog("info", "流式生成被用户停止", { frames: frameTrace });
+        throw new ApiError("ABORTED", "已停止生成");
+      }
+      reportClientLog("warn", "流式空闲超时（疑似断流）", { frames: frameTrace, elapsedMs: Date.now() - streamStart });
       throw new ApiError("TIMEOUT", `连接超时（${IDLE_MS / 1000}s 未收到数据），请稍后重试`);
     }
     throw e;
@@ -276,7 +290,10 @@ export async function sendMessageStream(
   }
 
   const result = collected.final;
-  if (!result) throw new ApiError("AGENT_ERROR", "连接中断，未收到完整回复");
+  if (!result) {
+    reportClientLog("error", "流结束但未收到 final 帧", { frames: frameTrace, elapsedMs: Date.now() - streamStart });
+    throw new ApiError("AGENT_ERROR", "连接中断，未收到完整回复");
+  }
   if (result.agentMessage.card) withCardId(result.agentMessage.card);
   return result;
 }

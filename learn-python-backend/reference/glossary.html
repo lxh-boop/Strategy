@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>术语表 · learn-python-backend</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<main>
+
+<div class="kicker">Reference · Glossary</div>
+<h1>术语表</h1>
+<div class="lesson-meta">所有课程共用，持续生长 · 按"先说类别（规范 / 框架 / 服务器 / 库 / 解释器机制）再说功能"的纪律写</div>
+
+<h2>语言与解释器</h2>
+
+<table>
+  <tr><th>术语</th><th>定义与例子</th></tr>
+  <tr><td><strong>CPython</strong></td><td>Python 官方解释器（C 语言实现）。我们说"Python 怎么怎么实现"时，精确说都是 CPython 的行为；同一种语言还有 PyPy 等其他实现。</td></tr>
+  <tr><td><strong>字节码 / .pyc</strong></td><td>源码编译出的中间指令，由 CPython 虚拟机解释执行。被导入的模块缓存在 <code>__pycache__</code> 的 .pyc 里，只加快加载不加快运行，可被反编译。</td></tr>
+  <tr><td><strong>GIL</strong>（全局解释器锁）</td><td>CPython 里的全局锁：同一时刻只有一个线程执行 Python 字节码；做 I/O 时一定释放。副作用：默认版本的 CPython 里纯 Python 的 CPU 密集计算多线程无法并行。官方已提供无 GIL 的自由线程版本（3.13 实验、3.14 起正式支持，仍非默认）。</td></tr>
+  <tr><td><strong>引用计数 + 循环回收</strong></td><td>CPython 的双层内存机制：对象记录引用数，降为 0 立即释放；互相引用的对象靠分代垃圾回收器清理（<code>gc.collect()</code>）。</td></tr>
+  <tr><td><strong>协程</strong>（coroutine）</td><td>async def 定义的函数。调用它不执行函数体，返回协程对象；必须 await 或交给事件循环才运行。只在 await 处让出控制权。</td></tr>
+  <tr><td><strong>生成器</strong>（generator）</td><td>带 yield 的函数：每次取值执行到下一个 yield 暂停并交出一个值，惰性、省内存、只能遍历一次。协程的思想源头。</td></tr>
+  <tr><td><strong>闭包 / LEGB</strong></td><td>内层函数记住外层函数的变量（记的是变量本身不是值）。名字查找顺序：局部 → 外层函数 → 全局 → 内置（社区缩写 LEGB，官方教程不用这个词）。</td></tr>
+  <tr><td><strong>鸭子类型</strong>（duck typing）</td><td>"只要走起来像鸭子就叫它鸭子"：Python 不检查对象是什么类，只检查它有没有需要的方法（如 <code>__len__</code>、<code>__iter__</code>）。类型检查工具和 <code>typing.Protocol</code> 把这个约定显式化。</td></tr>
+</table>
+
+<h2>并发</h2>
+
+<table>
+  <tr><th>术语</th><th>定义与例子</th></tr>
+  <tr><td><strong>事件循环</strong>（event loop）</td><td>asyncio 的核心：单线程循环，监视 I/O 就绪状态并调度协程执行。程序入口 <code>asyncio.run(main())</code>。对应 Node 的事件循环。</td></tr>
+  <tr><td><strong>自由线程版</strong>（free-threaded）</td><td>去掉了 GIL 的 CPython 构建（python3.13t / 3.14t）：多线程真并行，单线程慢约 5–10%，非默认版本。</td></tr>
+  <tr><td><strong>spawn / fork / forkserver</strong></td><td>多进程的三种启动方式。spawn（Windows/macOS 默认）：全新解释器并重新导入主模块，必须有 <code>if __name__ == '__main__'</code>；fork（复制父进程，多线程下不安全）；forkserver（3.14 起 Linux 等 POSIX 平台默认）。</td></tr>
+  <tr><td><strong>竞态</strong>（race condition）</td><td>结果取决于线程执行顺序的错误。GIL 只保证单条字节码不被打断，不保护"读-改-写"（<code>n += 1</code> 非原子）。</td></tr>
+  <tr><td><strong>Lock / RLock</strong></td><td>互斥锁；RLock 可重入（同一线程可重复获取，需等量释放）。防止竞态、防死锁（固定顺序、带超时）。</td></tr>
+</table>
+
+<h2>Web 与框架</h2>
+
+<table>
+  <tr><th>术语</th><th>定义与例子</th></tr>
+  <tr><td><strong>WSGI</strong>（PEP 3333）</td><td>同步时代的 Web 服务器 ↔ Python 应用接口规范。应用就是一个函数：接收 environ 和 start_response，返回响应体。</td></tr>
+  <tr><td><strong>ASGI</strong></td><td>WSGI 的异步后继规范：服务器与应用之间用异步消息通道通信，支持 WebSocket、HTTP/2，能跑 async 应用。</td></tr>
+  <tr><td><strong>Django</strong></td><td>全家桶 Web 框架：ORM、Admin、认证、迁移、模板。当前 LTS 5.2。</td></tr>
+  <tr><td><strong>Flask</strong></td><td>微框架：核心只有路由和请求上下文，其余按需自己装。WSGI。</td></tr>
+  <tr><td><strong>FastAPI</strong></td><td>基于 Starlette + Pydantic 的 ASGI 框架：类型注解即校验即文档（自动 OpenAPI/Swagger），原生 async。版本仍是 0.x。</td></tr>
+  <tr><td><strong>Pydantic</strong></td><td>基于类型注解的数据校验库；v2 核心校验在 pydantic-core（大部分用 Rust 实现）所以快。FastAPI 用它做参数校验。</td></tr>
+  <tr><td><strong>Starlette</strong></td><td>FastAPI 底层的 ASGI 工具箱（路由、中间件、请求/响应对象）。FastAPI 的性能主要来自它和 uvicorn。</td></tr>
+  <tr><td><strong>uvicorn / gunicorn</strong></td><td>uvicorn：ASGI 服务器（单进程事件循环，也支持 --workers 多进程）。gunicorn：WSGI 服务器兼进程管理器（预 fork 多 worker、崩了重启、超时杀 worker），可用 UvicornWorker 把两者组合。</td></tr>
+  <tr><td><strong>SQLAlchemy</strong></td><td>Python 主流 ORM / 数据库工具包。Session 管理事务与对象状态；engine 自带 QueuePool 连接池（默认 5+10，pool_pre_ping 探活）。</td></tr>
+  <tr><td><strong>N+1 查询</strong></td><td>查 N 条主记录后，访问关联对象又各发一条 SQL（共 1+N 条）。预加载治理：Django select_related（JOIN）/ prefetch_related（IN 批量），SQLAlchemy joinedload / selectinload。</td></tr>
+  <tr><td><strong>中间件</strong>（middleware）</td><td>请求进、响应出的钩子层，Django 文档称洋葱模型：请求按列表顺序进、响应逆序出。</td></tr>
+</table>
+
+<h2>工程化</h2>
+
+<table>
+  <tr><th>术语</th><th>定义与例子</th></tr>
+  <tr><td><strong>venv / pip / uv</strong></td><td>Python 的环境与依赖管理：venv 建虚拟环境隔离依赖；pip 装包（配合 requirements.txt）；uv 是 Rust 写的新一代管理器，自带 uv.lock 锁文件（对应 npm + package-lock.json）。</td></tr>
+  <tr><td><strong>Celery</strong></td><td>分布式任务队列：生产者（delay）→ broker（Redis/RabbitMQ 传消息）→ worker 执行。acks_late 晚确认防丢任务但需幂等；Redis visibility_timeout 默认 1 小时。</td></tr>
+  <tr><td><strong>幂等</strong>（idempotent）</td><td>同一操作执行一次和 N 次效果相同。消息队列 at-least-once 投递下，重复执行不可避免，消费端必须幂等（业务唯一键去重 / upsert）。</td></tr>
+  <tr><td><strong>py-spy</strong></td><td>采样式性能分析器：不用重启进程、不改代码就能看每个线程的调用栈（dump）或热点函数（top）。排障利器。</td></tr>
+  <tr><td><strong>tracemalloc</strong></td><td>标准库内存追踪：两次 take_snapshot 后 compare_to，直接按代码行列出内存增长点，官方推荐的找泄漏方法。</td></tr>
+</table>
+
+<div class="lesson-footer">
+  <a href="../lessons/0001-python-core.html">← Lesson 0001</a>
+  <span>learn-python-backend reference</span>
+</div>
+
+</main>
+</body>
+</html>

@@ -1,0 +1,24 @@
+# Notes
+
+- 教学语言：中文；配置/代码示例贴合 NestJS/Node 服务形态（用户的技术母语）。
+- 用户主动推翻了"部署不作为独立学习目标"的建议（2026-10-31）——尊重决定；但执行顺序仍建议 Redis 0001-0002 先行：Docker 是两轨共享前置，装一次两条轨都用。已写入 MISSION 约束。
+- 与 `../learn-redis/` 共享术语表：跨目录链接 `../learn-redis/reference/glossary.html`；assets（style.css/quiz.js）是 learn-redis 的副本，两个工作区各自演化。
+- 课程蓝图直接对着用户自己项目的《并发治理方案》第八节——目标拓扑（网关 + 双实例 + sticky + Redis）现成，最好的教学素材；每课都回扣它。
+- 2026-10-31 建轨：0001 起初是纯概念课，用户当天反馈"内容太少、要多实例在 Docker 上的部署和管理"——0001 重写为**完整工作谱**（Dockerfile/compose.yaml/nginx.conf 全量按真实项目写好：npm + nest build + dist/main.js + logs//memories/ 挂卷 + @duckdb/node-api 决定 bookworm-slim 不用 alpine）。课程图：0001 完整参考谱 → 0002 实操实验课（装 Docker 后逐段跑通）→ 0003 Redis 进 compose 与状态外置 → 0004 生产化（HTTPS/日志/备份）。
+- 用户明确偏好**内容量足**的课程（0001 薄了会被打回）——后续每课按"参考谱 + 动手验证"双密度写，code-first。
+- 配套 reference：`reference/docker-ops-cheatsheet.html`（docker/compose 管理命令 + compose 字段 + nginx 要点）。
+- 2026-10-31 用户披露先验（LR-0004）：用过 Docker 部署前后端+数据库全栈（单实例），多实例配合零经验。Docker 基础不再教；0001 顶部加了"老手读法"路径框。课程图按新疆界重排：0002 双实例 + sticky 实操观察 → 0003 滚动更新与零停机发布（向后兼容迁移）→ 0004 Redis 进 compose、状态外置 → 0005 生产化（HTTPS/日志聚合/备份）。
+- 2026-10-31 用户问"企业一般怎么分流"——讲了企业级流量漏斗（DNS/CDN → L4 → L7 网关 → API 网关/mesh）+ 算法选择 + 灰度发布维度 + "无状态化是正解、sticky 是过渡态"原则。素材归入 0003（滚动更新含灰度）与 0005（生产化含云 SLB vs nginx 选型）。
+- **2026-10-31 重大校准（LR-0005）**：用户对"一台 nginx"困惑——部署心智模型里只有 Docker，容器外世界（反向代理/流量入口/端口暴露）为零；企业漏斗那轮讲解实际超纲。重排：0002 先讲"流量从哪来"（浏览器直连容器 → 双实例连谁 → nginx 容器作为新角色）再进双实例；企业漏斗/灰度全部推迟到 0005 之后。讲解纪律：新名词必先答"它是什么程序、谁在跑它"。核心锚点句："Docker 是装程序的方式，不是程序的名单。"
+- 2026-10-31 追问"前端也可以多容器吗"——讲了服务名单表（nginx×1 / 前端静态文件装进 nginx×0~1 / server×N / Redis×1 / MySQL 不归管）+ "前端容器=nginx 镜像+COPY dist" 两行 Dockerfile + 第一性规则"几个容器看角色扛不扛得住，不看对称" + 前端扩容的企业答案=CDN。素材直接构成 0002 课的骨架。
+- 2026-10-31 建 `0002-traffic-entry.html`：核心桥梁 = 用户自己的 vite.config.ts（proxy /api → 3000，开发期转发程序）→ 生产由 nginx 接替（一个程序补两个空缺：发静态 + 转 /api）。形态决策：前端并进入口 nginx（单 nginx 形态，100 人正解），分离形态只讲存在理由。动手谱 = 把 0001 的裸 nginx 升级为带前端的镜像（multi-stage vite build → nginx），含 try_files SPA 保险、同源后 CORS 可省的彩蛋。primary source：nginx 官方新手指南（已核实 URL）。
+- 2026-11-02 建 `0003-rolling-release.html`（滚动更新与零停机发布）：核实发现 proxy_next_upstream 默认 `error timeout` **POST 不换台**（非幂等）→ 用户对话是 POST → 讲了"摘流量→排空→重启→请回"优雅舞步（nginx -s reload）。含 expand-migrate-contract 迁移纪律（锚点：用户已有的 ensureFactorUsageTable 幂等迁移）、灰度（手动金丝雀 / weight 权重 / 蓝绿概念）、RELEASE 镜像标签回滚纪律（.env 钉版本防裸 up 回落）、发布前三问。修正了前序课的两个衔接缺口：0002 把 nginx.conf 烤进镜像 → 0003 第 0 步改回挂载（"前端烤进镜像、upstream 配置挂载"分工）；0001 只给 server-a 写了 healthcheck → 0003 第 0 步给 B 补齐。观察手段统一为 nginx `$upstream_addr` 日志（Swagger 页由 express 直接托管，可能不过 Nest 拦截器，后端日志计数不可靠）。速查表同步了 --no-deps/--wait/RELEASE/reload/weight/upstream_addr/proxy_next_upstream。
+- **2026-11-02 二次转向（LR-0006）：面试向重构。** 用户要求"更偏向八股/面试/遇到什么问题怎么解决"，0001–0003 全部重写为面试卡片课（lessons/0001-docker / 0002-nginx / 0003-release-ha，共 58 题，后加 q24 为 59 题：必考+进阶+场景排障），旧实操课迁至 `reference/lab-*.html`（加了归档横幅，链接已修）。事实底座：两个并行子代理对 39 项做了官方源核验（Docker 17 项 / nginx+发布 22 项），修正了 proxy_http_version 1.29.7 起默认 1.1、MySQL 8.0.12 起 INSTANT 为 ADD COLUMN 默认算法、Engine 29+ 默认 containerd image store、healthcheck 不触发 restart policy 等易错点。
+- **项目素材清单（面试"项目故事"用，全部已核实来自代码）**：SSE 流式 + X-Accel-Buffering: no + 15s keepalive 帧（90s 前端看门狗）；JWT 带 token_version 服务端校验（登出即全失效）；GLM 并发闸 + 429 退避重试 10 次 + pendingResumes 挂起恢复；策略保存 INSERT ... ON DUPLICATE KEY UPDATE（幂等 upsert）；ensureFactorUsageTable = CREATE TABLE IF NOT EXISTS（幂等迁移）；取数缓存 LRU 200 + TTL 10min + inflight 去重；enableCors origin:true（同源化后可省）。
+- 面试卡片组件：`assets/qa.js` + `qa.css`（先口述再展开、三档自评 localStorage、答上超 7 天重新待练、只看待练、打印全展开降级）。
+- 诚实红线：项目故事框里的"规划中/没跑过"标注不许删——用户没跑过实操谱，把规划说成已上线会在追问里穿帮。
+- 后续课的面试向素材债：0004（Redis 进阶：穿透/击穿/雪崩/分布式锁/哨兵集群——q12/q11 已埋钩子）、0005（企业分流全景 + HTTPS/日志聚合）。
+- 2026-11-02 追问可写层（LR-0007）：纠正"可写层要同步到真实容器""写操作 = 写代码/写库"两个误解；0001 q02 改写 + 补 2 道追问 + 项目故事，q08 挂载类型修正（官方五种），速查表加 `docker diff`。教训：卡片措辞里"写操作"这类抽象词，对这位学习者必须落到"谁在写、写到哪"。
+- 2026-11-02 追问 OverlayFS / containerd image store（LR-0008）：q02 加分项改为人话版并拆出进阶题 q24（OverlayFS 叠层 + docker → containerd → runc + containerd image store + dockershim）；共享术语表加 7 个词，并修正 healthcheck"重启依据"的错误说法；0001 页头题数修正（原写 20 题实为 23，加 q24 后 24 题）。核实要点：containerd image store 仅**全新安装**的 Engine 29+ 默认启用，升级上来的仍用 overlay2；默认 snapshotter 为 overlayfs；K8s 1.24 移除 dockershim，docker build 的镜像遵循 OCI 照常运行。
+- 2026-11-02 追问"docker stop 为什么卡 10 秒"（LR-0009）：q13 重写（信号 → 先礼后兵 → 两个原因 → 三层解法 → 137 判断 → alpine sleep 对比 --init 的复现实验），q03 去掉"考你有没有踩过"的预设说法改为直接链到 q13，速览第 13 行同步。核实出处：docker-node BestPractices（Node 作为 PID 1 不响应 SIGINT 等信号、npm 会吞信号、推荐 --init）；tini README（没写信号处理也能被 SIGTERM 正确终止）。课件纪律新增：凡说"踩过的坑"，配机制 + 1 分钟复现实验。
+- Redis 轨 0003（坏点地图）与 deploy 0003（双实例实操）互为表里——讲的时候互相引用，避免重复。

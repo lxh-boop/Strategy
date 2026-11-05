@@ -1,0 +1,543 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>0001 · Python 语言核心面试题库</title>
+<link rel="stylesheet" href="../assets/style.css">
+<link rel="stylesheet" href="../assets/qa.css">
+</head>
+<body>
+<main>
+
+<div class="kicker">Lesson 0001 · Python 语言核心</div>
+<h1>Python 语言核心面试题库：对象模型、函数、内存与经典陷阱</h1>
+<div class="lesson-meta">
+  19 题（12 必考 + 5 进阶 + 2 场景） · 每题先口述再展开对照 ·
+  复现代码均在本机 Python 3.12.10 实测 ·
+  <a href="../reference/glossary.html">术语表</a>
+</div>
+
+<div data-qa-toolbar></div>
+
+<div class="callout">
+  <span class="label">版本说明</span>
+  当前最新稳定版是 Python 3.15.2（2026-10-25 发布）。本课的复现代码在本机 3.12.10 上实测，注释里写的输出就是实测结果；不同版本行为不同的地方，卡片里单独标注。
+</div>
+
+<div class="callout">
+  <span class="label">项目故事（迁移讲法）</span>
+  「我主力是 TypeScript/NestJS，很多 Python 概念可以直接对照：参数传递规则和 JS 一样；类型注解在运行时不生效，这点和 TS 一样，所以运行时校验在 Node 里我用 class-validator 和 zod，换到 Python 对应 Pydantic；我在 Node 项目里给进程内缓存设了 LRU 200 条 + 10 分钟 TTL，防止内存缓慢上涨，换到 Python 对应的是 <code>lru_cache</code> 必须设上限、需要过期就用 cachetools。」——<strong>这是迁移讲法：说"我在 Node 项目里这样做，Python 里对应……"，不要说成在 Python 项目里做过。</strong>
+</div>
+
+<h2>必考八股</h2>
+
+<article class="qa" data-qa-id="py1-q01">
+  <header class="qa-head"><span class="qa-tag">必考</span><h3 class="qa-q">Python 是解释型语言吗？一段 Python 代码是怎么跑起来的？</h3></header>
+  <div class="qa-body">
+    <h4>考察点</h4>
+    <p>能分清"Python 语言"和"CPython 解释器"，知道源码先编译成字节码，再由虚拟机执行。</p>
+    <h4>30 秒回答</h4>
+    <p class="say">说"Python 是解释型"不够准确。我们平时用的官方解释器 CPython 分两步：先把 .py 源码编译成字节码（一种交给虚拟机执行的中间指令），再由 CPython 虚拟机逐条解释执行字节码。被导入的模块会把字节码缓存到 <code>__pycache__</code> 目录下的 .pyc 文件里，下次导入时源码没改就跳过编译——这只加快加载，不加快运行。还要分清：Python 是语言规范，CPython 是官方的 C 语言实现，此外还有 PyPy（自带 JIT）等其他实现。和 Node 对比：V8 会把热点代码即时编译成机器码，CPython 主要靠解释执行，所以纯 Python 写的 CPU 密集计算通常比 Node 慢，重计算一般交给 C 扩展（比如 numpy）。</p>
+    <h4>1 分钟复现（3.12 实测）</h4>
+<pre><code>import dis
+def add(a, b):
+    return a + b
+dis.dis(add)
+# 输出（指令名随版本略有变化）：
+#   RESUME / LOAD_FAST (a) / LOAD_FAST (b) / BINARY_OP (+) / RETURN_VALUE</code></pre>
+    <dl>
+      <dt>.pyc 能用来保护源码吗？</dt><dd>不能。.pyc 只是字节码缓存，按"模块名.版本.pyc"命名，可以被反编译，不是加密手段。</dd>
+      <dt>CPython 有 JIT 吗？</dt><dd>3.13 起带了实验性的 JIT 编译器，默认不开启；3.15 做了大幅改进，但仍是实验性。面试知道有就行。</dd>
+    </dl>
+    <h4>常见错误</h4>
+    <p>说"Python 是逐行解释源码的"——实际执行的是字节码；或者把 .pyc 理解成"编译成了机器码"。</p>
+  </div>
+</article>
+
+<article class="qa" data-qa-id="py1-q02">
+  <header class="qa-head"><span class="qa-tag">必考</span><h3 class="qa-q">什么是可变对象和不可变对象？Python 函数传参是传值还是传引用？</h3></header>
+  <div class="qa-body">
+    <h4>考察点</h4>
+    <p>理解 Python 的变量是"名字绑定到对象"，能解释为什么在函数里改参数，有时影响外部、有时不影响。</p>
+    <h4>30 秒回答</h4>
+    <p class="say">不可变对象创建后内容不能改：int、float、str、tuple、bytes、frozenset；可变对象可以原地修改：list、dict、set 和大多数自定义类的实例。Python 传参只有一条规则：函数拿到的是同一个对象的引用（常叫"传对象引用"）。所以在函数里修改可变对象（比如 append），外面看得见；给参数重新赋值，只是让函数里的名字指向了新对象，外面不受影响。这和 JS 传对象的规则完全一样。</p>
+    <h4>1 分钟复现（3.12 实测）</h4>
+<pre><code>def f(lst):
+    lst.append(1)   # 修改对象本身：外面看得见
+    lst = [0]       # 重新赋值：只改了函数里的名字
+x = []
+f(x)
+print(x)   # [1]</code></pre>
+    <dl>
+      <dt>tuple 里放了 list，还算不可变吗？</dt><dd>tuple 本身不可变（不能替换元素），但里面的 list 照样能改。这样的 tuple 不可哈希，不能当 dict 的键：<code>hash(([1],))</code> 会报 <code>unhashable type: 'list'</code>。</dd>
+      <dt>循环里拼接字符串为什么推荐 join？</dt><dd>str 不可变，每次 <code>+</code> 都会创建新字符串；大量拼接用 <code>''.join(列表)</code> 一次完成。</dd>
+    </dl>
+    <h4>常见错误</h4>
+    <p>说"基本类型传值、对象传引用"。Python 里一切皆对象，规则只有一条；看起来像"传值"，只是因为不可变对象没法被原地修改。</p>
+  </div>
+</article>
+
+<article class="qa" data-qa-id="py1-q03">
+  <header class="qa-head"><span class="qa-tag">必考</span><h3 class="qa-q"><code>is</code> 和 <code>==</code> 有什么区别？</h3></header>
+  <div class="qa-body">
+    <h4>考察点</h4>
+    <p>身份比较和值比较；知道小整数缓存是实现细节，不能依赖。</p>
+    <h4>30 秒回答</h4>
+    <p class="say"><code>==</code> 比较值是否相等（调用 <code>__eq__</code>）；<code>is</code> 比较是不是同一个对象（身份相同，id 一样）。日常只在和单例比较时用 is，最常见的是 <code>x is None</code>。CPython 会缓存一段小整数、复用部分字符串，所以对数字或字符串用 is 有时碰巧返回 True——这是实现细节：3.14 及以前的文档写的缓存范围是 -5 到 256，3.15 的文档改成了 -5 到 1024。Python 3.8 起，对字面量用 is 会触发 SyntaxWarning。值比较一律用 ==。</p>
+    <h4>1 分钟复现（3.12 实测）</h4>
+<pre><code>print(int('256') is int('256'))   # True ：在缓存范围内，是同一个对象
+print(int('257') is int('257'))   # False：超出范围，是两个对象
+print(int('257') == int('257'))   # True ：值相等</code></pre>
+    <dl>
+      <dt>为什么用 int('257')，而不直接写 a = 257; b = 257？</dt><dd>同一段代码里相同的字面量常量会被编译器合并成一个对象，直接写反而可能得到 True。is 的结果取决于这么多实现细节，正说明不该用它比较值。</dd>
+      <dt>什么时候必须用 is？</dt><dd>和 None、True、False 这类单例比较，以及自己定义的哨兵对象（sentinel）。</dd>
+    </dl>
+    <h4>常见错误</h4>
+    <p>用 is 判断两个字符串或数字是否相等；或者背"小整数缓存 -5 到 256"却不说这是实现细节、且新版本已经变了。</p>
+  </div>
+</article>
+
+<article class="qa" data-qa-id="py1-q04">
+  <header class="qa-head"><span class="qa-tag">必考</span><h3 class="qa-q">深拷贝和浅拷贝有什么区别？</h3></header>
+  <div class="qa-body">
+    <h4>30 秒回答</h4>
+    <p class="say">赋值 <code>b = a</code> 不是拷贝，只是多了一个名字指向同一个对象。浅拷贝创建一个新的外层对象，里面装的还是原来那些元素的引用；深拷贝递归地把里面的元素也全部复制一份。常见的浅拷贝写法：<code>copy.copy(x)</code>、<code>list.copy()</code>、<code>lst[:]</code>、<code>list(lst)</code>、<code>dict.copy()</code>；深拷贝用 <code>copy.deepcopy(x)</code>。嵌套结构（列表套列表、字典套字典）要互不影响，就得用深拷贝。</p>
+    <h4>1 分钟复现（3.12 实测）</h4>
+<pre><code>import copy
+a = [[1, 2], [3]]
+b = copy.copy(a)        # 浅拷贝
+c = copy.deepcopy(a)    # 深拷贝
+a[0].append(99)
+print(b)   # [[1, 2, 99], [3]] —— 内层列表是共享的
+print(c)   # [[1, 2], [3]]     —— 完全独立</code></pre>
+    <dl>
+      <dt>深拷贝有什么代价？</dt><dd>要递归复制整个结构，慢且占内存；内部用一个备忘字典处理循环引用，避免无限递归；类可以定义 <code>__deepcopy__</code> 控制自己怎么被复制。</dd>
+      <dt>JS 里对应什么？</dt><dd>展开运算符 <code>{...obj}</code> 是浅拷贝，<code>structuredClone</code> 是深拷贝——同一组概念。</dd>
+    </dl>
+    <h4>常见错误</h4>
+    <p>以为 <code>lst[:]</code> 或 <code>dict.copy()</code> 是深拷贝。</p>
+  </div>
+</article>
+
+<article class="qa" data-qa-id="py1-q05">
+  <header class="qa-head"><span class="qa-tag">必考</span><h3 class="qa-q">函数的默认参数为什么不能用可变对象？</h3></header>
+  <div class="qa-body">
+    <h4>考察点</h4>
+    <p>默认值只在函数定义时求值一次——Python 最经典的陷阱之一，从 JS 转过来尤其容易踩。</p>
+    <h4>30 秒回答</h4>
+    <p class="say">默认参数的值只在函数定义时计算一次，然后保存在函数对象上（函数的 <code>__defaults__</code> 属性），之后每次调用用的都是同一个对象。如果默认值是列表、字典这样的可变对象，上一次调用对它的修改会带到下一次。官方教程专门把这条标成"重要警告"。正确写法是用 None 当默认值，在函数体里再创建新对象。</p>
+    <h4>1 分钟复现（3.12 实测）</h4>
+<pre><code>def add(item, bucket=[]):
+    bucket.append(item)
+    return bucket
+
+print(add(1))             # [1]
+print(add(2))             # [1, 2] —— 上一次的 1 还在
+print(add.__defaults__)   # ([1, 2],) —— 默认值就挂在函数对象上
+
+# 正确写法
+def add(item, bucket=None):
+    if bucket is None:
+        bucket = []
+    bucket.append(item)
+    return bucket</code></pre>
+    <dl>
+      <dt>为什么会这样？</dt><dd>def 是一条在定义时执行的语句，默认值表达式也在那一刻求值并保存起来，而不是每次调用重新计算。</dd>
+      <dt>JS 有同样的问题吗？</dt><dd>没有。JS 的默认参数每次调用都会重新求值，所以这是从 Node 转过来最容易踩的坑之一。</dd>
+    </dl>
+    <h4>常见错误</h4>
+    <p>把它当成"偶发 bug"去排查，没想到是默认参数——见场景题「数据串号」。</p>
+  </div>
+</article>
+
+<article class="qa" data-qa-id="py1-q06">
+  <header class="qa-head"><span class="qa-tag">必考</span><h3 class="qa-q">装饰器是什么？怎么实现？<code>functools.wraps</code> 有什么用？</h3></header>
+  <div class="qa-body">
+    <h4>考察点</h4>
+    <p>函数是一等对象 + 闭包；会写带参数的装饰器；知道 wraps 解决什么问题。</p>
+    <h4>30 秒回答</h4>
+    <p class="say">函数在 Python 里是对象，可以当参数传、当返回值。装饰器就是"接收一个函数、返回一个新函数"的函数，写在 def 上面的 <code>@deco</code> 等价于 <code>func = deco(func)</code>，常用于日志、计时、鉴权、缓存、重试。<code>functools.wraps</code> 会把原函数的 <code>__name__</code>、<code>__doc__</code> 等元信息复制到包装函数上，并加一个 <code>__wrapped__</code> 属性指回原函数。不加的话，所有被装饰的函数名字都变成 wrapper，日志、调试、框架按函数名注册路由都会出问题。</p>
+    <h4>1 分钟复现（3.12 实测）</h4>
+<pre><code>import functools
+def plain(fn):
+    def wrapper(*args, **kwargs):
+        return fn(*args, **kwargs)
+    return wrapper
+def kept(fn):
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        return fn(*args, **kwargs)
+    return wrapper
+
+@plain
+def hello(): pass
+@kept
+def world(): pass
+print(hello.__name__, world.__name__)   # wrapper world</code></pre>
+    <h4>带参数的装饰器：多一层</h4>
+<pre><code>def retry(times):                       # 第 1 层：接收参数
+    def deco(fn):                       # 第 2 层：接收函数
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):   # 第 3 层：真正执行
+            for i in range(times):
+                try:
+                    return fn(*args, **kwargs)
+                except Exception:
+                    if i == times - 1:
+                        raise
+        return wrapper
+    return deco
+
+@retry(3)
+def call_glm(): ...</code></pre>
+    <dl>
+      <dt>和 NestJS 的装饰器一样吗？</dt><dd>写法像，机制不同。NestJS 的 <code>@Controller</code>、<code>@Get</code> 主要是给类和方法挂元数据，由框架启动时读取；Python 装饰器在定义时直接执行，并用返回值替换原函数。</dd>
+      <dt>装饰器什么时候执行？</dt><dd>在函数定义时（通常就是模块被导入时）执行，不是在调用时。所以"用装饰器注册路由"在导入模块的那一刻就完成了。</dd>
+    </dl>
+    <h4>加分项</h4>
+    <p>迁移讲法：「我在 Node 项目里给 GLM 调用写过 429 退避重试，最多 10 次；换到 Python，我会写成一个带参数的 <code>@retry</code> 装饰器，或者直接用 tenacity 库。」</p>
+    <h4>常见错误</h4>
+    <p>不加 wraps；带参数的装饰器少写一层。</p>
+  </div>
+</article>
+
+<article class="qa" data-qa-id="py1-q07">
+  <header class="qa-head"><span class="qa-tag">必考</span><h3 class="qa-q">迭代器和生成器是什么？<code>yield</code> 做了什么？</h3></header>
+  <div class="qa-body">
+    <h4>30 秒回答</h4>
+    <p class="say">迭代器是实现了 <code>__iter__</code> 和 <code>__next__</code> 的对象，for 循环就是不停调用 <code>__next__</code>，直到它抛出 StopIteration。生成器是写迭代器的简便方式：函数里出现 yield 就变成生成器函数，调用它不会执行函数体，而是返回一个生成器对象；每次取下一个值时，执行到下一个 yield 就暂停并交出一个值，局部状态保留着。好处是惰性：一次只在内存里放一个值，适合逐行处理大文件、处理流式数据。注意生成器只能遍历一次。</p>
+    <h4>1 分钟复现（3.12 实测）</h4>
+<pre><code>import sys
+print(sys.getsizeof([x for x in range(1_000_000)]))   # 8448728 —— 光列表本体就约 8 MB（还没算元素）
+print(sys.getsizeof((x for x in range(1_000_000))))   # 192     —— 生成器只保存当前状态
+
+g = (x * x for x in range(3))
+print(list(g))   # [0, 1, 4]
+print(list(g))   # []  —— 生成器只能遍历一次</code></pre>
+    <dl>
+      <dt>yield from 是什么？</dt><dd>把另一个可迭代对象（或子生成器）的值逐个转交出去，省掉手写一层 for 循环。</dd>
+      <dt>生成器和 async 协程有什么关系？</dt><dd>思想同源：都能"暂停、交出控制权、之后恢复"。Python 的 async/await 协程正是从生成器一路演化来的，详见并发课。</dd>
+    </dl>
+    <h4>加分项</h4>
+    <p>读大文件用 <code>for line in f</code> 逐行处理（文件对象本身就是迭代器），而不是 <code>f.readlines()</code> 一次读进内存。</p>
+    <h4>常见错误</h4>
+    <p>把同一个生成器遍历两次，第二次拿到空结果，还以为是数据出了问题。</p>
+  </div>
+</article>
+
+<article class="qa" data-qa-id="py1-q08">
+  <header class="qa-head"><span class="qa-tag">必考</span><h3 class="qa-q"><code>with</code> 语句和上下文管理器是什么？</h3></header>
+  <div class="qa-body">
+    <h4>30 秒回答</h4>
+    <p class="say">with 后面的对象叫上下文管理器，要实现 <code>__enter__</code> 和 <code>__exit__</code>：进入 with 块时调用 <code>__enter__</code>（返回值赋给 as 后面的变量），离开时一定调用 <code>__exit__</code>——不管是正常结束还是抛了异常，相当于自动写好的 try/finally。典型用途：文件自动关闭、锁自动释放、数据库事务自动提交或回滚。自己写最省事的办法是 <code>contextlib.contextmanager</code>：生成器函数里 yield 之前是"进入"，之后是"退出"。</p>
+    <h4>1 分钟复现（3.12 实测）</h4>
+<pre><code>import time
+from contextlib import contextmanager
+
+@contextmanager
+def timer(name):
+    start = time.perf_counter()
+    try:
+        yield
+    finally:
+        print(name, round(time.perf_counter() - start, 1), 's')
+
+with timer('查询'):
+    time.sleep(0.2)          # 打印：查询 0.2 s
+
+with timer('出错'):
+    raise ValueError('x')    # 先打印"出错 0.0 s"，异常照常往外抛</code></pre>
+    <dl>
+      <dt>__exit__ 能吞掉异常吗？</dt><dd>能：<code>__exit__</code> 返回 True，异常就不再往外抛。一般不要这么做，除非确实要忽略某类异常（标准库的 <code>contextlib.suppress</code> 就是这么实现的）。</dd>
+      <dt>TypeScript 里对应什么？</dt><dd>相当于 try/finally；TypeScript 5.2 起也有 <code>using</code> 声明做同样的事——知道有就行。</dd>
+    </dl>
+    <h4>常见错误</h4>
+    <p>以为抛异常时 with 块不会清理资源——恰恰相反，异常时也一定会调用 <code>__exit__</code>。</p>
+  </div>
+</article>
+
+<article class="qa" data-qa-id="py1-q09">
+  <header class="qa-head"><span class="qa-tag">必考</span><h3 class="qa-q">讲讲 Python 的作用域和闭包。循环里创建的 lambda 为什么拿到的值都一样？</h3></header>
+  <div class="qa-body">
+    <h4>30 秒回答</h4>
+    <p class="say">名字的查找顺序是：局部 → 外层函数 → 模块全局 → 内置，社区简称 LEGB（官方教程描述了这个顺序，但不用这个缩写）。内层函数引用了外层函数的变量，就形成闭包——它记住的是变量本身，不是当时的值。所以循环里创建的 lambda，调用时才去取循环变量，拿到的都是循环结束时的最后一个值，官方 FAQ 专门讲过这个问题。想在内层函数里给外层变量重新赋值要用 nonlocal，给全局变量赋值用 global；只读不需要声明。</p>
+    <h4>1 分钟复现（3.12 实测）</h4>
+<pre><code>fs = [lambda: i for i in range(3)]
+print([f() for f in fs])   # [2, 2, 2] —— 调用时才去取 i
+fs = [lambda i=i: i for i in range(3)]
+print([f() for f in fs])   # [0, 1, 2] —— 用默认参数在定义时把值"钉住"
+
+count = 0
+def inc():
+    count += 1             # 赋值让 count 成了局部变量
+inc()   # UnboundLocalError: cannot access local variable 'count'
+        #                    where it is not associated with a value</code></pre>
+    <dl>
+      <dt>上面为什么会报 UnboundLocalError？</dt><dd>函数里只要对某个名字赋值，它在整个函数里就是局部变量；<code>count += 1</code> 要先读它，而这时局部的 count 还没赋值。要改外层的变量，就得声明 global 或 nonlocal。</dd>
+      <dt>JS 有类似问题吗？</dt><dd>有：JS 里用 var 声明的循环变量，闭包里同样拿到最后一个值，改用 let 后每轮循环才有新的绑定。Python 没有 let 这样的块级作用域，循环变量属于整个函数。</dd>
+    </dl>
+    <h4>常见错误</h4>
+    <p>以为闭包记住的是"创建那一刻的值"。</p>
+  </div>
+</article>
+
+<article class="qa" data-qa-id="py1-q10">
+  <header class="qa-head"><span class="qa-tag">必考</span><h3 class="qa-q">Python 是怎么管理内存的？垃圾回收机制是什么？</h3></header>
+  <div class="qa-body">
+    <h4>考察点</h4>
+    <p>引用计数 + 循环垃圾回收的双层机制；版本细节是加分项也是陷阱。</p>
+    <h4>30 秒回答</h4>
+    <p class="say">CPython 以引用计数为主：每个对象记着有多少引用指向它，降到 0 立刻释放，所以大多数对象用完马上就回收了。引用计数解决不了循环引用——a 引用 b、b 引用 a，两边的计数永远不为 0——所以还有一个循环垃圾回收器，按分代的思路工作：新对象在年轻代，熬过回收的升到更老的代，越老的代扫得越少，依据是"大多数对象很快就死"。可以用 gc 模块查看和调整，<code>gc.collect()</code> 手动触发。</p>
+    <h4>1 分钟复现（3.12 实测）</h4>
+<pre><code>import gc
+class Node: pass
+a, b = Node(), Node()
+a.other, b.other = b, a   # 互相引用，形成循环
+del a, b                  # 名字删了，但两个对象的引用计数都还是 1
+print(gc.collect())       # 2 —— 循环回收器找到并回收了这两个对象</code></pre>
+    <dl>
+      <dt>带 <code>__del__</code> 的循环引用能被回收吗？</dt><dd>能。Python 3.4 起（PEP 442）就可以回收；"带 <code>__del__</code> 的循环回收不了"是老答案。</dd>
+      <dt>对象释放了，为什么进程占的内存没降？</dt><dd>释放的内存可能留在 Python 自己的内存池里供后续复用，不一定马上还给操作系统，所以进程内存曲线不一定下降。</dd>
+      <dt>gc.disable() 之后还会回收吗？</dt><dd>会。它只关掉循环回收器，引用计数照常工作；只是循环引用的垃圾不再被清理。</dd>
+    </dl>
+    <h4>加分项</h4>
+    <p>版本细节：3.14.0 曾把循环回收改成只有两代（年轻代、老年代）的增量回收，3.14.5 又改回了 3.13 的分代回收，当前版本（3.15）的文档描述的是三代。能讲出这段反复，说明你跟进过版本变化。</p>
+    <h4>常见错误</h4>
+    <p>只说"引用计数"或只说"分代回收"——两层机制缺一不可。</p>
+  </div>
+</article>
+
+<article class="qa" data-qa-id="py1-q11">
+  <header class="qa-head"><span class="qa-tag">必考</span><h3 class="qa-q">list、dict、set 的底层结构是什么？常见操作的时间复杂度？</h3></header>
+  <div class="qa-body">
+    <h4>30 秒回答</h4>
+    <p class="say">list 是动态数组：末尾 append 均摊 O(1)（扩容时个别操作是 O(n)），在下标 k 处 insert 或 pop 是 O(n−k)，最坏在开头，所以别用 <code>pop(0)</code> 当队列；<code>x in list</code> 要逐个比较，O(n)。dict 和 set 是哈希表：用键的哈希值直接算出位置，查找、插入、删除平均 O(1)，哈希冲突严重时最坏 O(n)。dict 从 3.7 起，保持插入顺序是语言规范的正式保证。dict 的键和 set 的元素必须可哈希。</p>
+    <h4>1 分钟复现（3.12 实测）</h4>
+<pre><code>import timeit
+lst = list(range(100_000)); st = set(lst)
+print(timeit.timeit(lambda: 99_999 in lst, number=1000))   # 1.0067   秒
+print(timeit.timeit(lambda: 99_999 in st, number=1000))    # 0.000038 秒（约 2.6 万倍）</code></pre>
+    <dl>
+      <dt>什么样的对象能当 dict 的键？</dt><dd>可哈希的对象：不可变的内置类型都可以；自定义类默认按身份可哈希。注意：类里重写了 <code>__eq__</code> 却不写 <code>__hash__</code>，<code>__hash__</code> 会被自动设成 None，实例就不可哈希了（放进 set 会报 <code>unhashable type</code>）。</dd>
+      <dt>collections 里常用什么？</dt><dd><code>deque</code>（两端增删 O(1)，代替 <code>list.pop(0)</code> 做队列）、<code>defaultdict</code>、<code>Counter</code>、<code>OrderedDict</code>（有 <code>move_to_end</code>，可以手写 LRU）。</dd>
+    </dl>
+    <h4>常见错误</h4>
+    <p>在大列表里用 in 做去重或查找；把 <code>list.pop(0)</code> 当队列用。</p>
+  </div>
+</article>
+
+<article class="qa" data-qa-id="py1-q12">
+  <header class="qa-head"><span class="qa-tag">必考</span><h3 class="qa-q"><code>*args</code> 和 <code>**kwargs</code> 是什么？参数列表里的 <code>/</code> 和 <code>*</code> 是什么意思？</h3></header>
+  <div class="qa-body">
+    <h4>30 秒回答</h4>
+    <p class="say"><code>*args</code> 把多余的位置参数收集成一个元组，<code>**kwargs</code> 把多余的关键字参数收集成一个字典；调用时反过来，<code>f(*lst, **d)</code> 把列表和字典拆开传入。参数列表里单独的 <code>/</code> 表示它前面的参数只能按位置传（3.8 起），单独的 <code>*</code> 表示它后面的参数只能按关键字传——常用来强制调用方写清参数名。</p>
+    <h4>1 分钟复现（3.12 实测）</h4>
+<pre><code>def log(msg, *args, **kwargs):
+    print(msg, args, kwargs)
+log('hi', 1, 2, user='A')   # hi (1, 2) {'user': 'A'}
+
+def query(table, /, *, limit=10):
+    return table, limit
+query('book', limit=5)      # ('book', 5)
+query(table='book')         # TypeError: query() got some positional-only
+                            #   arguments passed as keyword arguments: 'table'
+query('book', 5)            # TypeError: query() takes 1 positional argument
+                            #   but 2 were given</code></pre>
+    <dl>
+      <dt>装饰器里为什么总写 <code>(*args, **kwargs)</code>？</dt><dd>为了把任意参数原样转发给被包装的函数，不管它是什么签名。</dd>
+    </dl>
+    <h4>常见错误</h4>
+    <p>以为 args 是列表——它是元组。</p>
+  </div>
+</article>
+
+<h2>进阶追问</h2>
+
+<article class="qa" data-qa-id="py1-q13">
+  <header class="qa-head"><span class="qa-tag adv">进阶</span><h3 class="qa-q">实例方法、类方法、静态方法有什么区别？<code>@property</code> 有什么用？</h3></header>
+  <div class="qa-body">
+    <h4>30 秒回答</h4>
+    <p class="say">实例方法第一个参数是 self，能访问实例数据；类方法用 <code>@classmethod</code>，第一个参数是 cls，能访问类本身，最常见的用法是"备用构造函数"（比如 <code>from_dict</code>）；静态方法用 <code>@staticmethod</code>，什么都不自动传入，只是放在类里的普通函数。<code>@property</code> 把方法伪装成属性：读取时像属性一样写 <code>obj.balance</code>，背后可以做计算或校验——对应 TS 里的 getter/setter。</p>
+<pre><code>class Account:
+    def __init__(self, balance=0):
+        self._balance = balance
+
+    @classmethod
+    def from_dict(cls, d):              # 备用构造函数
+        return cls(d['balance'])
+
+    @staticmethod
+    def is_valid(v):                    # 普通工具函数
+        return v &gt;= 0
+
+    @property
+    def balance(self):
+        return self._balance
+
+    @balance.setter
+    def balance(self, v):
+        if not self.is_valid(v):
+            raise ValueError('余额不能为负')
+        self._balance = v</code></pre>
+  </div>
+</article>
+
+<article class="qa" data-qa-id="py1-q14">
+  <header class="qa-head"><span class="qa-tag adv">进阶</span><h3 class="qa-q"><code>__new__</code> 和 <code>__init__</code> 有什么区别？怎么实现单例？</h3></header>
+  <div class="qa-body">
+    <h4>30 秒回答</h4>
+    <p class="say"><code>__new__</code> 负责创建并返回实例（它被特殊处理成静态方法，第一个参数是类）；<code>__init__</code> 负责初始化已经创建好的实例，必须返回 None，返回别的值会报 TypeError。一般只写 <code>__init__</code>；需要控制"创建哪个对象"时才写 <code>__new__</code>，比如单例，或者继承 int、str、tuple 这类不可变类型时在创建阶段就定好值。</p>
+    <h4>1 分钟复现（3.12 实测）</h4>
+<pre><code>class Config:
+    _instance = None
+    def __new__(cls, *args, **kwargs):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+    def __init__(self):
+        print('__init__ 被调用')
+
+print(Config() is Config())
+# __init__ 被调用
+# __init__ 被调用   —— 每次 Config() 都会再跑一次 __init__
+# True</code></pre>
+    <dl>
+      <dt>这个单例有什么坑？</dt><dd>两个：每次调用都会重新执行 <code>__init__</code>，初始化逻辑要防重复；多线程下"判断是否为空"和"创建"之间可能被切换，要加锁。</dd>
+      <dt>最 Pythonic 的单例是什么？</dt><dd>模块本身：模块只会被导入执行一次，在模块里创建一个实例，别处直接 import 它就行。</dd>
+    </dl>
+  </div>
+</article>
+
+<article class="qa" data-qa-id="py1-q15">
+  <header class="qa-head"><span class="qa-tag adv">进阶</span><h3 class="qa-q">多继承时方法的查找顺序（MRO）是怎么定的？<code>super()</code> 调用的是父类吗？</h3></header>
+  <div class="qa-body">
+    <h4>30 秒回答</h4>
+    <p class="say">Python 用 C3 线性化算法给每个类算出一条方法解析顺序（MRO），保存在 <code>类名.__mro__</code> 里，找方法时就沿着这条顺序找。关键点：<code>super()</code> 不是"调用父类"，而是"调用 MRO 里排在当前类后面的那个类"。在菱形继承里，B 的 super() 会去到 C，而不是 A——这样每个类的方法只被调用一次。</p>
+    <h4>1 分钟复现（3.12 实测）</h4>
+<pre><code>class A:
+    def hi(self): print('A', end=' ')
+class B(A):
+    def hi(self): print('B', end=' '); super().hi()
+class C(A):
+    def hi(self): print('C', end=' '); super().hi()
+class D(B, C):
+    def hi(self): print('D', end=' '); super().hi()
+
+D().hi()                                  # D B C A
+print([k.__name__ for k in D.__mro__])    # ['D', 'B', 'C', 'A', 'object']</code></pre>
+  </div>
+</article>
+
+<article class="qa" data-qa-id="py1-q16">
+  <header class="qa-head"><span class="qa-tag adv">进阶</span><h3 class="qa-q">类型注解在运行时起作用吗？和 TypeScript 的类型有什么异同？</h3></header>
+  <div class="qa-body">
+    <h4>30 秒回答</h4>
+    <p class="say">不起作用：官方文档明确说 Python 运行时不会强制检查函数和变量的类型注解，检查靠 mypy、pyright 这类静态工具。这一点和 TS 一样——TS 的类型编译后也会被擦除。不同点在于，Python 的注解会作为数据保留在运行时（函数的 <code>__annotations__</code> 里），框架可以读出来用：FastAPI 和 Pydantic 正是读注解来做参数校验和依赖注入的。</p>
+    <h4>1 分钟复现（3.12 实测）</h4>
+<pre><code>def add(a: int, b: int) -&gt; int:
+    return a + b
+print(add('1', '2'))          # '12' —— 注解不拦截错误类型
+print(add.__annotations__)    # {'a': &lt;class 'int'&gt;, 'b': &lt;class 'int'&gt;, 'return': &lt;class 'int'&gt;}</code></pre>
+    <h4>加分项</h4>
+    <p>项目对照：你的 NestJS 项目 <code>main.ts</code> 第一行就是 <code>import 'reflect-metadata'</code>——因为 TS 运行时拿不到类型，NestJS 要靠编译器额外生成的元数据做依赖注入和校验；Python 的注解天然留在运行时，所以 FastAPI 直接读函数签名就够了。这个对比很能体现你两门语言都懂。</p>
+  </div>
+</article>
+
+<article class="qa" data-qa-id="py1-q17">
+  <header class="qa-head"><span class="qa-tag adv">进阶</span><h3 class="qa-q">元类和描述符是什么？（知道有就行）</h3></header>
+  <div class="qa-body">
+    <h4>30 秒回答</h4>
+    <p class="say">类本身也是对象，创建类的"类"叫元类，默认是 type；自定义元类可以在类被创建时动手脚（自动注册、改写属性），Django 的 Model 就是靠元类把字段声明变成数据库映射的。描述符是实现了 <code>__get__</code> / <code>__set__</code> 的对象，放在类属性上时会接管这个属性的访问——property、classmethod、staticmethod 底层都是描述符。日常业务代码几乎用不到，面试能说出"元类控制类的创建，描述符控制属性的访问"就够了。</p>
+    <dl>
+      <dt>不用元类，怎么实现"子类自动注册"？</dt><dd>用 <code>__init_subclass__</code>（3.6 起）：父类里定义它，每个子类创建时都会自动调用，比元类简单得多。</dd>
+    </dl>
+  </div>
+</article>
+
+<h2>场景排障题</h2>
+
+<article class="qa" data-qa-id="py1-q18">
+  <header class="qa-head"><span class="qa-tag scene">场景</span><h3 class="qa-q">线上 Python 服务的内存持续上涨，最后被 OOM 杀掉。怎么定位？</h3></header>
+  <div class="qa-body">
+    <h4>答题框架</h4>
+    <p>先确认是泄漏还是正常水位 → 定位增长来自哪行代码、哪类对象 → 找根因 → 修复 + 预防。</p>
+    <h4>30 秒回答</h4>
+    <p class="say">第一步看内存曲线：只涨不落才是泄漏，涨到一定高度后稳定是正常水位。第二步用标准库 tracemalloc 定位：间隔一段时间拍两次快照，用 <code>compare_to</code> 对比，直接按代码行列出增长最多的位置（官方文档就把它作为找内存泄漏的方法）。第三步按常见根因排查：模块级的 dict 或 list 当缓存只进不出；<code>lru_cache(maxsize=None)</code> 或 <code>@functools.cache</code> 没有上限，缓存的参数一直被引用着；全局注册的回调或监听器没注销；请求对象被挂到了全局变量上。修复后，所有缓存都要有容量上限和过期策略，并做长时间运行的压测看曲线。</p>
+    <h4>1 分钟复现（3.12 实测）</h4>
+<pre><code>import tracemalloc
+tracemalloc.start()
+cache = {}
+s1 = tracemalloc.take_snapshot()
+for i in range(100_000):
+    cache[i] = str(i) * 10       # 模拟只进不出的缓存
+s2 = tracemalloc.take_snapshot()
+print(s2.compare_to(s1, 'lineno')[0])
+# leak.py:6: size=16.6 MiB (+16.6 MiB), count=199744 (+199744) —— 直接指到第 6 行</code></pre>
+    <dl>
+      <dt>tracemalloc 有什么局限？</dt><dd>它只追踪通过 Python 分配器申请的内存，C 扩展直接调用 malloc 的部分看不到；而且开启后有额外开销，线上一般临时开启，或者在预发环境复现。</dd>
+    </dl>
+    <h4>项目故事（迁移讲法）</h4>
+    <p>「我在 Node 项目里给进程内的取数缓存设了 LRU 200 条 + 10 分钟 TTL，就是为了防这种缓慢上涨；换到 Python，<code>lru_cache</code> 一定要给 maxsize，需要过期就用 cachetools 的 TTLCache。」</p>
+  </div>
+</article>
+
+<article class="qa" data-qa-id="py1-q19">
+  <header class="qa-head"><span class="qa-tag scene">场景</span><h3 class="qa-q">用户反馈：A 用户的数据偶尔出现在 B 用户的结果里，或者函数结果被上一次调用"污染"。怎么排查？</h3></header>
+  <div class="qa-body">
+    <h4>答题框架</h4>
+    <p>"串号"的本质几乎都是：本该每次独立的数据，被放进了一个被共享的可变对象里。排查就是找共享的可变状态。</p>
+    <h4>30 秒回答</h4>
+    <p class="say">按出现频率排查四个地方：一是可变默认参数（<code>def f(x, cache=[])</code>，多次调用共享同一个列表）；二是把列表、字典写成了类属性，所有实例共享一份；三是模块级的全局变量——Web 服务进程是长驻的，模块级变量对所有请求都是共享的，多线程 worker 下还会互相覆盖；四是闭包延迟绑定。定位方法是写一个最小复现：连续调用两次，看第二次是否带着第一次的数据。修复：默认参数用 None 哨兵；实例数据在 <code>__init__</code> 里创建；请求级数据放请求上下文（标准库 <code>contextvars</code>，或框架提供的请求对象），绝不放全局变量。</p>
+    <h4>1 分钟复现（3.12 实测）</h4>
+<pre><code>class User:
+    tags = []                # 类属性：所有实例共享同一个列表
+
+u1, u2 = User(), User()
+u1.tags.append('vip')
+print(u2.tags)               # ['vip'] —— u2 什么都没做，也"变成了 vip"
+
+# 修复：在 __init__ 里给每个实例创建自己的列表
+class User:
+    def __init__(self):
+        self.tags = []</code></pre>
+    <h4>加分项</h4>
+    <p>这条规律跨语言：Node 里模块级变量同样在所有请求之间共享。能说出"长驻进程里，任何模块级可变状态都是全局共享的"，比只背默认参数陷阱更有说服力。</p>
+  </div>
+</article>
+
+<h2>本课速览</h2>
+
+<table class="qa-map">
+  <tr><th>题</th><th>一句话锚点</th></tr>
+  <tr><td>01</td><td>CPython 先编译成字节码（缓存为 .pyc），再由虚拟机解释执行；语言 ≠ 解释器</td></tr>
+  <tr><td>02</td><td>传对象引用：改可变对象外部可见，重新赋值不影响外部——和 JS 一样</td></tr>
+  <tr><td>03</td><td>== 比值、is 比身份；小整数缓存是实现细节（3.14 前 -5~256，3.15 文档为 -5~1024）</td></tr>
+  <tr><td>04</td><td>浅拷贝只复制外层，深拷贝递归复制；lst[:] 和 dict.copy() 都是浅拷贝</td></tr>
+  <tr><td>05</td><td>默认参数定义时求值一次、挂在 __defaults__ 上；可变默认值用 None 哨兵</td></tr>
+  <tr><td>06</td><td>@deco 等价 func = deco(func)；wraps 保住 __name__ 等并加 __wrapped__；带参数多一层</td></tr>
+  <tr><td>07</td><td>yield 暂停并交出值，惰性、省内存（列表 8 MB vs 生成器 192 字节）；只能遍历一次</td></tr>
+  <tr><td>08</td><td>with = 自动的 try/finally；异常时也一定调用 __exit__；contextmanager 最省事</td></tr>
+  <tr><td>09</td><td>LEGB 查找；闭包记变量不记值（lambda 全是 2）；改外层变量要 nonlocal/global</td></tr>
+  <tr><td>10</td><td>引用计数为主 + 分代循环回收；3.14.0 试过两代增量回收，3.14.5 改回</td></tr>
+  <tr><td>11</td><td>list 动态数组（in 是 O(n)）；dict/set 哈希表（平均 O(1)）；dict 3.7 起保序</td></tr>
+  <tr><td>12</td><td>*args 元组、**kwargs 字典；/ 前仅位置、* 后仅关键字</td></tr>
+  <tr><td>13</td><td>self / cls / 无；classmethod 做备用构造；property = getter/setter</td></tr>
+  <tr><td>14</td><td>__new__ 创建、__init__ 初始化；__new__ 单例每次仍会跑 __init__；模块即单例</td></tr>
+  <tr><td>15</td><td>C3 算出 MRO；super() 找 MRO 里的下一个类，不一定是父类（D B C A）</td></tr>
+  <tr><td>16</td><td>注解运行时不检查（同 TS），但保留在 __annotations__，FastAPI/Pydantic 靠它</td></tr>
+  <tr><td>17</td><td>元类控制类的创建，描述符控制属性访问；子类注册用 __init_subclass__</td></tr>
+  <tr><td>18</td><td>内存泄漏：看曲线 → tracemalloc 两次快照对比定位到行 → 查无上限缓存/全局容器</td></tr>
+  <tr><td>19</td><td>数据串号 = 共享的可变状态：默认参数、类属性、模块级变量、闭包；请求数据用 contextvars</td></tr>
+</table>
+
+<div class="lesson-footer">
+  <span>Lesson 0001 / Python 语言核心</span>
+  <a href="0002-concurrency.html">下一课：并发与异步 →</a>
+  <a href="../reference/glossary.html">术语表 →</a>
+</div>
+
+</main>
+<script src="../assets/qa.js"></script>
+</body>
+</html>

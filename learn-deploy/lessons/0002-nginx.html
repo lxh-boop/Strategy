@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>0002 · Nginx 面试题库：反向代理、负载均衡与排障</title>
+<link rel="stylesheet" href="../assets/style.css">
+<link rel="stylesheet" href="../assets/qa.css">
+</head>
+<body>
+<main>
+
+<div class="kicker">Lesson 0002 · Nginx / 负载均衡八股</div>
+<h1>Nginx 面试题库：反向代理、负载均衡与排障</h1>
+<div class="lesson-meta">
+  18 题（10 必考 + 4 进阶 + 4 场景） · 每题先口述再展开对照 ·
+  <a href="../reference/lab-0002-nginx.html">实操谱</a> ·
+  <a href="../../learn-redis/reference/glossary.html">术语表</a>
+</div>
+
+<div data-qa-toolbar></div>
+
+<div class="callout">
+  <span class="label">项目故事（本课）</span>
+  「我给一个 NestJS 因子回测平台做多实例方案：入口 nginx 一个容器干三件事——发 React 构建产物、把 /api 按策略分给两个后端实例、给 SSE 流式对话关缓冲。后端对话是长请求（单次 GLM 调用可能数分钟 + 限流退避 60 秒窗口），所以转发策略上我选 ip_hash 保会话粘性 + proxy_read_timeout 放宽到 300s。」——细节都来自 0002/0003 实操谱，跑过再说"我做过多实例"。
+</div>
+
+<h2>必考八股</h2>
+
+<article class="qa" data-qa-id="l2-q01">
+  <header class="qa-head"><span class="qa-tag">必考</span><h3 class="qa-q">Nginx 是什么？为什么它能扛高并发？</h3></header>
+  <div class="qa-body">
+    <h4>考察点</h4>
+    <p>Nginx 定位 + 事件驱动模型——"为什么快"几乎必考。</p>
+    <h4>30 秒回答</h4>
+    <p class="say">Nginx 是高性能的 HTTP 服务器和反向代理服务器，常用作静态资源服务、负载均衡器和 API 网关。它能扛高并发靠的是事件驱动 + 异步非阻塞 I/O：不是"一个连接一个线程/进程"（Apache 传统模式），而是 master + 固定数量 worker 进程，每个 worker 用 epoll 这类多路复用器单线程跑事件循环管理成千上万的连接——连接只是注册在 epoll 上的文件描述符，有事件才处理，没有就让出 CPU。所以内存开销与活跃连接数近似无关，C10K 起步毫无压力。</p>
+    <dl>
+      <dt>worker 进程数怎么配？</dt><dd><code>worker_processes auto</code>，自动探测 CPU 核数——worker 是纯 CPU 消耗型进程，数量 = 核数最佳，多了反而增加上下文切换。</dd>
+      <dt>Node.js 不也是事件驱动吗？和 Nginx 差别？</dt><dd>模型同源（都是事件循环 + 非阻塞 I/O），差别是 Nginx 是多进程（每核一个 worker，吃满多核）且专做 I/O 转发；Node 单进程单事件循环，重 CPU 会阻塞循环——所以生产上常见"Nginx 在前做静态和代理 + Node 在后做业务"的组合，我的项目就是。</dd>
+    </dl>
+    <h4>加分项</h4>
+    <p>对比 Apache：进程/线程模型 vs 事件模型；或者点一句"反向代理模式下 Nginx 到上游的连接同样是事件驱动管理的"。连接处理方法出自官方 events 文档（Linux 2.6+ 用 epoll）。</p>
+    <h4>常见错误</h4>
+    <p>只说"epoll"两个字——要能展开"多 worker + 事件循环 + 连接即 fd"这句话，才算真懂。</p>
+  </div>
+</article>
+
+<article class="qa" data-qa-id="l2-q02">
+  <header class="qa-head"><span class="qa-tag">必考</span><h3 class="qa-q">正向代理和反向代理的区别？</h3></header>
+  <div class="qa-body">
+    <h4>考察点</h4>
+    <p>概念题中的概念题，用"站在谁那边"一句话说清。</p>
+    <h4>30 秒回答</h4>
+    <p class="say">站在客户端这边的代理是正向代理：客户端明确知道目标是谁，代理替客户端出去访问，服务端不知道真实客户端是谁——典型如公司出口代理、科学上网。站在服务端这边的是反向代理：客户端只认识代理的地址，以为它就是服务端，代理把请求转给后面的真实服务器——服务端集群对客户端透明。生产里的"nginx 挂在服务集群前面"就是反向代理；我项目里浏览器只连 nginx:8080，不知道也不需要知道后面有几个实例。</p>
+    <dl>
+      <dt>反向代理带来什么好处？</dt><dd>负载均衡、SSL 卸载（TLS 在代理终结）、缓存、安全屏蔽（后端不直接暴露）、统一入口做限流/鉴权。</dd>
+      <dt>正向代理的使用场景？</dt><dd>内网统一出网审计、突破访问限制、匿名化；运维上还有"正向代理做抓包调试"。</dd>
+    </dl>
+    <h4>常见错误</h4>
+    <p>绕来绕去说不清"谁对谁隐藏"：正向代理对服务端隐藏客户端，反向代理对客户端隐藏服务端。</p>
+  </div>
+</article>
+
+<article class="qa" data-qa-id="l2-q03">
+  <header class="qa-head"><span class="qa-tag">必考</span><h3 class="qa-q">location 的匹配规则是什么？=、^~、~、~* 都什么含义？</h3></header>
+  <div class="qa-body">
+    <h4>考察点</h4>
+    <p>配置语法细节中的高频题，顺序错一个字都是线上事故。</p>
+    <h4>30 秒回答</h4>
+    <p class="say">匹配优先级从高到低：① <code>=</code> 精确匹配，命中立即终止搜索（最快，给 / 和健康检查用）；② 前缀匹配（无符号 / ^~），nginx 记住<strong>最长</strong>匹配的前缀，但如果它带 <code>^~</code> 就直接用、不再看正则；③ 正则匹配 <code>~</code>（区分大小写）/ <code>~*</code>（不区分），<strong>按配置文件出现顺序</strong>取第一个命中的；④ 正则全不中，就用第②步记住的最长前缀。一句话：精确 &gt; ^~ 前缀 &gt; 正则（按顺序）&gt; 普通最长前缀。</p>
+    <dl>
+      <dt>location / {} 和 location = / {} 区别？</dt><dd><code>= /</code> 只匹配首页这一个路径；<code>/</code> 是前缀，匹配所有路径（所有路径都以 / 开头）。静态站通常 <code>= /</code> 给首页、其他走通用块。</dd>
+      <dt>生产事故案例？</dt><dd>想让 /api/ 优先于某条正则却没加 ^~，结果被一条正则截胡——所以"前缀 location 想压过正则必须写 ^~"。</dd>
+    </dl>
+    <h4>加分项</h4>
+    <p>能现场默写这个优先级序，比背八股强——面试官常给一段配置让你说出实际命中的是哪个 location。</p>
+  </div>
+</article>
+
+<article class="qa" data-qa-id="l2-q04">
+  <header class="qa-head"><span class="qa-tag">必考</span><h3 class="qa-q">Nginx 有哪些负载均衡策略？各自适用什么场景？</h3></header>
+  <div class="qa-body">
+    <h4>考察点</h4>
+    <p>策略清单 + "长请求该用什么"这种场景化选择（我项目就是现成例子）。</p>
+    <h4>30 秒回答</h4>
+    <p class="say">内置六种：① 轮询（默认，不加任何指令，可加 weight 加权）；② least_conn，把请求给当前活跃连接数最少的——适合请求耗时差异大的长请求场景；③ ip_hash，按客户端 IP 哈希固定到同一台——最朴素的会话保持（IPv4 取前三段做键）；④ hash key [consistent]，按任意键哈希，加 consistent 是 ketama 一致性哈希，增删节点只迁移少量会话——生产做会话粘性的首选；⑤ random [two]，随机，two 模式先随机选两台再按指定方法择优；⑥ 商业版还有更多。选择逻辑：无状态服务轮询/least_conn 就够；有会话粘性需求用 hash/consistent，ip_hash 是弱化版（NAT 后整公司挤一台）。</p>
+    <dl>
+      <dt>你的项目选什么？为什么？</dt><dd>长请求（分钟级 GLM 调用）+ 会话状态：粘性是刚需（挂起状态在实例内存里），所以我用 ip_hash 起步、生产方案是 hash $cookie consistent；耗时抖动大也是 least_conn 的适用特征，但粘性优先。真要走"无状态化 + 轮询"得先把状态外置 Redis——我有这条演进路线。</dd>
+      <dt>weight 适合什么？</dt><dd>机器配置不均：8 核机 weight=2、4 核机 weight=1，按能力分流。</dd>
+    </dl>
+    <h4>常见错误</h4>
+    <p>只会列名字说不出场景；或者不知道默认策略就是轮询（配置里什么都不写就是它）。</p>
+  </div>
+</article>
+
+<article class="qa" data-qa-id="l2-q05">
+  <header class="qa-head"><span class="qa-tag">必考</span><h3 class="qa-q">什么是会话保持（sticky session）？有哪些实现方式？</h3></header>
+  <div class="qa-body">
+    <h4>考察点</h4>
+    <p>粘性会话的动机（有状态）+ 实现层次 + 和"无状态化"的正确关系。</p>
+    <h4>30 秒回答</h4>
+    <p class="say">会话保持 = 让同一用户的请求固定落到同一实例，解决"状态存在实例内存里，换一台就丢"的问题。实现三层：① IP 哈希（ip_hash）：零改动但粗粒度，NAT 后多个用户共享出口 IP 会被挤到一台；② Cookie 哈希/注入（hash $cookie_xxx 或 sticky cookie，后者是商业版）：按登录会话粘，粒度细；③ 集中存储（Redis 存 session）：彻底消灭粘性需求——任何实例都能接任何请求，轮询就是最优策略。正确的架构观：粘性是过渡态止痛药，无状态化才是根治；我项目就是先 ip_hash 兜住（挂起状态在内存），再按计划把检查点/挂起映射外置 Redis，最后拆掉粘性。</p>
+    <dl>
+      <dt>粘性会话有什么副作用？</dt><dd>负载不均（热点用户压死一台）、故障转移丢状态（那台挂了状态跟着没）、扩缩容重哈希。所以企业实践里 sticky 被视为架构没做完的补丁。</dd>
+      <dt>面试官问"登录态怎么保持"怎么答？</dt><dd>先分清两层：认证凭据（JWT 自包含，无状态，随便漂移）和业务会话状态（购物车/流程上下文 → Redis）。我的项目 token 里带版本号、服务端校验 token_version——认证无状态化 + 服务端可强制登出，这就是一个真实设计点。</dd>
+    </dl>
+    <h4>加分项</h4>
+    <p>一句话总结："能 JWT 无状态认证 + Redis 存业务会话的服务，才配用轮询。"面试官会眼前一亮。</p>
+  </div>
+</article>
+
+<article class="qa" data-qa-id="l2-q06">
+  <header class="qa-head"><span class="qa-tag">必考</span><h3 class="qa-q">proxy_pass 带 URI 和不带 URI 有什么区别？</h3></header>
+  <div class="qa-body">
+    <h4>考察点</h4>
+    <p>配置细节但极高频——写错路径转发是新手第一坑。</p>
+    <h4>30 秒回答</h4>
+    <p class="say">规则一句话：<strong>带 URI 就替换，不带就透传</strong>。proxy_pass 以 / 结尾（如 <code>http://backend/</code>）算"带 URI"：location 匹配到的那段路径会被这个 URI 替换——location /api/ + proxy_pass http://backend/ 时，/api/users 转发成 /users（剥前缀）；不带（<code>http://backend</code>）则原始路径原样传——/api/users 还是 /api/users。我项目后端路由本来就带 /api 前缀（NestJS 全部 Controller 挂在 api/ 下），所以用不带 URI 的写法透传，一字不动。</p>
+    <dl>
+      <dt>什么时候用剥前缀？</dt><dd>后端路由不带 /api 前缀时。也常见用 rewrite 实现同等效果。坑点：带 URI 的 proxy_pass 里不能再用变量，且 location 里若有 rewrite 规则交互复杂——出问题先查这俩。</dd>
+    </dl>
+    <h4>常见错误</h4>
+    <p>背反了规则；或项目后端路由带 /api 还随手写了 <code>proxy_pass http://backend/</code>，上线 404 到怀疑人生。</p>
+  </div>
+</article>
+
+<article class="qa" data-qa-id="l2-q07">
+  <header class="qa-head"><span class="qa-tag">必考</span><h3 class="qa-q">Nginx 常见超时参数有哪些？502/504 网关错误分别是怎么产生的？</h3></header>
+  <div class="qa-body">
+    <h4>考察点</h4>
+    <p>超时族谱 + 5xx 错误定位——直接接入场景题，几乎是前后端面试共同的爱。</p>
+    <h4>30 秒回答</h4>
+    <p class="say">三段超时：proxy_connect_timeout（默认 60s，与上游建立连接的超时）、proxy_send_timeout（默认 60s，向后端发请求的间隔超时）、proxy_read_timeout（默认 60s，<strong>两次读之间的间隔</strong>超时——不是总时长，后端只要持续有字节吐出就不会触发）。错误码语义：502 Bad Gateway = nginx 连不上上游或上游给了非法响应（后端挂了/端口错了）；504 Gateway Timeout = nginx 等上游响应超时（后端活着但太慢）。我项目里长对话请求特意把 read_timeout 放到 300s——默认 60s 会掐断"GLM 限流退避 + 长回答"的请求。</p>
+    <dl>
+      <dt>502 和后端进程崩溃的关联？</dt><dd>后端进程退出 → 连接被拒/重置 → nginx 立刻 502。所以"突然一片 502"第一反应：<code>docker ps</code> 看容器活着没 + 后端日志看 OOM/panic——这个联动在场景题里直接用。</dd>
+      <dt>调大超时就万事大吉？</dt><dd>不。超时是兜底不是解法：read_timeout 放太大，后端真死时要占着连接干等，连接池被拖垮。正确姿势是后端"活着就吐心跳字节"（SSE keepalive）+ 合理超时兜底，两者配合。</dd>
+    </dl>
+    <h4>项目故事</h4>
+    <p>我的对话服务在 GLM 限流时会退避重试（最长 60 多秒窗口），期间后端每 15 秒经 SSE 推 keepalive 帧重置 nginx 和前端两边的看门狗——"上游活着但慢"就是靠心跳字节表达的，不是靠调大超时硬扛。</p>
+  </div>
+</article>
+
+<article class="qa" data-qa-id="l2-q08">
+  <header class="qa-head"><span class="qa-tag">必考</span><h3 class="qa-q">怎么用 Nginx 做限流？limit_req 的参数怎么理解？</h3></header>
+  <div class="qa-body">
+    <h4>考察点</h4>
+    <p>limit_req/limit_conn 机制 + 漏桶——网关层限流是后端面试的常客。</p>
+    <h4>30 秒回答</h4>
+    <p class="say">两组模块：limit_req 限请求速率（漏桶算法），limit_conn 限并发连接数。limit_req_zone 定义桶（按什么键、多大内存、什么速率，如 <code>$binary_remote_addr zone=one:10m rate=10r/s</code>），limit_req 应用它。关键参数：burst 允许桶外排队的突发量；nodelay 表示 burst 配额内的请求立刻放行不排队（不加则请求被延迟到符合速率才放行，客户端表现为请求变慢）；超过 burst 直接拒绝，默认返回 503（可用 limit_req_status 改成业界更合适的 429）。</p>
+    <dl>
+      <dt>为什么键用 $binary_remote_addr 不用 $remote_addr？</dt><dd>每个 IP 的状态要占桶内存，二进制 IPv4 占 4 字节、字符串占 7-15 字节——10MB 的 zone 能存的状态数差三倍，省内存的惯用写法。</dd>
+      <dt>漏桶和令牌桶的区别？</dt><dd>漏桶：恒定速率放行，削平突发（nginx limit_req 的模型）；令牌桶：恒速发令牌，攒下的令牌允许突发（Guava RateLimiter 那类）。面试能说出"漏桶削峰、令牌桶允许攒着的突发"即可。</dd>
+      <dt>多实例部署时限流放 nginx 还是应用里？</dt><dd>网关层限流是全局的（所有实例共享 nginx 的桶），应用层限流是单实例的——两者互补：网关挡总量，应用内保护下游资源（我项目里 GLM 并发闸就是应用层的，治"自己人挤自己人"）。</dd>
+    </dl>
+    <h4>常见错误</h4>
+    <p>说不出 nodelay 的语义（它是"burst 内不延迟"，不是"不限突发"）；或不知道默认拒绝码是 503。</p>
+  </div>
+</article>
+
+<article class="qa" data-qa-id="l2-q09">
+  <header class="qa-head"><span class="qa-tag">必考</span><h3 class="qa-q">Nginx 怎么处理跨域（CORS）？和后端自己处理 CORS 什么关系？</h3></header>
+  <div class="qa-body">
+    <h4>考察点</h4>
+    <p>CORS 原理 + 网关同源化方案——前后端分离部署绕不开。</p>
+    <h4>30 秒回答</h4>
+    <p class="say">CORS 是浏览器行为：跨源 XHR/fetch 被浏览器拦截，除非响应带 Access-Control-Allow-* 头。处理有两条路：① 在 nginx（或应用层）给跨域响应加这些头，还要正确应答 OPTIONS 预检（preflight，非简单请求先发 OPTIONS）；② 架构上消灭跨域——前后端挂在同一个域下（nginx 同一 server 里 location / 发前端、location /api 转后端），浏览器根本不触发 CORS。我项目选②：开发期用 Vite proxy 同源化，生产用 nginx 同源化，后端的 enableCors 只是本地联调保底。同源化的隐藏红利：不需要管 credentials 的跨域 cookie 策略，CSRF 面也小很多。</p>
+    <dl>
+      <dt>简单请求和预检请求的区别？</dt><dd>简单请求（GET/POST + 常见 Content-Type）直接发，浏览器检查响应头放行；非简单（带自定义头、PUT/DELETE、application/json 之外的 JSON 等）先发 OPTIONS 预检问服务器"允不允许"。application/json 反而会触发预检，这是常被考的细节。</dd>
+    </dl>
+    <h4>常见错误</h4>
+    <p>在 nginx 加了 Allow-Origin 却没处理 OPTIONS（预检全 405），或者对 credentials 模式写 * （带 cookie 时规范禁止通配）。</p>
+  </div>
+</article>
+
+<article class="qa" data-qa-id="l2-q10">
+  <header class="qa-head"><span class="qa-tag">必考</span><h3 class="qa-q">nginx -s reload 是怎么做到不中断服务的？改错配置会怎样？</h3></header>
+  <div class="qa-body">
+    <h4>考察点</h4>
+    <p>master-worker 模型的应用 + 配置变更安全网——热加载是 Nginx 的招牌能力。</p>
+    <h4>30 秒回答</h4>
+    <p class="say">master 进程收到 reload 信号后：重新读配置并做语法检查 → 语法 OK 就起新 worker 用新配置接客，旧 worker 处理完手头连接后退场（有超时机制）→ 语法错则报错并<strong>继续用旧配置跑</strong>，服务不受影响。所以"改配置 → nginx -t 校验 → reload"是零中断变更。我项目里发布时的"摘流量→排空→重启→加回"全靠 reload 实现——摘掉一台只是改一行配置再 reload。</p>
+    <dl>
+      <dt>旧 worker 会永远等吗？</dt><dd>不会，有等待超时（默认 worker_shutdown_timeout 可调）；长连接场景要注意排空时长，必要时提前通知客户端重连。</dd>
+      <dt>reload 和 restart 区别？</dt><dd>reload 只重读配置（进程不换血）；restart 整个进程重启（连接全断）。容器里我们通常 exec 进容器执行 reload，而不是重启容器。</dd>
+    </dl>
+    <h4>常见错误</h4>
+    <p>以为改错配置 reload 会把服务搞挂——恰恰相反，安全网正是 reload 的卖点。</p>
+  </div>
+</article>
+
+<h2>进阶追问</h2>
+
+<article class="qa" data-qa-id="l2-q11">
+  <header class="qa-head"><span class="qa-tag adv">进阶</span><h3 class="qa-q">Nginx 怎么代理 WebSocket / SSE 这类长连接？要改哪些配置？</h3></header>
+  <div class="qa-body">
+    <h4>30 秒回答</h4>
+    <p class="say">两类长连接两套配置。WebSocket：① <code>proxy_http_version 1.1</code>（长连接和 Upgrade 头要求 HTTP/1.1，旧版 nginx 默认 1.0）；② <code>proxy_set_header Upgrade $http_upgrade; proxy_set_header Connection "upgrade";</code>（转发协议升级头）；③ 拉长 read_timeout（空闲长连接会被默认 60s 掐断）。SSE（我项目的对话流）：关键是 <code>proxy_buffering off</code>——默认开缓冲会把事件攒在 nginx 内存里憋着不吐，客户端收不到实时事件；我的后端还配合响应头 X-Accel-Buffering: no 让 nginx 逐响应关缓冲（这个头优先于配置）；再加 read_timeout 放宽 + 心跳帧防空闲超时。</p>
+    <dl>
+      <dt>怎么验证缓冲关没关掉？</dt><dd>curl 直连后端看事件一格格出；再 curl 过 nginx 对比——nginx 这边也实时出就是关对了。线上表现为"对话进度一动一动出"而不是"憋半天一次性全出"。</dd>
+    </dl>
+    <h4>项目故事</h4>
+    <p>我的后端在 SSE 响应里显式写 X-Accel-Buffering: no（Express 层），这是"后端声明式关缓冲"——比指望运维记得配 nginx 更稳，两层保险。</p>
+  </div>
+</article>
+
+<article class="qa" data-qa-id="l2-q12">
+  <header class="qa-head"><span class="qa-tag adv">进阶</span><h3 class="qa-q">一致性哈希是什么？比普通哈希好在哪？</h3></header>
+  <div class="qa-body">
+    <h4>30 秒回答</h4>
+    <p class="say">普通哈希（hash(key) % N）在节点数变化时几乎所有键都要重新映射——扩容一台，全量会话"换台"。一致性哈希把节点和键都放到一个哈希环上，键顺时针找最近的节点；增删节点只影响环上相邻段的数据，其余不动（nginx 的 hash ... consistent 用 ketama 实现）。进一步用虚拟节点让分布更均匀。应用：负载均衡的会话粘性、分布式缓存的节点扩缩、分库分表路由。我项目的演进答案里就有它：状态外置前的过渡方案是 hash $cookie consistent——比 ip_hash 均匀，扩容时用户也基本不被"换台"。</p>
+    <dl>
+      <dt>数据倾斜怎么解决？</dt><dd>虚拟节点：每个物理节点在环上放几百个虚拟副本，哈希分布趋于均匀，节点下线时它的负载也均匀散给多台而不是全压给环上邻居。</dd>
+    </dl>
+  </div>
+</article>
+
+<article class="qa" data-qa-id="l2-q13">
+  <header class="qa-head"><span class="qa-tag adv">进阶</span><h3 class="qa-q">上游某台实例挂了，Nginx 怎么处理？max_fails/fail_timeout 是什么意思？主动健康检查和被动有什么区别？</h3></header>
+  <div class="qa-body">
+    <h4>30 秒回答</h4>
+    <p class="say">开源版 Nginx 是<strong>被动</strong>健康检查：正常请求转发失败（连接拒绝/超时）才计一次失败，<code>max_fails</code>（默认 1）次失败后，在 <code>fail_timeout</code>（默认 10s）时间内不再给它派请求——相当于自动摘除一段时间后重试恢复。<strong>主动</strong>健康检查（定时探测 /health，挂了提前摘）是 NGINX Plus 商业版功能，开源版要第三方模块。配套的 proxy_next_upstream 决定"失败后是否换下一台重试"（默认 error timeout，注意 POST 非幂等默认不重试）。我项目的分工：容器崩溃自愈交给 restart policy + healthcheck，nginx 被动摘除负责别把请求发给刚死的实例。</p>
+    <dl>
+      <dt>fail_timeout 双重含义？</dt><dd>它既是"统计失败的窗口"又是"判定不可用后的惩罚时长"——默认 10s 内 1 次失败就摘 10s。可以调大 max_fails 防抖（避免网络抖动一次就摘）。</dd>
+      <dt>被动检查的盲区？</dt><dd>探不出"活着但很慢/卡死"——连接都成功只是响应巨慢，不会被摘。要发现这种得靠主动探测或上游自己的健康检查（容器的 healthcheck）。</dd>
+    </dl>
+  </div>
+</article>
+
+<article class="qa" data-qa-id="l2-q14">
+  <header class="qa-head"><span class="qa-tag adv">进阶</span><h3 class="qa-q">LVS、HAProxy、Keepalived 是什么？和 Nginx 什么关系？</h3></header>
+  <div class="qa-body">
+    <h4>30 秒回答</h4>
+    <p class="say">按流量层级分：LVS（Linux Virtual Server）是四层（TCP/UDP）负载均衡，工作在内核 IPVS 模块，性能最强、不解应用协议；Nginx/HAProxy 既能四层也能七层，HAProxy 四层性能和稳定性以工业级著称，Nginx 七层能力（路由改写、缓存、静态服务）最全；Keepalived 不是负载均衡器，是高可用组件——用 VRRP 协议做多台负载均衡器之间的虚拟 IP 漂移，主挂了 VIP 秒切到备，解决"负载均衡器自己是单点"的问题。典型企业栈：Keepalived(VIP) → LVS(四层) → Nginx(七层) → 应用集群；云上则常被云 SLB/ALB 一站式替代。我项目规模一层 Nginx 就够，但这套分层是面试的标准答法。</p>
+    <dl>
+      <dt>四层和七层负载均衡的区别？</dt><dd>四层只看 IP+端口转发 TCP 包，快、协议无关；七层解析 HTTP，能按 URL/Cookie/Header 做路由、改写、限流——功能强但更贵。选择原则：海量和纯转发用四层，要业务感知用七层。</dd>
+    </dl>
+  </div>
+</article>
+
+<h2>场景排障题</h2>
+
+<article class="qa" data-qa-id="l2-q15">
+  <header class="qa-head"><span class="qa-tag scene">场景</span><h3 class="qa-q">线上突然大量 502。给出你的排查路径。</h3></header>
+  <div class="qa-body">
+    <h4>答题框架</h4>
+    <p>502 = nginx 连不上上游或上游响应非法。先分锅（网络/上游），再定位（哪台、为什么），最后修复 + 预防。说出"先看错误日志的哪一行"是实战派标志。</p>
+    <h4>30 秒回答</h4>
+    <p class="say">第一步看 nginx error log——它会明说原因（connect() failed = 上游端口没人听 / connection refused = 进程挂了 / timeout = 半死不活）。第二看上游状态：docker ps 看容器是否 Restarting/Exited，后端日志找 OOM、panic、端口占用。第三看发布记录——"刚发过版"和"突然 502"高度相关（发布炸了就回滚，镜像标签秒级）。修复层次：应急（摘掉坏实例，流量自动走健康台；或回滚版本）→ 根因（修进程崩溃原因）→ 预防（healthcheck 提前暴露 + 发布前自动化探活 + nginx 摘除参数调优）。</p>
+    <dl>
+      <dt>如果日志显示 connection refused 但容器是 Up？</dt><dd>进程活着但没在监听期望端口：应用起一半卡死、绑定地址错、或端口配置不一致——进容器 ss -tlnp 验证。</dd>
+      <dt>怎么预防？</dt><dd>发布流程强制探活（healthcheck/--wait）、双实例保底（单实例挂不至于全站 502）、错误率告警。</dd>
+    </dl>
+  </div>
+</article>
+
+<article class="qa" data-qa-id="l2-q16">
+  <header class="qa-head"><span class="qa-tag scene">场景</span><h3 class="qa-q">用户反馈"同样的操作时灵时不灵"，有时成功有时报错。怀疑什么？</h3></header>
+  <div class="qa-body">
+    <h4>答题框架</h4>
+    <p>"时灵时不灵"是多实例环境的标志性症状——先想负载均衡把同一用户的请求拆到了不同实例。这是能区分"背题的人"和"做多实例的人"的题。</p>
+    <h4>30 秒回答</h4>
+    <p class="say">第一怀疑对象：多实例 + 会话粘性缺失。用户请求被轮询拆到不同实例，而状态（登录态之外的业务状态：多步流程、验证码、文件上传中间态）存在实例内存里——打到存了状态的那台就灵，打到别的台就不灵，重试又好了。验证：看 nginx 日志的 upstream_addr，把报错请求和成功请求的落点对比；临时切 ip_hash 观察。修复分短期（ip_hash/hash cookie 粘住）和长期（状态外置 Redis，根治后拆掉粘性）。我项目里对应的真状态就是确认门挂起和限流恢复映射——都登记在实例内存里，这正是我规划中"先 sticky 后外置"的原因。</p>
+    <dl>
+      <dt>排除粘性后还查什么？</dt><dd>负载不均（某实例 OOM 边缘、慢查询打满连接池）、DNS 解析漂移、CDN 缓存不一致、客户端网络。"时灵时不灵"的通用排查思路是找"请求之间的差异点"——落点、时间、参数。</dd>
+    </dl>
+    <h4>加分项</h4>
+    <p>补一句：这类 bug 报上来往往被冤枉成"用户操作问题"——多实例后要有意识地把它当一类系统性问题看待，日志里必须能还原"这个请求落在了哪台"。</p>
+  </div>
+</article>
+
+<article class="qa" data-qa-id="l2-q17">
+  <header class="qa-head"><span class="qa-tag scene">场景</span><h3 class="qa-q">上传文件接口经 Nginx 代理后报 413，但直连后端没问题。为什么？怎么修？</h3></header>
+  <div class="qa-body">
+    <h4>答题框架</h4>
+    <p>现象差异指向代理层多出来的限制——413 是 client_max_body_size 的标准产物。</p>
+    <h4>30 秒回答</h4>
+    <p class="say">Nginx 对请求体大小有默认上限 client_max_body_size 1m，超限直接回 413，请求根本不会到后端——所以"直连好使、过 nginx 就炸"。修复：http/server/location 层设 client_max_body_size 到业务需要的大小（如 50m）。连带检查点：大文件上传还要注意 proxy_read_timeout（慢上传/慢处理）、以及后端框架自己的 body 大小限制（Express 的 express.json() 默认 100kb——JSON 接口大 payload 是另一个对应的坑）。生产上大文件更推荐对象存储直传（预签名 URL），让 nginx 和应用服务器都别当文件的搬运工。</p>
+    <dl>
+      <dt>413 会触发重试到下一台吗？</dt><dd>会带来一个隐蔽坑：nginx 默认重试错误里 http_4xx 不算失败尝试（413 从不重试），这个行为反而是对的——413 重试毫无意义。</dd>
+    </dl>
+  </div>
+</article>
+
+<article class="qa" data-qa-id="l2-q18">
+  <header class="qa-head"><span class="qa-tag scene">场景</span><h3 class="qa-q">Nginx 背后的服务拿到的客户端 IP 全是内网网关 IP，怎么解决？拿真实 IP 有什么风险？</h3></header>
+  <div class="qa-body">
+    <h4>答题框架</h4>
+    <p>代理链与请求头传递的经典题：X-Forwarded-For / X-Real-IP + trust proxy + 伪造风险。</p>
+    <h4>30 秒回答</h4>
+    <p class="say">原因：不配置时 nginx 转发的是自己的连接，后端 socket 的对端 IP 永远是 nginx。解决两层：nginx 侧转发真实 IP 头（proxy_set_header X-Real-IP $remote_addr; proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;）；应用侧开启 Express 的 trust proxy，让 req.ip 从 X-Forwarded-For 解析而不是 socket。风险是 XFF 是普通请求头可以伪造：多级代理时要配 set_real_ip_from 定义"哪些上游可信"，只信可信代理追加的部分—— Express 文档明确警告末端代理必须覆盖这些头。使用场景注意：风控、限流键如果用可伪造的 IP，限流能被绕过——我项目的限流键设计会提到这一点。</p>
+    <dl>
+      <dt>X-Forwarded-For 的格式和追加规则？</dt><dd>逗号分隔的链：客户端, 代理1, 代理2……每经过一层代理往左追加一层。最左边是"声称的"原始客户端，越右越可信——所以解析要从右往左数（trust proxy 干的事），跳过可信代理数到最后一个不可信地址。</dd>
+    </dl>
+  </div>
+</article>
+
+<h2>本课速览</h2>
+
+<table class="qa-map">
+  <tr><th>题</th><th>一句话锚点</th></tr>
+  <tr><td>01</td><td>master + 每 CPU 核一个 worker，事件循环 + epoll，连接是 fd 不是线程</td></tr>
+  <tr><td>02</td><td>正向代理藏客户端，反向代理藏服务端</td></tr>
+  <tr><td>03</td><td>= 精确 &gt; ^~ 前缀 &gt; 正则按序 &gt; 最长前缀</td></tr>
+  <tr><td>04</td><td>轮询默认；least_conn 长请求；hash consistent 生产粘性；ip_hash 粗粒度</td></tr>
+  <tr><td>05</td><td>粘性是止痛药，无状态化是根治——能上 Redis 的服务才配轮询</td></tr>
+  <tr><td>06</td><td>proxy_pass 带 URI 替换、不带透传；后端带 /api 前缀就用不带 URI 的</td></tr>
+  <tr><td>07</td><td>502 = 连不上/非法响应，504 = 等响应超时；read_timeout 是间隔不是总长</td></tr>
+  <tr><td>08</td><td>limit_req 漏桶 + burst/nodelay；键用 binary IP 省内存；默认拒绝码 503</td></tr>
+  <tr><td>09</td><td>CORS 两条路：加响应头+应答预检，或同源化消灭它；json 会触发预检</td></tr>
+  <tr><td>10</td><td>reload = 语法检查 + 新 worker 接客旧 worker 排空；配置错了旧配置继续跑</td></tr>
+  <tr><td>11</td><td>WebSocket：http_version 1.1 + Upgrade 头；SSE：proxy_buffering off + 心跳</td></tr>
+  <tr><td>12</td><td>一致性哈希：增删节点只迁移相邻段；虚拟节点防倾斜；ketama</td></tr>
+  <tr><td>13</td><td>开源版被动检查：max_fails(1)/fail_timeout(10s)；主动探测是商业版</td></tr>
+  <tr><td>14</td><td>LVS 四层内核态、HAProxy 稳、Nginx 七层全；Keepalived 用 VRRP 管 VIP 漂移</td></tr>
+  <tr><td>15</td><td>502 排查从 error log 一行开始：refused 看进程、timeout 看慢因、先问发没发版</td></tr>
+  <tr><td>16</td><td>时灵时不灵 = 多实例粘性缺失的标志性症状；日志还原请求落点是前提</td></tr>
+  <tr><td>17</td><td>413 = client_max_body_size 默认 1m；大文件走对象存储直传</td></tr>
+  <tr><td>18</td><td>X-Real-IP/XFF 转发 + trust proxy 从右往左数可信代理；限流键别用可伪造 IP</td></tr>
+</table>
+
+<div class="lesson-footer">
+  <a href="0001-docker.html">← 上一课：Docker</a>
+  <a href="../reference/lab-0002-nginx.html">实操谱 →</a>
+  <a href="0003-release-ha.html">下一课：发布与高可用 →</a>
+</div>
+
+</main>
+<script src="../assets/qa.js"></script>
+</body>
+</html>

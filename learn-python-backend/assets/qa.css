@@ -1,0 +1,175 @@
+/* ============================================================
+   learn-deploy 面试卡片样式 — 配合 assets/qa.js，叠在 style.css 之上
+   答案只在 <html> 带 .qa-ready（脚本跑完）时才收起；
+   脚本没跑起来时答案全部可见，降级为阅读模式
+   ============================================================ */
+
+/* ----- 工具条（吸顶） ----- */
+
+.qa-toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 0.8rem;
+  margin: 1.6rem 0;
+  padding: 0.6rem 0.9rem;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  font-size: 0.85rem;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+}
+
+.qa-stats { color: var(--ink-soft); margin-right: auto; }
+
+.qa-toolbar button,
+.qa-actions button {
+  font: inherit;
+  font-size: 0.8rem;
+  padding: 0.3rem 0.85rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.qa-toolbar button:hover,
+.qa-actions button:hover { border-color: var(--accent); }
+
+.qa-toolbar button[aria-pressed="true"] {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+/* ----- 卡片 ----- */
+
+.qa {
+  margin: 1.1rem 0;
+  padding: 1rem 1.2rem;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  scroll-margin-top: 4.5rem; /* 锚点跳转时不被吸顶工具条挡住 */
+}
+
+.qa-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.4rem 0.6rem;
+}
+
+.qa-tag {
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  font-size: 0.68rem;
+  letter-spacing: 0.06em;
+  padding: 0.12rem 0.45rem;
+  border-radius: 4px;
+  white-space: nowrap;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.qa-tag.adv { background: #eceff8; color: #34457a; }
+.qa-tag.scene { background: var(--ok-bg); color: var(--ok); }
+
+.qa-q {
+  flex: 1 1 20rem;
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+  line-height: 1.55;
+}
+
+.qa-meta {
+  margin-left: auto;
+  font-size: 0.75rem;
+  color: var(--ink-soft);
+  white-space: nowrap;
+}
+
+.qa-meta[data-r="ok"] { color: var(--ok); }
+.qa-meta[data-r="half"] { color: #8a6d1f; }
+.qa-meta[data-r="miss"] { color: var(--bad); }
+
+.qa-body {
+  margin-top: 0.8rem;
+  padding-top: 0.5rem;
+  border-top: 1px dashed var(--line);
+}
+
+.qa-ready .qa:not(.open) .qa-body { display: none; }
+
+.qa-body h4 {
+  margin: 1.1rem 0 0.35rem;
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  font-size: 0.7rem;
+  letter-spacing: 0.12em;
+  color: var(--accent);
+}
+
+.qa-body h4:first-child { margin-top: 0.3rem; }
+
+.qa-body p,
+.qa-body li,
+.qa-body dd { font-size: 0.93rem; }
+
+/* 30 秒口述稿 */
+.qa-body .say {
+  padding: 0.65rem 0.9rem;
+  background: var(--code-bg);
+  border-radius: 6px;
+  line-height: 1.75;
+}
+
+/* 追问：dt 自动带「追问 ·」前缀 */
+.qa-body dl { margin: 0.4rem 0; }
+.qa-body dt { margin-top: 0.7rem; font-size: 0.93rem; font-weight: 600; }
+.qa-body dt::before { content: "追问 · "; color: var(--accent); font-weight: 400; }
+.qa-body dd { margin: 0.25rem 0 0 1rem; }
+
+.qa-body table { font-size: 0.85rem; }
+
+/* ----- 操作区 ----- */
+
+.qa-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.8rem;
+}
+
+.qa-rate { display: none; gap: 0.4rem; }
+.qa.open .qa-rate { display: inline-flex; }
+
+.qa-rate button.on[data-r="ok"] { background: var(--ok-bg); border-color: var(--ok); color: var(--ok); }
+.qa-rate button.on[data-r="half"] { background: #faf3df; border-color: #8a6d1f; color: #8a6d1f; }
+.qa-rate button.on[data-r="miss"] { background: var(--bad-bg); border-color: var(--bad); color: var(--bad); }
+
+.qa.qa-filtered { display: none; }
+
+/* ----- 考点地图 ----- */
+
+.qa-map td:first-child {
+  white-space: nowrap;
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  font-size: 0.8rem;
+  color: var(--ink-soft);
+}
+
+/* ----- 打印：全部展开、去掉交互 ----- */
+
+@media print {
+  .qa-ready .qa:not(.open) .qa-body { display: block; }
+  .qa.qa-filtered { display: block; }
+  .qa-toolbar,
+  .qa-actions,
+  .qa-meta { display: none; }
+  .qa { break-inside: avoid; }
+}

@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>速查 · Docker / Compose 部署与管理命令</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<main>
+
+<div class="kicker">Reference · 多实例部署</div>
+<h1>Docker / Compose 部署与管理速查</h1>
+<div class="lesson-meta">
+  配套面试课：<a href="../lessons/0001-docker.html">0001 Docker</a> ·
+  <a href="../lessons/0002-nginx.html">0002 Nginx</a> ·
+  <a href="../lessons/0003-release-ha.html">0003 发布与高可用</a> ·
+  实操谱：<a href="lab-0001-docker.html">Docker</a> / <a href="lab-0002-nginx.html">Nginx</a> / <a href="lab-0003-release.html">发布</a> ·
+  正式语义：<a href="https://docs.docker.com/reference/cli/docker/">Docker CLI 参考</a> ·
+  <a href="https://docs.docker.com/compose/">Compose 文档</a>
+</div>
+
+<h2>单容器生命周期</h2>
+
+<table>
+  <tr><th>命令</th><th>作用</th><th>要点</th></tr>
+  <tr><td><code>docker build -t 名:tag .</code></td><td>按 Dockerfile 构建镜像</td><td>缓存失效从第一个变化层开始；彻底重建加 <code>--no-cache</code></td></tr>
+  <tr><td><code>docker run -d --name x -p 宿:容 镜像</code></td><td>创建并启动容器</td><td><code>-d</code> 后台；<code>-e K=V</code> 注入环境变量；<code>-v 卷:/路径</code> 挂持久卷</td></tr>
+  <tr><td><code>docker ps</code> / <code>-a</code></td><td>列出运行中 / 全部容器</td><td>STATUS 列 Up / Exited (码) 一眼定生死</td></tr>
+  <tr><td><code>docker stop / start / restart x</code></td><td>停止 / 启动 / 重启</td><td>stop 是优雅停机（先 SIGTERM，超时才 SIGKILL）</td></tr>
+  <tr><td><code>docker rm x</code></td><td>删除容器</td><td>容器可随删，卷不受影响；运行中的要先 stop（或加 <code>-f</code>）</td></tr>
+  <tr><td><code>docker logs -f --tail 100 x</code></td><td>看 / 跟日志</td><td>收 stdout/stderr——应用要往 stdout 打日志</td></tr>
+  <tr><td><code>docker stats</code></td><td>CPU / 内存实时表</td><td>内存只升不降 = 排查泄漏的起点</td></tr>
+  <tr><td><code>docker exec -it x sh</code></td><td>进容器 shell</td><td>排查文件、连通性（容器内 <code>ping</code>/<code>curl</code> 另一容器名）</td></tr>
+  <tr><td><code>docker inspect x</code></td><td>全量元数据 JSON</td><td>IP、挂载、env、健康状态都在这里</td></tr>
+  <tr><td><code>docker diff x</code></td><td>列出容器可写层里的改动</td><td>A 新增 / C 修改 / D 删除；排查"谁往容器里写了东西"，确认哪些数据会随容器删除而丢</td></tr>
+  <tr><td><code>docker images</code> / <code>rmi</code></td><td>镜像列表 / 删除</td><td>悬空镜像（&lt;none&gt;）批量清：<code>docker image prune</code></td></tr>
+  <tr><td><code>docker system prune</code></td><td>清理闲置资源</td><td>加 <code>-a --volumes</code> 更彻底——先想清楚再敲</td></tr>
+</table>
+
+<h2>重启策略（restart）</h2>
+
+<table>
+  <tr><th>策略</th><th>崩溃后</th><th>宿主机重启后</th><th>手动 stop 后</th></tr>
+  <tr><td><code>no</code>（默认）</td><td>不重启</td><td>不启动</td><td>—</td></tr>
+  <tr><td><code>on-failure</code></td><td>非零退出才重启</td><td>不启动</td><td>保持停</td></tr>
+  <tr><td><code>unless-stopped</code></td><td>重启</td><td>启动</td><td><strong>保持停</strong>（唯一例外）</td></tr>
+  <tr><td><code>always</code></td><td>重启</td><td>启动</td><td>宿主重启后仍会拉起</td></tr>
+</table>
+
+<p>长驻服务基本盘：<code>unless-stopped</code>；配合 healthcheck（状态标记）形成两层保障。</p>
+
+<h2>Compose 全家桶</h2>
+
+<table>
+  <tr><th>命令</th><th>作用</th><th>要点</th></tr>
+  <tr><td><code>docker compose up -d</code></td><td>按蓝图拉起整套</td><td>镜像缺了自动 build（写了 build: 的服务）；配置变了自动重配</td></tr>
+  <tr><td><code>docker compose ps</code></td><td>全家状态</td><td>含 health 状态</td></tr>
+  <tr><td><code>docker compose logs -f [服务]</code></td><td>聚合日志</td><td>不指定服务 = 全部混流，带服务名前缀</td></tr>
+  <tr><td><code>docker compose restart server-a</code></td><td>只动一个角色</td><td>其他角色不受影响</td></tr>
+  <tr><td><code>up -d --no-deps --wait server-a</code></td><td>滚动更新单台（0003）</td><td><code>--no-deps</code> 不牵连其他服务；<code>--wait</code> 阻塞到健康检查通过才返回</td></tr>
+  <tr><td><code>RELEASE=v2 docker compose …</code></td><td>按版本标签发布/回滚（0003）</td><td>配合 <code>image: factor-server:${RELEASE:-0.1}</code>；当前版本钉进 compose 目录的 <code>.env</code>，防裸 up 回落默认值</td></tr>
+  <tr><td><code>docker compose exec server-a sh</code></td><td>进某服务容器</td><td>同 docker exec</td></tr>
+  <tr><td><code>docker compose down</code></td><td>停并删容器与网络</td><td><strong>卷保留</strong>；<code>-v</code> 连卷删（核选）</td></tr>
+  <tr><td><code>up -d --scale 服务=N</code></td><td>横向扩到 N 实例</td><td>需 nginx 改用 Docker DNS 动态发现（<code>resolver 127.0.0.11</code>）+ 容器端口不固定映射</td></tr>
+</table>
+
+<h2>compose.yaml 字段速查（Lesson 0001 用到的）</h2>
+
+<table>
+  <tr><th>字段</th><th>含义</th><th>踩坑点</th></tr>
+  <tr><td><code>build:</code> / <code>image:</code></td><td>构建上下文 / 复用镜像名</td><td>多实例只给一个服务写 build，其余 image 复用</td></tr>
+  <tr><td><code>env_file:</code> + <code>environment:</code></td><td>批量注 env + 单项覆盖</td><td><strong>environment 优先级高</strong>——用它覆盖 127.0.0.1 → host.docker.internal</td></tr>
+  <tr><td><code>volumes:</code>（命名卷）</td><td>持久化运行时数据</td><td><code>down</code> 不删卷，<code>down -v</code> 才删</td></tr>
+  <tr><td><code>restart: unless-stopped</code></td><td>崩溃/开机自愈</td><td>手动 stop 是唯一例外</td></tr>
+  <tr><td><code>mem_limit:</code> / <code>cpus:</code></td><td>资源上限</td><td>防单容器拖垮宿主机；配合 <code>docker stats</code> 调参</td></tr>
+  <tr><td><code>healthcheck:</code></td><td>健康状态探测</td><td><code>start_period</code> 给启动期；失败只标记状态，重启靠 restart 策略</td></tr>
+  <tr><td><code>depends_on:</code></td><td>启动顺序</td><td>只保证「先启动」，不保证「已就绪」——就绪要看 healthcheck</td></tr>
+</table>
+
+<h2>nginx 网关要点（Lesson 0001 §8）</h2>
+
+<table>
+  <tr><th>配置</th><th>作用</th><th>注意</th></tr>
+  <tr><td><code>upstream</code> + <code>server 服务名:端口</code></td><td>定义实例池</td><td>服务名走 Docker 内置 DNS，不写死 IP</td></tr>
+  <tr><td><code>ip_hash;</code></td><td>sticky：同 IP 固定同实例</td><td>NAT 后多用户挤一实例；生产用 <code>hash $cookie_…;</code> 按会话粘</td></tr>
+  <tr><td><code>proxy_pass http://池名;</code></td><td>反向代理转发</td><td>容器端口是 3000，不是宿主映射的 3001/3002</td></tr>
+  <tr><td><code>proxy_buffering off;</code></td><td>流式响应不被缓冲</td><td>SSE / chunked（对话进度推送）必开</td></tr>
+  <tr><td><code>proxy_read_timeout 300s;</code></td><td>读超时放宽</td><td>默认 60s 会掐断长回答 + GLM 退避（~63s 窗口）</td></tr>
+  <tr><td><code>log_format … $upstream_addr</code></td><td>日志记下每个请求去了哪台（0003）</td><td>多实例排查的第一双眼睛；<code>docker compose logs nginx</code> 直接可见</td></tr>
+  <tr><td><code>nginx -s reload</code></td><td>不中断服务地重读配置（0003）</td><td>新 worker 接客、旧 worker 干完再退；配置有错则旧配置继续生效。容器里：<code>docker compose exec nginx nginx -s reload</code></td></tr>
+  <tr><td><code>server … weight=N;</code></td><td>权重分流 / 灰度（0003）</td><td>与 <code>ip_hash</code> 叠加时分的是"用户"而非"请求"</td></tr>
+  <tr><td><code>proxy_next_upstream</code></td><td>失败换台（默认 <code>error timeout</code>）</td><td><strong>POST 默认不换台</strong>（非幂等，需显式 <code>non_idempotent</code>）——发布前先摘流量排空</td></tr>
+</table>
+
+<div class="lesson-footer">
+  <a href="../lessons/0001-docker.html">← 返回面试课</a>
+  <span>learn-deploy reference</span>
+</div>
+
+</main>
+</body>
+</html>

@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>0001 · Docker 面试题库：容器、镜像、隔离与排障</title>
+<link rel="stylesheet" href="../assets/style.css">
+<link rel="stylesheet" href="../assets/qa.css">
+</head>
+<body>
+<main>
+
+<div class="kicker">Lesson 0001 · Docker 八股</div>
+<h1>Docker 面试题库：容器、镜像、隔离与排障</h1>
+<div class="lesson-meta">
+  24 题（12 必考 + 9 进阶 + 3 场景） · 每题先口述再展开对照 ·
+  <a href="../reference/lab-0001-docker.html">实操谱（讲项目前建议跑一遍）</a> ·
+  <a href="../../learn-redis/reference/glossary.html">术语表</a>
+</div>
+
+<div data-qa-toolbar></div>
+
+<div class="callout">
+  <span class="label">项目故事（本课）</span>
+  「我用 Docker 化过一个 NestJS + MySQL 的因子回测平台：后端两段式构建（构建段 <code>npm ci</code> + nest build，运行段只装生产依赖），基础镜像选 <code>node:22-bookworm-slim</code> 而不是 alpine——因为依赖里有 DuckDB 原生模块，musl 的预编译二进制装不上；<code>logs/</code> 和 <code>memories/</code> 两个运行时目录挂卷不进镜像。」——<strong>没跑过实操谱之前，只说设计决策，不说"我跑过"。</strong>
+</div>
+
+<h2>必考八股</h2>
+
+<article class="qa" data-qa-id="l1-q01">
+  <header class="qa-head"><span class="qa-tag">必考</span><h3 class="qa-q">Docker 和虚拟机的区别？</h3></header>
+  <div class="qa-body">
+    <h4>考察点</h4>
+    <p>是否理解容器隔离发生在操作系统层、VM 隔离发生在硬件层。</p>
+    <h4>30 秒回答</h4>
+    <p class="say">VM 通过 Hypervisor 虚拟出一套完整硬件，每个 VM 装自己的 Guest OS，隔离最强但每台都背着整个操作系统，GB 级、启动分钟级。容器是宿主内核上的进程级隔离：所有容器共享宿主内核，靠内核的 namespace 做隔离（PID/网络/挂载点等各自独立）、cgroup 做资源限制，镜像只打包应用和依赖，MB 级、启动秒级。代价是隔离强度弱于 VM——所以"多租户硬隔离"场景还是会选 VM 或安全容器。</p>
+    <dl>
+      <dt>容器里没有内核，那镜像里那个几百 MB 的"系统"是什么？</dt><dd>是 rootfs——用户态文件系统（库、工具、应用），不含内核。容器启动时把 rootfs 挂上去，内核用的还是宿主的。</dd>
+      <dt>Windows 上跑 Linux 容器，共享的是谁的内核？</dt><dd>跑在 WSL2 轻量虚拟机的 Linux 内核上——Docker Desktop 自己先解决"宿主没有 Linux 内核"的问题，容器再共享这个 Linux 内核。我的开发机就是 Windows + Docker Desktop，所以容器里连 MySQL 要用 <code>host.docker.internal</code> 指回宿主。</dd>
+      <dt>容器真的能完全替代 VM 吗？</dt><dd>不能一概而论：强隔离合规场景（多租户 SaaS 混部不可信负载）仍要 VM/microVM（如 Firecracker）；普通应用交付和部署，容器足够。</dd>
+    </dl>
+    <h4>加分项</h4>
+    <p>说出 namespace 八类（<a href="https://man7.org/linux/man-pages/man7/namespaces.7.html">man7 namespaces(7)</a>：cgroup、IPC、network、mount、PID、time、user、UTS）+ cgroup 管资源配额。面试常追问"容器怎么实现的"，标准答案就是这两个内核机制——Docker 官方总览页只提 namespaces，类型清单出自内核手册。</p>
+    <h4>常见错误</h4>
+    <p>说"容器是轻量级 VM"就停了——面试官等的是"共享内核 + namespace 隔离 + cgroup 限资源"这三板斧。</p>
+  </div>
+</article>
+
+<article class="qa" data-qa-id="l1-q02">
+  <header class="qa-head"><span class="qa-tag">必考</span><h3 class="qa-q">镜像和容器的关系？镜像的分层结构是怎么回事？</h3></header>
+  <div class="qa-body">
+    <h4>考察点</h4>
+    <p>镜像/容器是模板/实例关系；分层 + 写时复制是后续缓存、镜像瘦身、存储驱动题的地基。</p>
+    <h4>30 秒回答</h4>
+    <p class="say">镜像是只读模板，容器是镜像的一次运行实例——一个镜像可以同时跑出 N 个容器（多实例的物理基础）。镜像由一组只读层按序叠成，每层记录相对上一层的文件变化；容器启动时在顶部加一个可写层（container layer）：容器里的程序<strong>运行时</strong>写的文件（日志、临时文件、有人 exec 进去改的配置）都落在这里，它就是这个容器全部改动的终点——不回写镜像，随容器删除而消失。读文件时从上往下找，上层的版本遮住下层。同镜像的多容器共享只读层，所以多实例的磁盘开销远小于 N 份完整拷贝。</p>
+    <dl>
+      <dt>可写层里写完之后呢？会同步回镜像，或者同步到"真正的容器"里吗？</dt><dd>不会，也没有别处可同步：容器本身就是"镜像只读层 + 自己的可写层"叠成的合并视图，加上跑在里面的进程——可写层就是改动的终点。生命周期：<code>docker stop</code> / <code>start</code> 后还在（它跟着容器走，不跟着进程走）；<code>docker rm</code>（包括 <code>compose down</code>、发布时用新镜像重建容器）随容器一起删除，官方原话是写入容器层的数据在容器销毁后不会保留；镜像永远不变，同镜像的其他容器也看不到。<code>docker diff 容器名</code> 能直接列出可写层里的改动（A 新增 / C 修改 / D 删除）。<code>docker commit</code> 能把可写层打包成新镜像，但没有 Dockerfile 记录、不可复现，生产上是反模式。</dd>
+      <dt>这里的"写"是谁在写？为什么非要有可写层？</dt><dd>是程序<strong>运行时</strong>对文件系统的写入。不是程序员改代码——代码在 build 时就进了只读层，改代码要重新 build 出新镜像；也不是数据库写入——INSERT 是发给 MySQL 进程的网络请求，写的是 MySQL 那边的数据文件。几乎所有程序跑起来都要写文件（日志、临时文件、pid 文件、缓存），而镜像层必须只读才能被 N 个容器共享、每次启动都一模一样——可写层就是两者的折中：每个容器一块私有、用完即弃的草稿区。反证：<code>docker run --read-only</code> 把根文件系统设为只读，程序只能写进单独挂的卷，这是常用的安全加固手段。</dd>
+      <dt>哪些指令会产生新层？</dt><dd>实际改变文件系统的指令——RUN 执行命令、COPY/ADD 拷入文件——会产生新层；ENV、EXPOSE、CMD 这类只改元数据的指令在 <code>docker image history</code> 里显示 0B，不占空间。</dd>
+      <dt>容器里删了一个底层已有的文件，镜像会变小吗？</dt><dd>不会。只读层不可改，删除是在容器层写一个 whiteout 标记把它"遮住"，磁盘上文件还在——想真删得改 Dockerfile 重建镜像。这也是"在后面的层里 <code>rm</code> 前面层装的东西省不了空间"的原因。</dd>
+      <dt>什么是写时复制？</dt><dd>CoW：容器要修改某文件时，第一次先把它从底层复制到容器可写层再改，之后读写的都是自己的副本——多个容器共享同一份只读底层数据的同时互不干扰。</dd>
+    </dl>
+    <h4>加分项</h4>
+    <p>分层不是 Docker 自己变出来的，是 Linux 内核里的联合文件系统 OverlayFS 把几个普通目录叠成一个目录看：镜像层是只读的下层目录，可写层是上层目录。具体怎么叠、copy-up 和 whiteout 是什么、overlay2 和 containerd 又是什么，见进阶题「<a href="#l1-q24">Docker 的分层靠什么实现</a>」。</p>
+    <p>实践纪律：要留的数据（日志、用户上传、数据库数据）挂卷，用完可丢的临时文件才留在可写层；不要 exec 进运行中的容器改代码或配置修 bug——改动只在这一个容器的可写层里，下次发布重建就没了，另一个实例上也没改。改源码/配置 → 重新 build → 重新部署，这叫不可变基础设施。</p>
+    <h4>项目故事</h4>
+    <p>我项目的 FileConsoleLogger 每条日志都 appendFileSync 到 <code>logs/</code>，长期记忆写 <code>memories/*.md</code>——容器化时不挂卷，这些写入就落在可写层，发一次版（重建容器）就全丢。所以容器化方案里这两个目录挂卷，镜像里只放代码。</p>
+    <h4>常见错误</h4>
+    <p>把"容器层删除文件"说成"镜像变小"；或把分层说成"类似 git commit"就完事——要落到 copy-on-write 和只读/可写两层结构。还有一种：以为可写层的改动会"同步"回镜像，或被同镜像的其他容器看到。</p>
+  </div>
+</article>
+
+<article class="qa" data-qa-id="l1-q03">
+  <header class="qa-head"><span class="qa-tag">必考</span><h3 class="qa-q">Dockerfile 里 CMD 和 ENTRYPOINT 的区别？</h3></header>
+  <div class="qa-body">
+    <h4>考察点</h4>
+    <p>是否真写过 Dockerfile，且理解 docker run 参数如何与二者组合。</p>
+    <h4>30 秒回答</h4>
+    <p class="say">两者都定容器启动命令，但覆盖语义不同：<code>CMD</code> 提供默认命令，<code>docker run image args</code> 里的 args 会整体覆盖它；<code>ENTRYPOINT</code> 定主程序，run 的参数会<strong>追加</strong>在它后面而不是覆盖。最佳实践是两者配合：ENTRYPOINT 写死可执行程序，CMD 放可被覆盖的默认参数，覆盖 CMD 用 run 参数、覆盖 ENTRYPOINT 用 <code>--entrypoint</code>。</p>
+    <dl>
+      <dt>shell 形式和 exec 形式有什么区别？为什么生产必须用 exec 形式？</dt><dd><code>CMD node app.js</code> 是 shell 形式，实际以 <code>/bin/sh -c "node app.js"</code> 运行，主进程是 sh，node 是它的子进程——<strong>sh 不是 PID 1 也不转发信号，docker stop 的 SIGTERM 收不到，只能等超时被 SIGKILL</strong>，优雅停机失效。exec 形式 <code>CMD ["node", "dist/main.js"]</code> 让 node 直接当主进程，能收到信号。我的项目就用 exec 形式。</dd>
+      <dt>PID 1 有什么特殊？</dt><dd>内核规定：PID 1 只处理它显式注册过 handler 的信号（内核手册 pid_namespaces(7) 原话：只有 init 进程建立了 handler 的信号才能被送达），所以没装 SIGTERM 处理器的程序在容器里"杀不掉"，等 10 秒宽限期被 SIGKILL 硬切。另外 PID 1 还负责收养孤儿进程、回收僵尸进程——普通应用不干这事，所以长驻容器常用 <code>docker run --init</code>（内置 tini）或 Compose 的 <code>init: true</code>：让一个专门的 init 当 PID 1，负责转发信号 + 回收僵尸。</dd>
+    </dl>
+    <h4>加分项</h4>
+    <p>总结成一句："<strong>CMD 管默认参数，ENTRYPOINT 管程序本身，shell 形式吞信号，exec 形式才能优雅停机</strong>"。再补一句 init 进程方案（tini / <code>init: true</code>）就超出多数候选人了。</p>
+    <h4>常见错误</h4>
+    <p>只会背"CMD 会被覆盖 ENTRYPOINT 不会"，追问 shell/exec 形式和信号就断片。面试官真正想听的是：你知不知道 docker stop 为什么会卡满 10 秒——完整原因和复现方法见进阶题「<a href="#l1-q13">docker stop 之后发生了什么</a>」。</p>
+  </div>
+</article>
+
+<article class="qa" data-qa-id="l1-q04">
+  <header class="qa-head"><span class="qa-tag">必考</span><h3 class="qa-q">COPY 和 ADD 的区别？为什么官方推荐优先 COPY？</h3></header>
+  <div class="qa-body">
+    <h4>考察点</h4>
+    <p>Dockerfile 语法细节 + 是否读过官方最佳实践。</p>
+    <h4>30 秒回答</h4>
+    <p class="say">COPY 只做一件事：从构建上下文拷文件进镜像，行为可预期。ADD 在 COPY 基础上多了两个隐式行为：源是本地 tar 包会自动解压，源是 URL 会下载——这两个"方便"都是坑：自动解压不可见、URL 下载不走构建缓存也不校验。官方最佳实践明确建议优先 COPY，只有"构建期下载远程制品"这类需求才用 ADD。</p>
+    <dl>
+      <dt>下载远程依赖该用 ADD 吗？</dt><dd>不。官方推荐用 RUN 里 curl/wget 显式下载——命令可见、可以和清理写在同一层、能利用缓存控制。</dd>
+      <dt>多阶段构建之后还需要 ADD 吗？</dt><dd>基本不需要：构建产物用 <code>COPY --from=build</code> 拷贝，这已经覆盖了绝大多数 ADD 的使用场景。我的两段式 Dockerfile 里全程只用 COPY。</dd>
+    </dl>
+    <h4>加分项</h4>
+    <p>顺带说出 .dockerignore 的作用：缩小构建上下文、防止 <code>COPY . .</code> 把 node_modules/密钥拷进镜像——我项目里就 ignore 了 node_modules、dist、.env。</p>
+    <h4>常见错误</h4>
+    <p>答不出 ADD 的两个额外行为，或反着推荐 ADD"功能多"。</p>
+  </div>
+</article>
+
+<article class="qa" data-qa-id="l1-q05">
+  <header class="qa-head"><span class="qa-tag">必考</span><h3 class="qa-q">讲讲 Docker 的构建缓存。为什么 Dockerfile 指令顺序很重要？</h3></header>
+  <div class="qa-body">
+    <h4>考察点</h4>
+    <p>分层缓存机制 + 能否写出对缓存友好的 Dockerfile（高频追问：改一行代码为什么构建还是慢）。</p>
+    <h4>30 秒回答</h4>
+    <p class="say">构建时 Docker 对每条指令找有没有可复用的缓存层：命中就直接复用，不命中则执行并失效——<strong>从这条开始往后的所有层都要重建</strong>。所以顺序原则是"最不常变的放最前"：先 COPY package-lock 和 package.json、<code>npm ci</code> 装依赖，最后才 COPY 源码。这样改业务代码时依赖层缓存全部命中，只有源码层及其后重建，秒级出镜像；反过来先 COPY 源码，每次改动都重装全部依赖。</p>
+    <dl>
+      <dt>npm ci 和 npm install 有什么区别？为什么容器里用 ci？</dt><dd>npm ci 严格按 lockfile 精确安装，lockfile 和 package.json 不一致直接报错而不是悄悄更新；安装前删掉整个 node_modules 保证干净；绝不改写 lockfile——可复现、适合 CI。npm install 可能按 semver 升级小版本，两次构建产物不一致。</dd>
+      <dt>npm ci 这层缓存为什么稳定命中？</dt><dd>缓存键是"指令内容 + 拷入文件的内容校验和"——lockfile 没变，这层就命中。所以 lockfile 要提交进仓库，它是缓存命中和可复现构建的共同前提。</dd>
+      <dt>有什么绕过缓存的手段？</dt><dd><code>docker build --no-cache</code> 全量重建；老版本对 RUN 用 --no-cache-filter 只失效某层；新版用 cache mounts（<code>RUN --mount=type=cache</code>）让包管理器缓存跨构建保留。</dd>
+    </dl>
+    <h4>项目故事</h4>
+    <p>我的 Dockerfile 就是按这个原则写的：锁文件 → npm ci → tsconfig/nest-cli → src → nest build。改一行业务代码，依赖层全部 CACHED。</p>
+    <h4>常见错误</h4>
+    <p>只说"有缓存所以快"，说不出失效传播规则（一条失效、其后全重建）和"按变更频率排序"的原则。</p>
+  </div>
+</article>
+
+<article class="qa" data-qa-id="l1-q06">
+  <header class="qa-head"><span class="qa-tag">必考</span><h3 class="qa-q">什么是多阶段构建？解决什么问题？</h3></header>
+  <div class="qa-body">
+    <h4>考察点</h4>
+    <p>镜像瘦身的标准答案，几乎每场 Docker 面试都会出现。</p>
+    <h4>30 秒回答</h4>
+    <p class="say">一个 Dockerfile 里写多个 FROM：构建阶段装全套构建工具（编译器、devDependencies）把源码编译成产物；运行阶段从一个干净的基础镜像开始，只 <code>COPY --from</code> 产物和运行时依赖。好处：最终镜像不含构建工具和源码，体积小、攻击面小、拉取部署快；且两个阶段可以用不同的基础镜像（构建用带完整工具链的，运行用 slim/alpine）。</p>
+    <dl>
+      <dt>你的项目怎么用的？镜像能小多少？</dt><dd>构建段 node:22-bookworm-slim 全量 npm ci + nest build，运行段重新 npm ci --omit=dev 只装生产依赖、拷 dist。TypeScript 编译器、jest、@nestjs/cli 全部留在构建段——devDependencies 在 Node 项目里往往比生产依赖还大，砍掉后运行镜像通常能小一半以上（按 <code>docker images</code> 实测为准，别背数字）。</dd>
+      <dt>多阶段构建会拖慢 CI 吗？</dt><dd>两个阶段在同一 Dockerfile 里顺序构建，共享构建缓存，代价很小；CI 里还可以用 buildx 的 cache-from/cache-to 跨任务复用缓存。</dd>
+    </dl>
+    <h4>常见错误</h4>
+    <p>说出多阶段但说不出"为什么 devDependencies 必须留在构建段"（运行时不需要 + 减小攻击面——构建工具链里的漏洞不会进生产镜像）。</p>
+  </div>
+</article>
+
+<article class="qa" data-qa-id="l1-q07">
+  <header class="qa-head"><span class="qa-tag">必考</span><h3 class="qa-q">容器的端口映射 -p 8080:80 是什么意思？-p、-P、EXPOSE 各是什么？</h3></header>
+  <div class="qa-body">
+    <h4>考察点</h4>
+    <p>容器网络隔离的基本模型 + 三个易混概念。</p>
+    <h4>30 秒回答</h4>
+    <p class="say">容器有独立的网络栈，容器里监听的端口宿主机默认访问不到。<code>-p 宿主端口:容器端口</code> 是在宿主和容器端口之间做一条映射（本质是宿主上的端口转发规则）——<code>-p 8080:80</code> 就是把宿主 8080 的流量转进容器 80。多实例共存靠的就是它：两个容器都监听 80，宿主分别映射 8081、8082。<code>EXPOSE</code> 只是元数据声明，不做任何转发；<code>-P</code> 是把所有 EXPOSE 的端口随机映射到宿主高位端口。</p>
+    <dl>
+      <dt>那容器之间互相访问呢？</dt><dd>不需要 -p（那是给宿主/外部用的）。同一用户自定义 bridge 网络里的容器直接用容器名当主机名互访——Docker 内置 DNS。注意默认的 bridge 网络没有这个 DNS，只能按 IP 互访，这也是官方说默认 bridge 不推荐生产用的原因。我的 compose 就是靠服务名 server-a/server-b 被 nginx 解析的。</dd>
+      <dt>host 网络模式是什么？</dt><dd><code>--network host</code> 让容器直接共享宿主网络栈，不再有端口映射——性能最好（无 NAT 开销），但失去网络隔离，Linux 上常用在性能敏感场景；注意 Docker Desktop（Mac/Windows）上 host 模式行为受限。</dd>
+    </dl>
+    <h4>加分项</h4>
+    <p>说清"容器端口相同 + 宿主端口不同"是多实例并存的第一根杠杆；同镜像多实例不需要改任何镜像内容。</p>
+  </div>
+</article>
+
+<article class="qa" data-qa-id="l1-q08">
+  <header class="qa-head"><span class="qa-tag">必考</span><h3 class="qa-q">Docker 的数据卷和绑定挂载有什么区别？什么时候用哪个？</h3></header>
+  <div class="qa-body">
+    <h4>考察点</h4>
+    <p>容器"默认无状态"与持久化的标准方案——和后面"有状态服务怎么容器化"一脉相承。</p>
+    <h4>30 秒回答</h4>
+    <p class="say">容器可写层随容器删除而消失，持久数据必须放挂载。最常用的三种挂载类型（官方列表还有 image mount、named pipe，面试一般只问前三种）：volume（卷）由 Docker 统一管理，位置和生命周期与容器解耦，官方推荐的首选方式，适合数据库数据、应用持久状态；bind mount（绑定挂载）把宿主某个现成目录直接映射进容器，宿主能直接看到和改文件，适合开发时热加载代码、往容器里喂配置；tmpfs 挂在内存里，容器停止即消失，适合敏感临时数据。管理上 volume 有 <code>docker volume ls/prune</code> 一整套命令，bind mount 就是目录。</p>
+    <dl>
+      <dt>你的项目哪些数据挂了卷？为什么？</dt><dd>两个运行时目录：<code>logs/</code>（文件日志）和 <code>memories/</code>（长期记忆 markdown）。它们是运行时状态，绝不能打进镜像——否则重建容器日志和记忆全丢。我给两个后端实例挂了各自独立的卷，这也顺便演示了多实例的一个坑：各自挂卷后记忆文件各写各的，会分叉——真要共享得挂同一个卷或迁到外部存储。</dd>
+      <dt>删容器会删卷吗？</dt><dd>不会，卷独立生命周期，<code>docker rm</code> / <code>docker compose down</code> 都不动卷；要删卷得显式 <code>docker volume rm</code> 或 <code>down -v</code>——所以 down 不带 -v 是安全的，带 -v 前要想清楚。</dd>
+    </dl>
+    <h4>常见错误</h4>
+    <p>只说"卷就是持久化"，分不清 volume 和 bind mount 的归属与适用场景；或说"数据放容器里就行"——直接暴露没理解可写层的生命周期。</p>
+  </div>
+</article>
+
+<article class="qa" data-qa-id="l1-q09">
+  <header class="qa-head"><span class="qa-tag">必考</span><h3 class="qa-q">容器的健康检查（HEALTHCHECK）是怎么回事？ unhealthy 会自动重启吗？</h3></header>
+  <div class="qa-body">
+    <h4>考察点</h4>
+    <p>健康检查机制 + restart policy 边界——两者混为一谈是高频扣分点。</p>
+    <h4>30 秒回答</h4>
+    <p class="say">HEALTHCHECK 定义一条周期性探测命令（Dockerfile 或 Compose 里），Docker 按它把容器状态标为 starting → healthy / unhealthy——比如 curl 一下本进程的 HTTP 接口。但要说清边界：<strong>unhealthy 本身不会触发任何重启</strong>，restart policy 只响应进程退出。单机 Docker 上它是个"状态标记"：docker ps 能看到、可以拿来做告警和编排判断；真正"不健康就摘流量/重启"要靠上层——Swarm/K8s 或自愈脚本。我的实践是 restart: unless-stopped 负责"进程崩了拉起来"，healthcheck 负责"进程活着但卡死了能被看见"，两者互补。</p>
+    <dl>
+      <dt>默认参数是什么？</dt><dd>默认 interval 30s、timeout 30s、retries 3、start-period 0s——连续 3 次失败判 unhealthy。Node 应用要给 start-period 留启动时间，否则启动慢的应用一出生就被打成不健康。探测命令要轻，别用重查询拖垮服务。</dd>
+      <dt>探什么接口比较合适？</dt><dd>轻量的自检端点（进程活着 + 依赖可连），不要探重业务接口。我的项目用 Swagger 文档页当探针——它走完整应用栈但无副作用。</dd>
+      <dt>K8s 里呢？</dt><dd>对应 liveness（失败重启容器）和 readiness（失败摘出 Service 端点）两类探针，语义比 Docker 的单标记更细——这是 0003 课的展开点。</dd>
+    </dl>
+    <h4>常见错误</h4>
+    <p>斩钉截铁说"unhealthy 会自动重启"——官方文档明确 restart policy 只作用于容器退出，healthcheck 不重启容器。</p>
+  </div>
+</article>
+
+<article class="qa" data-qa-id="l1-q10">
+  <header class="qa-head"><span class="qa-tag">必考</span><h3 class="qa-q">Docker 的日志机制？docker logs 能看到什么？日志默认会无限膨胀吗？</h3></header>
+  <div class="qa-body">
+    <h4>考察点</h4>
+    <p>stdout/stderr 的容器日志模型 + json-file 默认不轮转这个生产坑。</p>
+    <h4>30 秒回答</h4>
+    <p class="say">Docker 默认用 json-file 日志驱动：把容器主进程写到 stdout/stderr 的每行收进宿主机上的 JSON 文件，docker logs 读的就是它。两个关键点：① 应用要往 stdout 打日志而不是只写容器内文件，否则 docker logs 什么都看不到；② json-file 默认不轮转，日志文件会无限增长吃满磁盘——生产必须配 max-size/max-file 轮转（daemon.json 全局或容器级 <code>--log-opt</code>，Compose 里用 logging:），或换日志收集方案。</p>
+    <dl>
+      <dt>你的项目日志怎么处理？</dt><dd>双轨：业务日志用 NestJS Logger 落到 logs/ 目录的按日文件并同步打 console——console 这条流进 docker logs；访问日志每请求一行。容器化后 logs/ 目录挂卷。如果上量，标准做法是只写 stdout、由采集器（Fluent Bit/Vector）收走聚合。</dd>
+      <dt>12-factor 12 条日志原则是什么？</dt><dd>把日志当事件流：应用不管存储，只写 stdout，由执行环境决定怎么路由和归档——这正是容器日志模型的出处。</dd>
+      <dt>排查时常用哪些命令？</dt><dd><code>docker logs -f --tail 100 容器</code>（跟随+最近 100 行）、<code>docker stats</code>（CPU/内存实时）、<code>docker exec -it 容器 sh</code> 进去现场看、<code>docker inspect</code> 看元数据。我的速查表里有一整页。</dd>
+    </dl>
+    <h4>常见错误</h4>
+    <p>不知道 json-file 默认不轮转——这是"容器跑几个月后磁盘满了"的经典根因，答出它直接和背题的人拉开差距。</p>
+  </div>
+</article>
+
+<article class="qa" data-qa-id="l1-q11">
+  <header class="qa-head"><span class="qa-tag">必考</span><h3 class="qa-q">容器的资源限制怎么做？容器把宿主机内存吃光怎么办？</h3></header>
+  <div class="qa-body">
+    <h4>考察点</h4>
+    <p>cgroup 的应用面 + OOM 场景的排查思路（排障题的打底知识）。</p>
+    <h4>30 秒回答</h4>
+    <p class="say">run 层面 <code>-m/--memory</code> 限内存、<code>--cpus</code> 限 CPU 核数；Compose 里用 mem_limit/cpus（swarm 模式用 deploy.resources）。底层就是 cgroup：Docker 把配额写进容器对应的 cgroup，内核据此限额。不加限制的容器理论上可以吃光宿主资源——多实例混部时一个失控服务拖垮全家，所以生产必配限额。</p>
+    <dl>
+      <dt>内存超限会发生什么？怎么发现？</dt><dd>超限时内核 OOM killer 会挑进程杀掉释放内存——容器常表现为进程莫名消失、退出码 137（128+SIGKILL，9，这是 Unix 信号惯例，不是 Docker 文档定义）。排查用 <code>docker inspect 容器</code> 看 <code>State.OOMKilled</code> 是否为 true；<code>docker stats</code> 看实时水位是否贴着上限。Node 场景还要注意：容器限了 1G，Node 老堆默认上限不是 1G，要配 <code>--max-old-space-size</code> 否则 V8 在容器被杀之前自己先崩。</dd>
+      <dt>CPU 限制会怎样？</dt><dd>不会杀进程，是节流：超配额时进程被 cgroup 暂停调度（throttle），表现为延迟升高而不是崩溃——所以 CPU 压测要看 throttling 指标。</dd>
+    </dl>
+    <h4>项目故事</h4>
+    <p>我的 compose 里两个后端实例都限 mem_limit: 1g——Node 回测进程吃内存，不设限的话一个失控回测能拖垮同宿主的另一个实例和 nginx。</p>
+  </div>
+</article>
+
+<article class="qa" data-qa-id="l1-q12">
+  <header class="qa-head"><span class="qa-tag">必考</span><h3 class="qa-q">说说 restart 策略。unless-stopped 和 always 的区别？</h3></header>
+  <div class="qa-body">
+    <h4>考察点</h4>
+    <p>自愈策略语义 + 和 healthcheck 的边界（接 q09）。</p>
+    <h4>30 秒回答</h4>
+    <p class="say">四种：<code>no</code>（默认，不重启）、<code>on-failure[:n]</code>（非零退出才重启，可限次数）、<code>always</code>、<code>unless-stopped</code>。后两者区别在"手动 stop 之后"：always 的容器，哪怕你手动 stop 了，Docker 守护进程重启后它也会被拉起来；unless-stopped 则尊重你的手动 stop，守护进程重启也不拉。长驻服务一般用 unless-stopped——"崩了自己爬起来，但我手动停的一定有原因"。注意它只管进程退出：进程活着但僵死（unhealthy）它不管，那是 healthcheck + 编排层的事。</p>
+    <dl>
+      <dt>docker stop 会被 restart 策略复活吗？</dt><dd>不会。手动 stop 属于主动行为，策略不介入（除非 always + 守护进程重启的组合）。</dd>
+      <dt>on-failure 适合什么场景？</dt><dd>一次性任务容器：跑批、迁移脚本——失败重试 N 次，正常退出（0）就安息。</dd>
+    </dl>
+    <h4>常见错误</h4>
+    <p>always/unless-stopped 说反；或忘了"策略只在容器退出时生效"这个边界。</p>
+  </div>
+</article>
+
+<h2>进阶追问</h2>
+
+<article class="qa" data-qa-id="l1-q13">
+  <header class="qa-head"><span class="qa-tag adv">进阶</span><h3 class="qa-q">docker stop 之后发生了什么？为什么有时候要等 10 秒？</h3></header>
+  <div class="qa-body">
+    <h4>考察点</h4>
+    <p>信号和 PID 1 的机制，以及优雅停机的三层解法。这是区分"背过 Dockerfile"和"真部署过"的经典题。</p>
+    <h4>30 秒回答</h4>
+    <p class="say">docker stop 先给容器的主进程（PID 1）发 SIGTERM，意思是"请你退出"；等一个宽限期，默认 10 秒（<code>-t/--timeout</code> 可调）；到点还没退出，就发 SIGKILL 强杀。所以"卡满 10 秒"说明主进程收到 SIGTERM 后没有退出，常见两个原因：一是信号根本没送到程序——用了 shell 形式或 npm start，PID 1 是 sh 或 npm，它们不把信号转给 node；二是送到了，但程序就是 PID 1，内核对 PID 1 不执行信号的默认动作（默认动作本来是退出），程序没写处理代码就等于没听见——Node 官方 Docker 文档的原话是 Node 作为 PID 1 时不会响应 SIGINT 这类信号，SIGTERM 同理。解法有三层：exec 形式让信号直达 node；compose 加 <code>init: true</code>（或 <code>docker run --init</code>），让 tini 当 PID 1 负责转发信号，node 变回普通进程；应用里用 <code>app.enableShutdownHooks()</code> 接住 SIGTERM 做收尾。</p>
+    <dl>
+      <dt>SIGTERM 和 SIGKILL 有什么区别？</dt><dd>信号是操作系统发给进程的通知（终端里按 Ctrl+C 就是给程序发了 SIGINT）。SIGTERM（15 号）是"请你退出"，程序可以接住，处理完手头的事再退；SIGKILL（9 号）是内核直接杀，程序收不到、拦不住，正在处理的请求、没写完的数据全部丢失。优雅停机的意义就是别走到 SIGKILL 这一步。</dd>
+      <dt>为什么内核要对 PID 1 特殊对待？</dt><dd>PID 1 是容器里所有进程的祖先，它一退出，内核会把容器里其他进程全部杀掉，所以内核格外保护它：PID 1 只会收到它自己写了处理代码的信号。普通进程没写处理代码时，SIGTERM 的默认动作就是退出；PID 1 没写，SIGTERM 就被直接忽略。</dd>
+      <dt>npm start 为什么也会卡？</dt><dd>npm 会再起一个 shell 去跑 package.json 里的脚本，node 和 PID 1 之间隔了好几层。Node 官方 Docker 文档专门建议在 CMD 里直接写 node 而不是 npm start，理由之一就是"让 SIGTERM、SIGINT 这类退出信号由 Node 进程收到，而不是被 npm 吞掉"。</dd>
+      <dt>怎么判断容器是自己退的，还是被强杀的？</dt><dd><code>docker ps -a</code> 看退出码：<code>Exited (137)</code> 就是被 SIGKILL 强杀的，说明等满了宽限期。按 Unix 惯例，被信号杀死的退出码是 128 + 信号编号，128 + 9 = 137。</dd>
+      <dt>能现场复现吗？</dt><dd>能，在 Git Bash 里两组命令对比：<code>docker run -d --name t1 alpine sleep 1000</code> 后 <code>time docker stop t1</code>，约 10 秒——sleep 是 PID 1，没写信号处理代码；<code>docker run -d --init --name t2 alpine sleep 1000</code> 后 <code>time docker stop t2</code>，不到 1 秒——tini 当了 PID 1，把信号转给了 sleep。再用 <code>docker ps -a --filter name=t1 --filter name=t2</code> 看退出码：t1 是 137，t2 不是。最后 <code>docker rm t1 t2</code> 清理。</dd>
+      <dt>僵尸进程是怎么回事？</dt><dd>子进程退出后，父进程没有调用 wait() 回收它，进程表里会留下一条记录。容器里如果主进程不负责回收，僵尸会越积越多；tini 当 PID 1 时会顺带回收，这是 <code>init: true</code> 的第二个好处。</dd>
+    </dl>
+    <h4>项目故事</h4>
+    <p>我的后端是 SSE 流式对话服务，一个请求背后可能挂着几分钟的 GLM 调用。被 SIGKILL 强杀，用户看到的就是对话中途报错，所以优雅停机对我是硬需求。现状要坦白：main.ts 目前还没调用 enableShutdownHooks，容器化方案里我把 exec 形式 CMD、<code>init: true</code>、enableShutdownHooks 三件一起列进了清单。</p>
+    <h4>常见错误</h4>
+    <p>以为"程序没写 SIGTERM 处理也会默认退出"——普通进程是这样，PID 1 不是；或者加了 enableShutdownHooks，却用 shell 形式或 npm start 启动，信号根本到不了 node。</p>
+  </div>
+</article>
+
+<article class="qa" data-qa-id="l1-q14">
+  <header class="qa-head"><span class="qa-tag adv">进阶</span><h3 class="qa-q">容器里怎么访问宿主机上的服务（比如宿主机上的 MySQL）？</h3></header>
+  <div class="qa-body">
+    <h4>30 秒回答</h4>
+    <p class="say">容器里 127.0.0.1 是容器自己，连不到宿主。标准答案：<code>host.docker.internal</code>——Docker Desktop（Mac/Windows）内置的 DNS 名，解析到宿主网关 IP；Linux 原生 Engine 上要显式加 <code>--add-host=host.docker.internal:host-gateway</code>。我项目里 .env 的 MYSQL_HOST 在容器里就被 environment 覆盖成这个名字——这是容器化改动配置的第一个必踩点。</p>
+    <dl>
+      <dt>还有什么替代方案？</dt><dd>① 把 MySQL 也容器化、同一网络里按服务名访问（标准做法）；② host 网络模式（牺牲隔离）；③ 按宿主网桥 IP 直连（IP 不稳定，不推荐）。</dd>
+    </dl>
+  </div>
+</article>
+
+<article class="qa" data-qa-id="l1-q15">
+  <header class="qa-head"><span class="qa-tag adv">进阶</span><h3 class="qa-q">alpine 镜像作为基础镜像有什么坑？你怎么选基础镜像？</h3></header>
+  <div class="qa-body">
+    <h4>30 秒回答</h4>
+    <p class="say">alpine 用 musl libc 而不是主流的 glibc，体积最小但兼容性坑多：预编译的原生模块（很多 npm 包的二进制分发只出 glibc 版）、DNS 解析行为差异、某些字体/时区数据缺失。我的真实案例：项目依赖 DuckDB 原生模块，musl 下装不上预编译二进制，所以选了 Debian 系的 <code>node:22-bookworm-slim</code>——只比 alpine 大几十 MB，换来省掉一整类玄学问题。选型原则：<strong>纯静态/Go 程序 alpine 很香；带原生依赖的 Node/Python 项目优先 slim；对体积有极致要求再逐个解决 musl 问题</strong>。</p>
+    <dl>
+      <dt>还知道哪些缩小镜像的手段？</dt><dd>多阶段构建、slim 基础镜像、npm ci --omit=dev、.dockerignore、合并 RUN 减层数（尤其 apt-get update 和 install 合同一层并清缓存）、清包管理器缓存。</dd>
+    </dl>
+    <h4>常见错误</h4>
+    <p>无脑吹 alpine"最小最好"——能讲出 glibc/musl 差异和一个真实踩坑的候选人非常少。</p>
+  </div>
+</article>
+
+<article class="qa" data-qa-id="l1-q16">
+  <header class="qa-head"><span class="qa-tag adv">进阶</span><h3 class="qa-q">容器逃逸听说过吗？容器隔离到底安全吗？</h3></header>
+  <div class="qa-body">
+    <h4>30 秒回答</h4>
+    <p class="say">容器共享宿主内核，隔离强度天然弱于 VM；历史上出现过不少逃逸漏洞（内核漏洞或 Docker/运行时配置不当导致容器内进程拿到宿主权限）。所以生产纪律是：不以 root 跑容器（USER 指令）、最小镜像减小攻击面、不挂载 docker.sock 进不可信容器（等于交出宿主控制权）、及时升级内核和 Docker、敏感场景叠加 VM 级隔离（Kata/gVisor）或干脆独立宿主。</p>
+    <dl>
+      <dt>为什么挂载 docker.sock 危险？</dt><dd>能和 Docker 守护进程通信 = 能以宿主权限起容器（挂载宿主根目录的特权容器），等于交出宿主。CI 系统里常见这个错误配置。</dd>
+    </dl>
+  </div>
+</article>
+
+<article class="qa" data-qa-id="l1-q17">
+  <header class="qa-head"><span class="qa-tag adv">进阶</span><h3 class="qa-q">镜像仓库（registry）的流程？镜像 tag 和摘要（digest）有什么区别？</h3></header>
+  <div class="qa-body">
+    <h4>30 秒回答</h4>
+    <p class="say">流程：build 出本地镜像 → <code>docker tag</code> 打上 <code>registry/项目:tag</code> 全名 → <code>docker push</code> 推送；部署机 <code>docker pull</code> 拉取。tag 是可变指针——同一个 <code>:latest</code> 今天和明天指向的内容可以不同；digest（sha256 内容寻址）不可变，才是精确锁定。生产最佳实践：部署用 digest 或至少用语义化 tag，<strong>永远不要在生产依赖 :latest</strong>——"昨天还好好的今天拉了个新 latest 就挂了"是经典事故。我的项目本地用 <code>factor-server:${RELEASE}</code> 版本标签，回滚就是切标签。</p>
+    <dl>
+      <dt>私有仓库怎么搭？</dt><dd>轻量：registry:2 容器自建（要配 TLS 和认证）；或 harbor（企业级：权限、扫描、复制）。云上直接用各云的镜像仓库服务。</dd>
+    </dl>
+  </div>
+</article>
+
+<article class="qa" data-qa-id="l1-q18">
+  <header class="qa-head"><span class="qa-tag adv">进阶</span><h3 class="qa-q">Docker Compose 是什么？和 Kubernetes 什么关系？depends_on 能保证依赖就绪吗？</h3></header>
+  <div class="qa-body">
+    <h4>30 秒回答</h4>
+    <p class="say">Compose 是单机多容器的编排工具：一份 YAML 声明全部服务/网络/卷，<code>up -d</code> 一键拉起，适合本地开发和单机小规模部署。K8s 是集群级编排：多机调度、自愈、弹性伸缩、服务发现。关系是递进不是替代——Compose 是开发/单机的答案，上规模换 K8s。depends_on 只保证<strong>启动顺序</strong>，不保证依赖<strong>已就绪</strong>：要等健康得用长语法 <code>condition: service_healthy</code>（依赖方自己也要配 healthcheck）。即使如此，应用层仍要做连接重试——"依赖就绪后瞬间又挂"永远可能。</p>
+    <dl>
+      <dt>你的 compose 长什么样？</dt><dd>nginx + 两个后端实例 + redis 四个服务：server 互相独立、nginx depends_on 后端；redis 预留 <code>--appendonly yes --maxmemory-policy allkeys-lru</code>（为多实例共享状态准备的）。</dd>
+      <dt>什么规模该上 K8s？</dt><dd>多机、需要自动调度/自愈/伸缩时。单机两三个服务上 K8s 是负资产——运维成本远超收益。</dd>
+    </dl>
+  </div>
+</article>
+
+<article class="qa" data-qa-id="l1-q19">
+  <header class="qa-head"><span class="qa-tag adv">进阶</span><h3 class="qa-q">Dockerfile 里怎么处理密钥（数据库密码、API key）？</h3></header>
+  <div class="qa-body">
+    <h4>30 秒回答</h4>
+    <p class="say">原则：<strong>密钥不进镜像、不进构建日志</strong>。镜像层是不可变的，COPY 进去的密钥即使后面层删掉也能从历史层挖出来，而且镜像一推仓库谁都能拉。正确做法：运行时注入——环境变量（compose 的 env_file/environment、run 的 -e）或编排平台的 secrets；.env 文件进 .dockerignore 和 .gitignore；构建期需要密钥的用 BuildKit 的 <code>RUN --mount=type=secret</code>（不落层）。我的 compose 就是宿主机 .env 文件通过 env_file 注入，镜像里干干净净。</p>
+    <dl>
+      <dt>运行时环境变量就绝对安全吗？</dt><dd>不。docker inspect 能看到、子进程能继承、崩溃日志可能打印——强一致要求用专门 secrets 管理（Vault/云 KMS）。但比烤进镜像好一个量级。</dd>
+    </dl>
+  </div>
+</article>
+
+<article class="qa" data-qa-id="l1-q20">
+  <header class="qa-head"><span class="qa-tag adv">进阶</span><h3 class="qa-q">怎么给 Node.js 应用做优雅停机？</h3></header>
+  <div class="qa-body">
+    <h4>30 秒回答</h4>
+    <p class="say">四步闭环：① 监听 SIGTERM；② 先关入口——停止接新请求（HTTP server.close()）；③ 等在途请求处理完（带超时兜底）；④ 清理资源（关 DB 连接池、刷日志缓冲）后退出。NestJS 对应 <code>app.enableShutdownHooks()</code> + onModuleDestroy/beforeApplicationShutdown 钩子。配套 Dockerfile 用 exec 形式（信号才收得到）+ Compose 的 <code>stop_grace_period</code> 给够宽限。我的项目每个请求背后是数分钟级 GLM 调用 + SSE 流，"停机先停止接客、排空在途"对我是硬需求，不是加分项。</p>
+    <dl>
+      <dt>宽限期怎么定？</dt><dd>略大于最慢在途请求的处理时长，且小于外部（K8s terminationGracePeriodSeconds 默认 30s）给的总宽限——三层超时要对齐：请求超时 &lt; 容器宽限 &lt; 编排宽限。</dd>
+      <dt>杀不掉怎么办？</dt><dd>说明信号没送达或 handler 卡死——查 shell/exec 形式、查 handler 里是否有同步死循环，兜底是 stop -t 加大后仍 SIGKILL。</dd>
+    </dl>
+    <h4>项目故事</h4>
+    <p>现状坦白：我的 main.ts 还没加 enableShutdownHooks（本地开发场景没踩到痛点），这是我在多实例化清单里排了期的项——面试时这么说比假装做过安全得多。</p>
+  </div>
+</article>
+
+<article class="qa" data-qa-id="l1-q24">
+  <header class="qa-head"><span class="qa-tag adv">进阶</span><h3 class="qa-q">Docker 的分层靠什么实现？docker、containerd、runc 分别是什么关系？</h3></header>
+  <div class="qa-body">
+    <h4>考察点</h4>
+    <p>知不知道分层背后的内核机制，以及 Docker 不是"一个大程序"而是一条分工链。常和"K8s 为什么不用 Docker 了"连着问。</p>
+    <h4>30 秒回答</h4>
+    <p class="say">分层靠 Linux 内核自带的联合文件系统 OverlayFS，它能把几个普通目录叠成一个目录看：镜像的每一层是一个只读的下层目录（lowerdir），容器的可写层是一个上层目录（upperdir），容器里看到的根目录是内核叠出来的合并视图（merged）。读文件时上层有就用上层；第一次改下层文件，先把整个文件复制到上层再改，叫 copy-up；删下层文件，在上层放一个遮挡标记，叫 whiteout。分工链上，docker 命令发给 Docker Engine，它把镜像存储和容器管理交给 containerd，containerd 再通过 runc 真正创建容器进程、设置 namespace 和 cgroup。</p>
+    <dl>
+      <dt>overlay2 和 OverlayFS 是一回事吗？</dt><dd>不是。OverlayFS 是内核里的文件系统；overlay2 是 Docker 用 OverlayFS 存镜像层和容器层的那个"存储驱动"的名字。镜像层在硬盘上就是普通目录：传统方式下在 <code>/var/lib/docker/overlay2/</code> 下面每层一个，层里的文件放在它的 <code>diff</code> 子目录中。</dd>
+      <dt>containerd image store 又是什么？</dt><dd>决定"由谁来存镜像"的一种模式。原来镜像由 Docker 自己用 overlay2 存；全新安装的 Docker Engine 29+ 默认改由 containerd 来存，从旧版本升级上来的继续用 overlay2，除非手动开启。containerd 里负责叠层的组件叫 snapshotter，默认的就是 overlayfs，所以叠层原理完全不变，build / run / pull 的用法也不变。换的好处是能用上 containerd 生态的能力，例如在本地构建和存放多平台镜像（同一个镜像名下同时有 amd64 和 arm64 版本），以及带来源证明和 SBOM 的镜像。</dd>
+      <dt>K8s 1.24 移除了 dockershim，Docker 打的镜像还能用吗？</dt><dd>能。Docker Engine 没有实现 K8s 的容器运行时接口（CRI），K8s 以前靠一段叫 dockershim 的临时适配代码去调 Docker；1.24 删掉了它，改为直接和 containerd 这类运行时对话。<code>docker build</code> 出来的镜像遵循 OCI 镜像规范，在所有兼容 CRI 的运行时上照样能跑，开发机上也照样用 Docker。</dd>
+    </dl>
+    <h4>加分项</h4>
+    <p>copy-up 的性能含义：哪怕一个大文件只改一个字节，第一次也要整份复制到上层（之后再写就不复制了）。所以数据库文件这类大文件、写密集的数据应该放卷，不放可写层——"要留的数据放卷"这条纪律，在机制层面也站得住。</p>
+    <h4>常见错误</h4>
+    <p>把 OverlayFS、overlay2、containerd 混成一个东西；或者以为"K8s 弃用 Docker"意味着 Docker 镜像作废。</p>
+  </div>
+</article>
+
+<h2>场景排障题</h2>
+
+<article class="qa" data-qa-id="l1-q21">
+  <header class="qa-head"><span class="qa-tag scene">场景</span><h3 class="qa-q">用户反馈：容器明明在跑，服务就是访问不通。怎么排查？</h3></header>
+  <div class="qa-body">
+    <h4>答题框架</h4>
+    <p>流量从客户端到应用是一条链：客户端 → 宿主端口映射 → 容器网络 → 容器内应用监听。逐段验证，先定位"断在哪一段"，再谈为什么。</p>
+    <h4>30 秒回答</h4>
+    <p class="say">按链路从外到内排查：① <code>docker ps</code> 确认容器 Up 且端口映射列存在（0.0.0.0:8080-&gt;80）——容器 Exited 或映射漏写是最常见的"明明在跑"；② 宿主机 <code>curl localhost:8080</code>——通则是客户端侧问题（防火墙/安全组/网络），不通继续；③ 进容器 <code>docker exec -it sh</code> 后 <code>curl localhost:80</code>——通则问题在映射/网络层，不通则应用层；④ 容器内 <code>ss -tlnp</code> 看应用是否真的在监听期望端口——Node 常见坑：应用绑定 127.0.0.1 而不是 0.0.0.0，容器外永远连不进来；⑤ docker logs 看应用有没有 panic/端口占用报错。我自己的项目里还加了一层保险：请求日志和 $upstream_addr（nginx 侧），"到没到后端"一锤定音。</p>
+    <dl>
+      <dt>最常见的三个根因按概率排？</dt><dd>① 应用绑 127.0.0.1；② -p 忘写/写反/被占用；③ 容器在重启循环里（ps 看 Restarting 状态 + logs 看崩溃原因）。</dd>
+      <dt>如何预防？</dt><dd>镜像/Compose 里显式声明监听 0.0.0.0；healthcheck 让"活着但不可达"尽早暴露；发布清单里加"curl 探活"一步。</dd>
+    </dl>
+  </div>
+</article>
+
+<article class="qa" data-qa-id="l1-q22">
+  <header class="qa-head"><span class="qa-tag scene">场景</span><h3 class="qa-q">线上容器内存持续上涨，最后被 OOM 杀掉了。说说你的排查和解决。</h3></header>
+  <div class="qa-body">
+    <h4>答题框架</h4>
+    <p>现象（怎么确认是 OOM）→ 排查（区分"泄漏"和"水位正常但限额太低"）→ 根因 → 解决（代码/配置/架构三层）→ 预防。</p>
+    <h4>30 秒回答</h4>
+    <p class="say">先确认死因：<code>docker inspect</code> 看 State.OOMKilled=true、退出码 137——坐实 OOM。再看增长形态（docker stats 或监控曲线）：持续单调上涨不回落 = 泄漏，找到顶后周期性回落 = 水位高但不是泄漏。Node 泄漏常见根因：全局 Map/缓存无上限增长（我的代码里就有 cache/inflight 两个 Map，都是封顶 + TTL 设计的）、事件监听器没解绑、闭包引用。解决分三层：代码修根因；短期先加内存限额防拖垮宿主（注意 Node 要同步调 --max-old-space-size，否则 V8 会在容器限额内自己 OOM）；架构上把进程内缓存挪到外部（Redis），进程无状态化后单实例内存影响面就小了。</p>
+    <dl>
+      <dt>怎么定位到具体哪段代码泄漏？</dt><dd>Node 用 <code>node --inspect</code> + Chrome DevTools 内存面板拍堆快照对比（间隔两次快照看增长对象）；或 --heapsnapshot-signal 触发快照。能说出"对比两次堆快照找持续增长的对象"就是实战派。</dd>
+      <dt>预防？</dt><dd>缓存一律带 TTL + 容量上限；内存告警水位（如 80% 限额）；压测覆盖长时间运行场景。</dd>
+    </dl>
+    <h4>项目故事</h4>
+    <p>我的取数缓存三层设计（LRU 封顶 200 条 + 10 分钟 TTL + 同 key 并发去重）就是防 OOM 的具体实践——面试官问"缓存怎么防内存爆"，这就是带细节的真实答案。</p>
+  </div>
+</article>
+
+<article class="qa" data-qa-id="l1-q23">
+  <header class="qa-head"><span class="qa-tag scene">场景</span><h3 class="qa-q">镜像构建失败/构建极慢，你会怎么排查和优化？</h3></header>
+  <div class="qa-body">
+    <h4>答题框架</h4>
+    <p>先复现拿到报错 → 分类（网络/依赖/原生编译/上下文）→ 对症 → 缓存与速度优化。</p>
+    <h4>30 秒回答</h4>
+    <p class="say">构建失败先看报错落在哪一层：网络类（npm/apt 拉包超时）→ 换镜像源或配代理；依赖解析类（npm ci 报 lock 不匹配）→ 本地重新生成 lockfile 提交；原生编译类（node-gyp 报错）→ 大概率是 musl/glibc 或缺编译工具链——我自己就踩过 DuckDB 原生模块在 alpine 装不上，换 bookworm-slim 解决。构建慢的优化按收益排：.dockerignore 缩小上下文（node_modules 进上下文能拖慢数十秒）→ 依赖与源码分层保缓存命中 → 多阶段 + --omit=dev 减最终层体积 → BuildKit cache mount 复用包管理器缓存。</p>
+    <dl>
+      <dt>怎么确认慢在上下文传输而不是构建本身？</dt><dd>build 输出开头有 "transferring context" 的体积数字——几百 MB 说明 .dockerignore 没配好。</dd>
+    </dl>
+    <h4>项目故事</h4>
+    <p>我的 Dockerfile 三层缓存设计 + .dockerignore 排除 node_modules/dist/.env——改一行业务代码，依赖层全部 CACHED，秒级出镜像。</p>
+  </div>
+</article>
+
+<h2>本课速览</h2>
+
+<table class="qa-map">
+  <tr><th>题</th><th>一句话锚点</th></tr>
+  <tr><td>01</td><td>VM 虚拟硬件带整机 OS；容器共享宿主内核，namespace 隔离 + cgroup 限资源</td></tr>
+  <tr><td>02</td><td>镜像只读层叠 + 容器可写层；运行时写入落可写层，随容器删除而丢、不回写镜像；删底层文件是 whiteout</td></tr>
+  <tr><td>03</td><td>CMD 默认参数可覆盖；ENTRYPOINT 主程序参数追加；shell 形式吞信号</td></tr>
+  <tr><td>04</td><td>COPY 可预期；ADD 会自动解压/下载；官方推荐 COPY</td></tr>
+  <tr><td>05</td><td>缓存逐层复用，一条失效其后全重建；依赖层放最前 + npm ci</td></tr>
+  <tr><td>06</td><td>多阶段：构建工具链不进最终镜像，COPY --from 只带产物</td></tr>
+  <tr><td>07</td><td>-p 宿主:容器接线；EXPOSE 只是声明；自定义网络内按容器名 DNS 互访</td></tr>
+  <tr><td>08</td><td>volume 归 Docker 管是首选；bind mount 贴宿主路径适合开发；down -v 才删卷</td></tr>
+  <tr><td>09</td><td>HEALTHCHECK 只是标记 unhealthy，不会触发重启；重启归 restart policy</td></tr>
+  <tr><td>10</td><td>json-file 收 stdout/stderr 且默认不轮转——生产必配 max-size</td></tr>
+  <tr><td>11</td><td>-m/--cpus 底层是 cgroup；超内存 OOMKilled/退出码 137；Node 配 max-old-space-size</td></tr>
+  <tr><td>12</td><td>unless-stopped 尊重手动 stop；策略只管退出不管僵死</td></tr>
+  <tr><td>13</td><td>stop = SIGTERM → 等 10 秒 → SIGKILL；卡满 10 秒 = 信号没送到（shell 形式 / npm start）或 PID 1 忽略默认动作；解法 exec 形式 + init: true + enableShutdownHooks；退出码 137 = 被强杀</td></tr>
+  <tr><td>14</td><td>容器里 127.0.0.1 是自己；连宿主用 host.docker.internal（Linux 加 host-gateway）</td></tr>
+  <tr><td>15</td><td>musl vs glibc：原生依赖多选 slim——DuckDB 实战案例</td></tr>
+  <tr><td>16</td><td>共享内核弱于 VM：不 root、不挂 docker.sock、最小镜像、及时升级</td></tr>
+  <tr><td>17</td><td>tag 是可变指针 digest 不可变；生产禁 :latest；回滚 = 切 tag</td></tr>
+  <tr><td>18</td><td>Compose 单机编排 / K8s 集群编排；depends_on ≠ 就绪，condition: service_healthy</td></tr>
+  <tr><td>19</td><td>密钥运行时注入，绝不 COPY 进镜像（层不可变，删了也能挖出）</td></tr>
+  <tr><td>20</td><td>优雅停机：SIGTERM → 停接新请求 → 排空 → 清理退出；三层超时对齐</td></tr>
+  <tr><td>21</td><td>访问不通：ps 映射 → 宿主 curl → 容器内 curl → ss 看监听 → logs，逐段定位</td></tr>
+  <tr><td>22</td><td>OOM：inspect OOMKilled → 增长形态分泄漏/水位 → 代码/限额/架构三层修</td></tr>
+  <tr><td>23</td><td>构建失败按层定位（网络/lock/原生编译），优化按收益：ignore → 缓存分层 → 多阶段</td></tr>
+  <tr><td>24</td><td>分层靠内核 OverlayFS 叠目录（lower 只读 / upper 可写 / merged 视图）；改 = copy-up，删 = whiteout；链路 docker → containerd → runc</td></tr>
+</table>
+
+<div class="lesson-footer">
+  <span>Lesson 0001 / Docker 八股</span>
+  <a href="../reference/lab-0001-docker.html">实操谱 →</a>
+  <a href="0002-nginx.html">下一课：Nginx →</a>
+  <a href="../../learn-redis/reference/glossary.html">共享术语表 →</a>
+</div>
+
+</main>
+<script src="../assets/qa.js"></script>
+</body>
+</html>

@@ -209,7 +209,11 @@ export function useConversations(notify?: (msg: string) => void) {
         : c));
     setTypingId(convId);
     setLive({ convId, steps: [] });
-    /* 新一轮开始即作废上一轮的确认门（本轮若再次挂起，confirm_pending 会重新置上） */
+    /* 新一轮开始即作废上一轮的确认门（本轮若再次挂起，confirm_pending 会重新置上）；
+     * 清掉"还没处理过的门"说明用户绕过弹窗直接回复了——排查打点 */
+    if (confirmGate && confirmGate.convId === convId) {
+      reportClientLog("info", "新一轮发送清除既有确认门", { convId, kind: confirmGate.kind });
+    }
     setConfirmGate(g => (g && g.convId === convId ? null : g));
     inFlight.current.add(convId);
 
@@ -249,6 +253,7 @@ export function useConversations(notify?: (msg: string) => void) {
             return { ...p, steps };
           });
         } else if (ev.type === "confirm_pending") {
+          reportClientLog("info", "确认门事件到达", { convId, kind: ev.kind, paramsCount: Object.keys(ev.params ?? {}).length });
           setConfirmGate({ convId, kind: ev.kind, params: ev.params });
         } else if (ev.type === "tool_result") {
           setLive(p => {

@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>速查 · String 缓存命令 × 进程内缓存对照</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<main>
+
+<div class="kicker">Reference · Redis</div>
+<h1>String 缓存命令速查 × 你的进程内缓存</h1>
+<div class="lesson-meta">
+  配套 <a href="../lessons/0001-redis-vs-in-process-cache.html">Lesson 0001</a> ·
+  在线练习：<a href="https://redis.io/try/sandbox">官方沙盒</a> ·
+  正式语义：<a href="https://redis.io/docs/latest/commands/">命令参考</a>
+</div>
+
+<h2>命令面（全部 O(1)）</h2>
+
+<table>
+  <tr><th>命令</th><th>语法</th><th>说明</th></tr>
+  <tr><td><code>SET</code></td><td><code>SET key value [EX sec]</code></td><td>写键。<code>EX</code> 同时设 TTL，原子完成；另有 <code>PX ms</code> 毫秒版、<code>NX</code>（仅不存在时写）、<code>XX</code>（仅存在时写）</td></tr>
+  <tr><td><code>GET</code></td><td><code>GET key</code></td><td>读键，无则 <code>nil</code>。值是任意字节串（常放 JSON）</td></tr>
+  <tr><td><code>DEL</code></td><td><code>DEL key [key …]</code></td><td>删一个或多个键，返回删除数</td></tr>
+  <tr><td><code>EXISTS</code></td><td><code>EXISTS key [key …]</code></td><td>存在性检查，返回命中个数（0/1/…）</td></tr>
+  <tr><td><code>EXPIRE</code></td><td><code>EXPIRE key sec</code></td><td>给已有键设/重设 TTL（<code>SET EX</code> 能一步做的不要拆两步）</td></tr>
+  <tr><td><code>TTL</code></td><td><code>TTL key</code></td><td>剩余秒数。<code>-1</code> = 键在但无 TTL；<code>-2</code> = 键不存在。毫秒版 <code>PTTL</code></td></tr>
+  <tr><td><code>PERSIST</code></td><td><code>PERSIST key</code></td><td>移除 TTL，变回永生键</td></tr>
+  <tr><td><code>TYPE</code></td><td><code>TYPE key</code></td><td>看键的值类型（string/list/hash/…）</td></tr>
+  <tr><td><code>INCR</code> / <code>INCRBY</code></td><td><code>INCR key</code> / <code>INCRBY key n</code></td><td>string 内置整数语义，原子自增（<code>DECR</code> 相反）。计数器/限流器基石</td></tr>
+  <tr><td><code>SETEX</code></td><td><code>SETEX key sec value</code></td><td>旧写法，等价 <code>SET key value EX sec</code>；新代码统一用后者</td></tr>
+</table>
+
+<h2>键名约定（项目向）</h2>
+
+<p>Redis 键空间是<strong>扁平</strong>的，没有目录——层级全靠约定俗成的冒号分隔。照你的取数场景推荐：</p>
+
+<pre class="plain"><code>factor:&lt;field&gt;:&lt;securityId&gt;:&lt;yyyymmdd&gt;     # 单点因子读缓存（read_factor_data）
+quote:&lt;yyyymmdd&gt;:&lt;ticker&gt;.&lt;exchange&gt;       # 日行情行缓存
+backtest:&lt;strategyId&gt;:&lt;hash&gt;               # 策略回测结果缓存
+rl:&lt;userId&gt;:&lt;windowStart&gt;                  # 限流计数器（INCR + EX）</code></pre>
+
+<h2>机制对照：你的缓存 → Redis</h2>
+
+<table>
+  <tr><th>mysql-factor-data.service.ts 里</th><th>Redis 对应物</th><th>要点</th></tr>
+  <tr><td><code>hit.at</code> 手工 TTL（10 分钟）</td><td><code>SET … EX</code> + 服务端过期</td><td>TTL 记在服务端，进程重启/部署不影响存活中的键</td></tr>
+  <tr><td>LRU 200 条封顶</td><td><strong>无内置默认</strong></td><td>需配 <code>maxmemory</code> + <code>maxmemory-policy allkeys-lru</code>；否则键无限增长到吃满内存</td></tr>
+  <tr><td><code>inflight</code> 同 key 并发去重</td><td>单命令原子性 / <code>SET NX</code></td><td>单条命令天然原子；多条命令的组合原子性要 Lua 脚本或 MULTI/EXEC（后续课）</td></tr>
+  <tr><td>「结果集只读」约定</td><td>反序列化副本</td><td>每次 GET 都是新副本，天然无共享可变状态，约定可删</td></tr>
+  <tr><td>进程重启缓存全丢</td><td>独立进程存活；可选 RDB/AOF 持久化</td><td>持久化是双刃剑（后续课），缓存场景也可以接受重启冷启动</td></tr>
+  <tr><td>缓存命中打日志（cacheHits）</td><td><code>INFO stats</code> / <code>MONITOR</code></td><td>命中率观测内建在服务端统计里</td></tr>
+</table>
+
+<div class="callout warn">
+  <span class="label">迁移提醒</span>
+  对照表第二行是最大的认知差：Redis <strong>不会自动 LRU</strong>。你的 200 条封顶在 Redis 语境里是部署配置（<code>maxmemory-policy</code>），不是代码行为。引 Redis 时忘配这一项，是生产事故的经典来源。
+</div>
+
+<div class="lesson-footer">
+  <a href="../lessons/0001-redis-vs-in-process-cache.html">← 返回 Lesson 0001</a>
+  <span>learn-redis reference</span>
+</div>
+
+</main>
+</body>
+</html>

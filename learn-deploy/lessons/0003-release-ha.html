@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>0003 · 发布与高可用面试题库：滚动更新、迁移、高可用架构</title>
+<link rel="stylesheet" href="../assets/style.css">
+<link rel="stylesheet" href="../assets/qa.css">
+</head>
+<body>
+<main>
+
+<div class="kicker">Lesson 0003 · 发布 / 高可用八股</div>
+<h1>发布与高可用面试题库：滚动更新、迁移、高可用架构</h1>
+<div class="lesson-meta">
+  17 题（10 必考 + 3 进阶 + 4 场景） · 每题先口述再展开对照 ·
+  <a href="../reference/lab-0003-release.html">实操谱</a> ·
+  <a href="../../learn-redis/reference/glossary.html">术语表</a>
+</div>
+
+<div data-qa-toolbar></div>
+
+<div class="callout">
+  <span class="label">项目故事（本课）</span>
+  「多实例发布方案：双实例 + ip_hash 粘性起步，发布用 compose 逐台滚动（--no-deps --wait 健康门禁），POST 不被 nginx 自动换台所以设计了摘流量→排空→重启→请回的流程；数据库迁移守 expand-migrate-contract；版本用镜像标签管理可秒级回滚。当前单实例，这套是规划——我做到了"能讲清每一跳为什么"，落地谱在实操清单里。」——诚实版本：面试官追问细节时，设计层面的答案全部成立，不要把"规划"说成"已经跑了半年"。
+</div>
+
+<h2>必考八股</h2>
+
+<article class="qa" data-qa-id="l3-q01">
+  <header class="qa-head"><span class="qa-tag">必考</span><h3 class="qa-q">什么是滚动更新（rolling update）？和蓝绿发布、灰度（金丝雀）发布的区别？</h3></header>
+  <div class="qa-body">
+    <h4>考察点</h4>
+    <p>三大发布策略的定义与取舍——部署类面试的必考第一题。</p>
+    <h4>30 秒回答</h4>
+    <p class="say">滚动更新：逐个（或按批）替换旧实例，任何时刻集群都有健康实例在服务，资源省（不用双倍）、周期长、新旧版本短暂共存；K8s 的默认发布方式。蓝绿发布：两套完整环境，新版本（绿）整体验证后网关一次切换流量，切换秒级、回滚就是切回去，但要双倍资源，数据库兼容问题依然存在。灰度/金丝雀：新版本只接一小部分流量（1%→10%→50%→100%），用真实流量验证，出问题影响面小，需要流量按比例调度的基础设施。一句话对比：滚动省资源逐台换，蓝绿整批切换要双倍资源，金丝雀按流量比例试探。</p>
+    <dl>
+      <dt>你们项目用什么？</dt><dd>双实例规模：手动滚动（逐台 build + --no-deps --wait），同时只更新一台本身就是 50% 金丝雀——旧版留在 B 上当安全网。权重灰度 nginx weight 一行就够，蓝绿对两台容器规模是资源浪费。</dd>
+      <dt>蓝绿的"数据库问题"是什么？</dt><dd>蓝绿解决了应用切换，但蓝绿两套应用连的通常是同一个库——发布时库的迁移仍必须向后兼容，切流量救不了不兼容的 schema 变更。</dd>
+    </dl>
+    <h4>加分项</h4>
+    <p>补一句不可变基础设施：每次发布是"用新镜像替换整个实例"而不是"登进旧实例改文件"——实例可随时销毁重建，回滚就是换回旧镜像。</p>
+    <h4>常见错误</h4>
+    <p>三个概念混为一谈；或说不出蓝绿比滚动贵在哪（双倍资源）、金丝雀比滚动强在哪（真实流量按比例试探 + 可快速回滚）。</p>
+  </div>
+</article>
+
+<article class="qa" data-qa-id="l3-q02">
+  <header class="qa-head"><span class="qa-tag">必考</span><h3 class="qa-q">什么是优雅停机？发布时不做优雅停机会发生什么？</h3></header>
+  <div class="qa-body">
+    <h4>考察点</h4>
+    <p>SIGTERM 处理 + 排空——把 0001 的停机题升级到发布语境。</p>
+    <h4>30 秒回答</h4>
+    <p class="say">发布重启实例时，系统发 SIGTERM，优雅停机就是应用接住它后的正确姿势：先停止接收新请求（从负载均衡摘除 + 关闭监听），让在途请求处理完（排空/drain），清理资源后退出。不做的话：在途请求被硬切，客户端看到连接重置/502；正在写的事务半途而废；后台任务（定时器、消费循环）被拦腰砍断。Docker 的配套：SIGTERM → 默认 10 秒宽限 → SIGKILL；K8s 默认 30 秒（terminationGracePeriodSeconds）。Node/NestJS 对应 enableShutdownHooks + onModuleDestroy 里 server.close()。</p>
+    <dl>
+      <dt>摘流量为什么要在停接新请求之前？</dt><dd>顺序是"先从 LB 摘除 → 等路由收敛/在途排空 → 再关进程"。如果先关监听，正在派发的请求会撞 connection refused；先摘流量让 LB 把新请求导向别台，自己慢慢消化存量，才是真正的零感知。</dd>
+      <dt>长连接（SSE/WebSocket）怎么排空？</dt><dd>存量连接要么等自然结束（发布窗口太长不现实），要么服务端发"即将重启"事件让客户端主动重连到其他实例。我的对话是 SSE——发布前会有一次批量断流，客户端重连后从检查点恢复，这是规划中的恢复机制。</dd>
+    </dl>
+    <h4>加分项</h4>
+    <p>三层超时对齐：请求处理超时 &lt; 容器宽限期 &lt; 编排平台宽限期——任何一层兜不住上一层的超时设计，都会退化为硬切。</p>
+  </div>
+</article>
+
+<article class="qa" data-qa-id="l3-q03">
+  <header class="qa-head"><span class="qa-tag">必考</span><h3 class="qa-q">数据库迁移怎么做才能不停机发布？（怎么保证新旧版本共存）</h3></header>
+  <div class="qa-body">
+    <h4>考察点</h4>
+    <p>expand-migrate-contract / 向后兼容迁移——发布类问题里最难也最能区分层次的题。</p>
+    <h4>30 秒回答</h4>
+    <p class="say">核心矛盾：滚动/蓝绿期间新旧两版代码连同一个库，schema 变更不能弄死任何一版。方法叫 expand-migrate-contract（扩张-迁移-收缩），把一次"破坏性变更"拆成多次兼容发布：扩张——加新列/新表（可空或带默认值），旧代码无感；迁移——新版本读写新结构，逐步把数据搬过去、调用方切到新接口；收缩——全量上新版后，下个发布再删旧列/旧表。纪律：只加不改删、改名拆三次发布、删除永远放最后一个版本、迁移脚本幂等。</p>
+    <dl>
+      <dt>MySQL 加列要锁表吗？</dt><dd>MySQL 8.0 的在线 DDL 里 ADD COLUMN 走 INSTANT 算法（8.0.12 起支持并已是默认，8.0.29 起任意位置），只改元数据秒级完成；大表的历史痛点主要在改列类型/改字符集这类要重建表的 DDL——那种必须 pt-osc/gh-ost 这类在线改表工具或拆步骤。</dd>
+      <dt>改列名怎么拆？</dt><dd>发布1：加新列（双写新旧两列）；发布2：读切新列；发布3：确认旧列无人用后删除。每一步都向后兼容。</dd>
+      <dt>应用层怎么配合？</dt><dd>启动时自动迁移要幂等（CREATE TABLE IF NOT EXISTS / IF NOT EXISTS 判断），两版实例各自启动都安全——我们项目现有的 ensureFactorUsageTable 就是这个模式。</dd>
+    </dl>
+    <h4>常见错误</h4>
+    <p>只答"低峰期发布"；或知道 expand-contract 但说不出"为什么删除要等下一个发布"（旧版本可能还在跑）。</p>
+  </div>
+</article>
+
+<article class="qa" data-qa-id="l3-q04">
+  <header class="qa-head"><span class="qa-tag">必考</span><h3 class="qa-q">什么是幂等性？为什么支付/下单接口必须幂等？怎么实现？</h3></header>
+  <div class="qa-body">
+    <h4>考察点</h4>
+    <p>幂等概念 + 实现方案——和重试机制成对出现的高频题。</p>
+    <h4>30 秒回答</h4>
+    <p class="say">幂等 = 同一操作执行一次和执行 N 次的效果相同。网络世界里"请求发了但响应丢了"必然导致客户端重试——不幂等的下单接口重试一次就多扣一单。实现方案按层次：① 数据库层：唯一键约束（订单号唯一，重复插入报错回查）+ INSERT ... ON DUPLICATE KEY UPDATE / INSERT IGNORE；② 应用层：幂等令牌——客户端先取唯一 key（或用业务单号），服务端以 key 做去重（Redis SETNX 或数据库唯一索引），处理过就返回上次结果；③ 状态机：更新带前置状态条件（UPDATE orders SET status='paid' WHERE id=? AND status='pending'），重复执行影响行数为 0 自然幂等。</p>
+    <dl>
+      <dt>GET 为什么天然幂等，POST 为什么不是？</dt><dd>GET 只读不副作用，重复执行无差异；POST 每次都产生新资源/新副作用。这也是 nginx 默认只对幂等请求自动换台重试的原因——POST 重试可能重复扣款，必须配合幂等设计才能安全重试。</dd>
+      <dt>你项目里哪里用到？</dt><dd>两个真实点：策略保存用 INSERT ... ON DUPLICATE KEY UPDATE（幂等 upsert，用户重复点保存不产生脏数据）；conversation_runs 按会话内递增 seq 存储避免重复卡片。原则：所有"可能被重试触发"的写路径都要设计幂等。</dd>
+      <dt>分布式锁和幂等的区别？</dt><dd>锁防并发（同时只有一个进临界区），幂等防重复（进多少次效果一样）——两者常组合用：锁住 + 幂等兜底。</dd>
+    </dl>
+    <h4>加分项</h4>
+    <p>提一下业界接口范例：Stripe 的 Idempotency-Key 头——服务端保存首次响应，同 key 重试返回相同结果。</p>
+  </div>
+</article>
+
+<article class="qa" data-qa-id="l3-q05">
+  <header class="qa-head"><span class="qa-tag">必考</span><h3 class="qa-q">什么是高可用？怎么衡量？（几个 9）</h3></header>
+  <div class="qa-body">
+    <h4>考察点</h4>
+    <p>可用性的量化定义 + 提升手段的总览——高可用面试的框架题。</p>
+    <h4>30 秒回答</h4>
+    <p class="say">高可用 = 系统无间断提供服务的能力，用全年正常服务时间占比衡量：99%（3 个 9）≈ 全年 87.6 小时不可用，99.9% ≈ 8.8 小时，99.99% ≈ 53 分钟——每多一个 9 代价非线性增长。提升手段金字塔：消除单点（每个环节冗余：多实例、主从、多机房）；故障转移（探活 + 自动切换：LB 摘除、主从切换）；快速回滚（发布是最大的自伤来源）；限流降级熔断（保核心弃边缘）；以及接受现实——故障不可能为零，高可用的本质是"故障发生时影响面可控、恢复时间够短"（MTBF/MTTR）。</p>
+    <dl>
+      <dt>99.99% 意味着每月多久？</dt><dd>每月约 4.4 分钟（每年 53 分钟 ÷ 12）。现场心算这个数，比背定义加分。</dd>
+      <dt>你们项目怎么落地高可用？</dt><dd>当前单实例谈不上 HA——这是诚实的前提。规划：双实例 + nginx 摘除解决"进程挂了服务不断"，restart policy + healthcheck 解决自愈，镜像标签秒级回滚解决发布自伤；数据层依赖公司 MySQL 既有高可用。下一步（Redis 共享状态）解决"会话不随实例死"。</dd>
+    </dl>
+    <h4>常见错误</h4>
+    <p>背出几个 9 但换算不出来；或把高可用等同于"多部署几台"而不谈探活和转移。</p>
+  </div>
+</article>
+
+<article class="qa" data-qa-id="l3-q06">
+  <header class="qa-head"><span class="qa-tag">必考</span><h3 class="qa-q">服务多实例部署后，哪些"单实例理所当然"的事情会出问题？（状态清单题）</h3></header>
+  <div class="qa-body">
+    <h4>考察点</h4>
+    <p>对"进程内状态"的清点能力——这道题答得好，直接证明你真的理解多实例，而不是背了名词。</p>
+    <h4>30 秒回答</h4>
+    <p class="say">凡存在单实例进程内存/本地盘里的东西都会出问题，我按自己项目清点过五类：① 进程内缓存——各实例各缓存各的，命中率掉、重复打库（解法：Redis 共享缓存）；② 内存里的会话/业务状态——多步流程状态、挂起恢复映射，请求被分到另一台就"失忆"（解法：粘性兜底 + 外置 Redis 根治）；③ 定时任务/后台 Job——每台都跑一遍，重复执行（解法：分布式锁 / 只在 leader 跑 / 独立 worker 进程）；④ 本地文件——上传文件、日志、生成物散在各机器（解法：对象存储/共享存储）；⑤ 资源闸与限流——进程内信号量失效，全局并发超限 N 倍（解法：Redis 计数器/分布式限流，或接受每实例限额）。万能收尾："所以多实例改造的本质是把进程内状态外置到共享层。"</p>
+    <dl>
+      <dt>你的项目里最痛的是哪个？</dt><dd>GLM 并发闸：单实例 maxConcurrency=2 保护团队共享的 API 配额，双实例变 4，直接顶撞全团队限流——这是我设计里第一个要搬进 Redis 的状态。</dd>
+    </dl>
+    <h4>加分项</h4>
+    <p>强调"新增任何会话级状态必须按会话键控、并预留外置接口"是设计纪律——多实例友好不是上线前补课，是写代码时的习惯。</p>
+  </div>
+</article>
+
+<article class="qa" data-qa-id="l3-q07">
+  <header class="qa-head"><span class="qa-tag">必考</span><h3 class="qa-q">分布式定时任务多实例重复执行怎么解决？</h3></header>
+  <div class="qa-body">
+    <h4>考察点</h4>
+    <p>状态清单题（q06）的第③项单独展开——setInterval/xxl-job/Elastic-Job 层次递进。</p>
+    <h4>30 秒回答</h4>
+    <p class="say">多实例每台都跑 @Cron/setInterval → 同一任务重复执行（重复扣款、重复发通知）。方案递进：① 数据库乐观锁/唯一约束兜底——任务表带执行状态，抢到才跑（UPDATE ... WHERE status='pending' 影响行数=1 才执行），最简单可靠；② Redis 分布式锁（SET key value NX EX ttl）——同一时刻只有锁主执行，注意锁要带过期防死锁、值带唯一标识防误删（释放时校验是自己的锁，或用 RedLock/Redisson）；③ 任务调度平台（xxl-job/Elastic-Job）：调度中心路由到单台执行，自带分片和失败转移；④ K8s CronJob 天然单实例。选型：小规模 DB 锁或 Redis 锁足够，任务多且要管理面上调度平台。</p>
+    <dl>
+      <dt>Redis 锁过期了任务还没跑完怎么办？</dt><dd>看门狗续期（Redisson 的 watchdog 自动续）；或任务设计成可安全重入（幂等）——锁只是优化，幂等才是兜底。这句话是本题的升华点。</dd>
+      <dt>你项目里有定时任务吗？</dt><dd>有进程内作业：对话摘要折叠、保活心跳定时器。单实例下 setInterval 没问题，多实例化清单里它们要迁到"锁保护或独立 worker"模式——这是我状态清单里真实的一项。</dd>
+    </dl>
+  </div>
+</article>
+
+<article class="qa" data-qa-id="l3-q08">
+  <header class="qa-head"><span class="qa-tag">必考</span><h3 class="qa-q">负载均衡把请求分到挂掉的服务怎么办？谈谈故障转移的完整链路。</h3></header>
+  <div class="qa-body">
+    <h4>考察点</h4>
+    <p>探活 → 摘除 → 重试 → 自愈的闭环，考验层次感。</p>
+    <h4>30 秒回答</h4>
+    <p class="say">完整链路四层防线：① 探活发现——LB 被动感知（转发失败计数：nginx max_fails/fail_timeout）或主动探测（健康检查定期戳 /health）；② 流量摘除——失败的实例在惩罚窗口内不再接新请求，流量自动走健康实例；③ 请求级重试——幂等请求换台重试（nginx proxy_next_upstream 默认只对 GET 这类幂等请求，POST 不自动重试以防重复副作用）；④ 实例自愈——容器 restart policy 拉起崩溃进程，healthcheck 标记 unhealthy，编排层（K8s liveness）负责重启僵死实例。要能指出边界：POST 不自动重试是防止重复副作用，根解是接口幂等化后再开重试；"活着但很慢"的实例被动探活发现不了，需要主动探测或超时熔断。</p>
+    <dl>
+      <dt>K8s 里 liveness 和 readiness 的分工？</dt><dd>liveness 失败 → 重启容器（管"活着没"）；readiness 失败 → 从 Service 端点摘除但不重启（管"能不能接客"，比如启动中/依赖不可用）。启动慢的服务配 startup probe 防止被 liveness 误杀。这一组对比是 K8s 面试高频。</dd>
+    </dl>
+    <h4>项目故事</h4>
+    <p>我给两个后端实例都配了 healthcheck（戳 Swagger 页），compose 层面 restart: unless-stopped 兜进程崩溃——对应这条链路的最外两层；nginx 摘除和 POST 不重试的坑在发布流程里用"摘流量→排空"规避。</p>
+  </div>
+</article>
+
+<article class="qa" data-qa-id="l3-q09">
+  <header class="qa-head"><span class="qa-tag">必考</span><h3 class="qa-q">限流、熔断、降级分别是什么？怎么配合？</h3></header>
+  <div class="qa-body">
+    <h4>考察点</h4>
+    <p>服务稳压三件套的概念辨析 + 组合拳——大流量场景必考。</p>
+    <h4>30 秒回答</h4>
+    <p class="say">限流：只放进来系统能承受的请求量，超出的直接拒绝（网关 nginx limit_req、应用内信号量/令牌桶），保护自己不被压垮。熔断：调用下游失败率超阈值时直接"跳闸"，一段时间内请求不再真正发往下游，快速失败，防止故障扩散和线程/连接池被拖垮（经典模型是断路器三态：closed→open→half-open 半开试探恢复）。降级：系统压力大或依赖不可用时，有损服务——砍掉非核心功能（关推荐、关日志），返回兜底数据/默认值/友好提示。配合关系：限流决定"进多少"，熔断决定"调不调下游"，降级决定"调不到时给什么"——三者共同把"雪崩"变成"可控的有损服务"。</p>
+    <dl>
+      <dt>你的项目哪里有真实对应？</dt><dd>三层都有实例：GLM 并发信号量是应用层限流（保护团队 API 配额）；计划中的多实例全局闸是 Redis 计数限流；归因解读对 GLM 失败的兜底是真实降级——"解读失败不挡数据层"，聚合数据照常返回。能讲自己代码里的降级案例非常加分。</dd>
+      <dt>熔断和超时的区别？</dt><dd>超时是单次请求的止损；熔断是统计层面的连锁反应止损——失败率超阈值后连试都不试，避免每个请求都白白等一个超时周期。</dd>
+    </dl>
+    <h4>常见错误</h4>
+    <p>三个词混着用说不出边界；或不知道熔断的 half-open 半开恢复态。</p>
+  </div>
+</article>
+
+<article class="qa" data-qa-id="l3-q10">
+  <header class="qa-head"><span class="qa-tag">必考</span><h3 class="qa-q">K8s 的滚动更新是怎么工作的？maxUnavailable / maxSurge 是什么？</h3></header>
+  <div class="qa-body">
+    <h4>考察点</h4>
+    <p>把手动滚动升级到 K8s 自动化的认知——"你们那套手动流程在 K8s 里对应什么"。</p>
+    <h4>30 秒回答</h4>
+    <p class="say">Deployment 更新镜像时，ReplicaSet 按策略逐步新建新版本 Pod、淘汰旧版本 Pod，滚动到全量。两个旋钮：maxSurge 允许超出期望副本数的量（先多起几个新的，保证容量不降）；maxUnavailable 允许同时不可用的量（控制更新期间服务能力的下限），都可以是数字或百分比。配合探针才是完整闭环：新 Pod 要过 readiness 才会接流量、liveness 保证新版本不是"活着但坏的"；终止旧 Pod 时走优雅终止流程（preStop → SIGTERM → 30s 宽限 → SIGKILL）。这和我手动做的"build → up --wait → 逐台换"是同一件事的自动化——我手动版的意义是理解每一步在自动版里由谁执行。</p>
+    <dl>
+      <dt>发新版后一直卡在滚动中，怎么排查？</dt><dd>kubectl rollout status + describe pod：大概率是新 Pod 过不了 readiness（探针配错/依赖不通）或镜像拉取失败（ImagePullBackOff）。这也暴露 K8s 的一个设计：新版本过不了健康检查，滚动会自动暂停，旧版本继续服务——发布安全网内建。</dd>
+    </dl>
+    <h4>常见错误</h4>
+    <p>只背 maxSurge/maxUnavailable 定义，说不出它们和探针、优雅终止是怎么串成"安全滚动"的。</p>
+  </div>
+</article>
+
+<h2>进阶追问</h2>
+
+<article class="qa" data-qa-id="l3-q11">
+  <header class="qa-head"><span class="qa-tag adv">进阶</span><h3 class="qa-q">分布式锁怎么做？Redis 锁为什么要设过期时间、为什么释放前要校验是自己加的锁？</h3></header>
+  <div class="qa-body">
+    <h4>30 秒回答</h4>
+    <p class="say">Redis 分布式锁标准姿势：<code>SET lock_key uniqueValue NX EX ttl</code>——NX 保证互斥（存在即失败），EX 防死锁（持锁者崩溃锁也能自动释放），value 放唯一标识（UUID）。释放用 Lua 脚本"先比对 value 是自己的再删"——两步合一保证原子。校验身份的原因：A 拿锁后处理太久锁过期，B 拿到锁，此时 A 干完活直接 DEL 会删掉 B 的锁——校验 value 才知道锁还是不是自己的。遗留风险：锁过期但任务没完（看门狗续期解决）；主从切换瞬间锁丢失（RedLock 多数派方案，有争议但面试可以提）。设计心法：锁是优化，幂等才是兜底——锁失效时业务也不能坏。</p>
+    <dl>
+      <dt>RedLock 是什么？争议在哪？</dt><dd>向 N 个独立 Redis 实例加锁，多数派成功才算持锁——防单点。Martin Kleppmann 质疑其时钟假设和 GC 停顿场景，社区结论是"强正确性要求用 ZooKeeper/etcd 或幂等设计，Redis 锁定位是效率锁（防重复劳动）而非正确性锁"。能说出这层定性就是高分。</dd>
+    </dl>
+  </div>
+</article>
+
+<article class="qa" data-qa-id="l3-q12">
+  <header class="qa-head"><span class="qa-tag adv">进阶</span><h3 class="qa-q">什么是缓存穿透、击穿、雪崩？分别怎么防？</h3></header>
+  <div class="qa-body">
+    <h4>考察点</h4>
+    <p>Redis 面试头号高频题——提前在这里打地基（Redis 轨会展开，这里先建立框架）。</p>
+    <h4>30 秒回答</h4>
+    <p class="say">穿透：查询<strong>根本不存在</strong>的数据，缓存永远不命中，每次都打到库——常是恶意攻击。防：空值缓存（存在的"null"结果也缓存短 TTL）+ 布隆过滤器（前置判断"一定不存在"就拦下）。击穿：某个<strong>热点 key 过期瞬间</strong>，大量并发同时打库。防：热点 key 逻辑过期（物理不过期，值里带过期时间异步刷新）+ 互斥锁（只放一个请求去重建缓存，其余等待）。雪崩：<strong>大批 key 同时过期</strong>或 Redis 整体宕机，流量全量砸向数据库。防：过期时间加随机抖动错峰、多级缓存（本地+Redis）、Redis 高可用（哨兵/集群）、熔断限流兜底。一句话区分：穿透查不存在的、击穿打一个热点、雪崩是成片或整体宕机。</p>
+    <dl>
+      <dt>布隆过滤器的原理和代价？</dt><dd>位数组 + 多哈希：说"可能存在"或"一定不存在"，有误判率、标准版不能删除。适合放在缓存前挡穿透流量。</dd>
+    </dl>
+    <h4>常见错误</h4>
+    <p>击穿和穿透说反（这是最高频的口误）——记住：击穿是"一个点"被打穿，穿透是"穿过去"打到不存在的数据。</p>
+  </div>
+</article>
+
+<article class="qa" data-qa-id="l3-q13">
+  <header class="qa-head"><span class="qa-tag adv">进阶</span><h3 class="qa-q">故障演练（chaos engineering）听说过吗？你们会怎么演练"实例挂掉"？</h3></header>
+  <div class="qa-body">
+    <h4>30 秒回答</h4>
+    <p class="say">混沌工程 = 主动向系统注入故障，验证冗余和自愈机制真的有效，而不是"以为有效"。原则：小范围、可观察、可快速中止、先非生产。以我们项目为例，双实例上线后的演练清单：docker kill 一台 → 验证 nginx 摘除、用户侧无 5xx（或仅个别在途请求失败）、restart policy 拉起；发布中途 kill → 验证旧版本继续服务、--wait 是否正确阻塞；把内存限额打满 → 验证 OOM 后自愈时间；演练摘流量/排空流程的真实耗时（决定发布窗口承诺）。度量指标：故障注入到流量恢复的时间、期间错误率。没有演练过的高可用都是纸面高可用——这句话本身就是加分答案。</p>
+    <dl>
+      <dt>生产上敢做吗？</dt><dd>渐进：先非生产全量演练 → 生产低峰小范围（先 kill 非核心实例）→ 有完善监控和一键中止后才扩大。Netflix 的 Chaos Monkey 是鼻祖。</dd>
+    </dl>
+  </div>
+</article>
+
+<h2>场景排障题</h2>
+
+<article class="qa" data-qa-id="l3-q14">
+  <header class="qa-head"><span class="qa-tag scene">场景</span><h3 class="qa-q">发布新版本后，部分用户开始报错，另一部分正常。怎么定位和止损？</h3></header>
+  <div class="qa-body">
+    <h4>答题框架</h4>
+    <p>"部分用户异常"第一时间想到版本维度：是不是只有新版实例在报错？按"报错请求落在哪台 + 哪个版本"切分日志是破题关键。</p>
+    <h4>30 秒回答</h4>
+    <p class="say">定位：把报错请求按实例/版本维度聚合——nginx 日志 upstream_addr + 后端日志版本标记，如果报错集中在 v2 实例，基本锁定新版本问题（或新版本触发的数据问题，比如不兼容的迁移）。止损顺序：先把报错实例从 LB 摘掉（旧版继续服务，用户立刻恢复）→ 修数据/回滚版本 → 复盘。如果报错不按版本分布，则转向数据维度（某类用户/某个参数触发）——比如迁移只写了部分数据。预防：灰度发布让"部分用户报错"天然只影响小流量；发布后盯错误率曲线而不是发完就走。</p>
+    <dl>
+      <dt>为什么不要直接全量回滚？</dt><dd>先摘除是更细粒度的止损：如果是数据问题而非代码问题，回滚代码没用；摘除还能保留现场继续排查。全量回滚是拿不到"摘除"这个选项时（比如单实例）的兜底。</dd>
+    </dl>
+  </div>
+</article>
+
+<article class="qa" data-qa-id="l3-q15">
+  <header class="qa-head"><span class="qa-tag scene">场景</span><h3 class="qa-q">发布完成后，定时任务开始重复执行/数据出现重复记录。为什么？</h3></header>
+  <div class="qa-body">
+    <h4>答题框架</h4>
+    <p>把"重复执行"归因到多实例（q06/q07 的落地）：任何"进程内只会有一份"的假设都被打破。</p>
+    <h4>30 秒回答</h4>
+    <p class="say">原因：定时任务/后台作业以前在单实例进程里只跑一份，多实例后每台都注册了自己的 setInterval/@Cron，同一时刻 N 台同时执行。数据重复的具体机制：任务不幂等（每次执行都插入新记录/发通知）。修复三步：立即止血——只留一台跑任务或先摘掉任务（配置开关）；短期——任务加分布式锁（SET NX EX）或数据库抢占（UPDATE ... WHERE status='pending' 判影响行数）；长期——任务改造为幂等（业务唯一键 + upsert），并把后台作业从 web 进程剥离到独立 worker（web 无状态化，worker 天然单实例或分片），这是架构上更干净的终态。预防清单：多实例上线前清点全部 setInterval/@Cron（我项目的摘要折叠 job 和保活定时器就在清单里）、写路径一律走唯一约束。</p>
+    <dl>
+      <dt>为什么数据层没有拦住重复？</dt><dd>插入语句没带业务唯一键——重复数据能进来说明表缺唯一约束。补唯一索引是防重复的最后防线，也是这次事故的第一修复项。</dd>
+    </dl>
+  </div>
+</article>
+
+<article class="qa" data-qa-id="l3-q16">
+  <header class="qa-head"><span class="qa-tag scene">场景</span><h3 class="qa-q">发布期间用户投诉"正在进行的对话突然断了"。根因和改进分别是什么？</h3></header>
+  <div class="qa-body">
+    <h4>答题框架</h4>
+    <p>长连接服务（SSE/WS）+ 发布的组合题：分清"哪一刀切断了它"，再按不可恢复/可恢复分层改进。</p>
+    <h4>30 秒回答</h4>
+    <p class="say">根因链：用户对话是分钟级 SSE 长请求 → 发布重启了它所在的实例 → 连接被 SIGTERM 掐断 → 客户端报错。改进分四层：① 发布侧：摘流量→排空→再重启，新请求不再进来，但存量长请求仍然被杀——排空对分钟级长请求不现实，所以要②应用侧：SIGTERM 时给所有活跃 SSE 发"服务即将重启"事件，客户端静默重连（重连被 LB 导到健康实例）；③ 恢复侧：对话状态检查点化——工具已执行完的结果落库，重连后从断点继续而不是从头再来（我们的架构里"失败的是模型分析步，数据已落袋"，检查点恰好停在工具刚完成处）；④ 流程侧：长连接服务发布选低峰 + 发布前公告。这道题的得分点在②③——普通人答到"错峰发布"就停了。</p>
+    <dl>
+      <dt>如果面试官追问"为什么不把长请求改成异步任务"？</dt><dd>这是更架构级的正解：对话请求立即返回任务号，结果经轮询/推送获取，HTTP 请求本身变成秒级——发布再也杀不死"对话"。代价是前端交互模式和任务存储的复杂度，是下个版本的演进方向。</dd>
+    </dl>
+  </div>
+</article>
+
+<article class="qa" data-qa-id="l3-q17">
+  <header class="qa-head"><span class="qa-tag scene">场景</span><h3 class="qa-q">线上 CPU 飙到 100%，接口全面变慢。说说你的排查路径。</h3></header>
+  <div class="qa-body">
+    <h4>答题框架</h4>
+    <p>先定位"哪台、哪个进程"（机器→进程→线程/协程→代码），区分"该忙"（流量涨）和"不该忙"（死循环/序列化失控）。</p>
+    <h4>30 秒回答</h4>
+    <p class="say">第一步圈范围：监控/.top 确认是哪台机器哪个进程（多实例时可能是单实例热点——结合负载均衡策略查，ip_hash 可能把大客户全钉在一台上）。第二步定性：QPS 同步涨 = 正常压力，扩容/限流应对；QPS 不涨 CPU 却涨 = 异常热点。Node 异常热点的常见根因：正则回溯灾难、大 JSON 序列化/深拷贝、同步 CPU 密集操作阻塞事件循环（Node 里表现为"整个服务都慢"，因为事件循环被占死）、疯狂 GC（内存压力的表征）。工具链：Node 用 --prof/Clinic.js/0x 火焰图定位热点函数；容器里还要看 CPU throttling（限额触发节流，表现为延迟毛刺而非真满载）。解决：短期扩容+限流止血，长期修热点代码、CPU 密集任务挪子进程/worker 线程。</p>
+    <dl>
+      <dt>怎么快速区分"事件循环阻塞"和"真的算力不够"？</dt><dd>事件循环阻塞的特征：CPU 高 + 所有请求延迟均匀升高（包括 /health 这种空接口）+ 日志出现事件循环延迟告警；算力不够则延迟随 QPS 线性涨。一个 health 探口器的响应时间是免费的事件循环探针。</dd>
+    </dl>
+    <h4>项目故事</h4>
+    <p>我的架构里有两个现成答案：回测计算挪进了带并发闸的执行层（并发 2，防止多人同时回测挤爆 CPU），因子计算的密集段考虑移出 Node（DolphinDB 引擎侧算）——"CPU 密集别压在 web 事件循环里"是我项目里落了地的原则。</p>
+  </div>
+</article>
+
+<h2>本课速览</h2>
+
+<table class="qa-map">
+  <tr><th>题</th><th>一句话锚点</th></tr>
+  <tr><td>01</td><td>滚动逐台换省资源；蓝绿整批切要双倍资源；金丝雀按流量试探</td></tr>
+  <tr><td>02</td><td>优雅停机：摘流量 → 排空 → 清理退出；三层超时对齐</td></tr>
+  <tr><td>03</td><td>expand-migrate-contract：只加不改删、改名拆三次、删除放最后、迁移幂等</td></tr>
+  <tr><td>04</td><td>幂等 = 执行 N 次效果同一次：唯一键 / 幂等令牌 / 状态机条件更新</td></tr>
+  <tr><td>05</td><td>几个 9 要会心算；高可用本质是 MTTR 短、影响面可控</td></tr>
+  <tr><td>06</td><td>多实例破五类状态：缓存/会话/定时任务/本地文件/资源闸——本质是状态外置</td></tr>
+  <tr><td>07</td><td>定时任务重复：DB 抢占 → Redis 锁（NX+EX+校验身份）→ 调度平台；幂等兜底</td></tr>
+  <tr><td>08</td><td>故障转移四层：探活 → 摘除 → 重试（POST 不自动重试）→ 自愈；liveness 管活 readiness 管接客</td></tr>
+  <tr><td>09</td><td>限流管进多少、熔断管调不调下游、降级管给什么兜底；half-open 半开恢复</td></tr>
+  <tr><td>10</td><td>K8s 滚动：maxSurge 保容量、maxUnavailable 保下限；readiness 不过自动暂停</td></tr>
+  <tr><td>11</td><td>Redis 锁三件套 NX+EX+唯一值；释放用 Lua 校验身份；锁是优化幂等是兜底</td></tr>
+  <tr><td>12</td><td>穿透查不存在（空值缓存+布隆）、击穿一个热点（逻辑过期+互斥）、雪崩成片宕机（错峰+高可用）</td></tr>
+  <tr><td>13</td><td>混沌工程：主动注入故障验证自愈；docker kill 一台是最小演练</td></tr>
+  <tr><td>14</td><td>部分用户报错先按实例/版本切分日志；摘除比回滚粒度细</td></tr>
+  <tr><td>15</td><td>任务重复 = 多实例 × 不幂等 × 无唯一约束；止血→锁→剥离独立 worker</td></tr>
+  <tr><td>16</td><td>长连接发布断流：通知重连 + 检查点续跑；终解是异步任务化</td></tr>
+  <tr><td>17</td><td>CPU 100%：先分该忙/不该忙；事件循环阻塞 = 全接口均匀变慢，/health 是免费探针</td></tr>
+</table>
+
+<div class="lesson-footer">
+  <a href="0002-nginx.html">← 上一课：Nginx</a>
+  <a href="../reference/lab-0003-release.html">实操谱 →</a>
+  <span>下一课（0004 · Redis 进阶）未建</span>
+</div>
+
+</main>
+<script src="../assets/qa.js"></script>
+</body>
+</html>

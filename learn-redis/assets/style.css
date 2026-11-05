@@ -1,0 +1,314 @@
+/* ============================================================
+   learn-redis 共享样式表 — 所有 lesson 与 reference 都链接它
+   风格：纸面阅读体验（Tufte 式），打印友好
+   ============================================================ */
+
+:root {
+  --ink: #1a1a1a;
+  --ink-soft: #555;
+  --paper: #fffdf9;
+  --accent: #b03a2e;       /* Redis 红，降饱和 */
+  --accent-soft: #f6e8e6;
+  --code-bg: #f4f0e8;
+  --term-bg: #23231f;
+  --term-ink: #e8e4d8;
+  --line: #ddd5c7;
+  --ok: #1e7a46;
+  --ok-bg: #e8f3ec;
+  --bad: #b03a2e;
+  --bad-bg: #f9e9e7;
+}
+
+* { box-sizing: border-box; }
+
+html { font-size: 17px; }
+
+body {
+  margin: 0;
+  padding: 3rem 1.5rem 5rem;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: "Charter", "Georgia", "Noto Serif SC", "Source Han Serif SC", serif;
+  line-height: 1.65;
+}
+
+main { max-width: 46rem; margin: 0 auto; }
+
+/* ----- 课程头 ----- */
+
+.kicker {
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  font-size: 0.72rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: 0.4rem;
+}
+
+h1 {
+  font-size: 1.9rem;
+  line-height: 1.25;
+  margin: 0 0 0.6rem;
+  font-weight: 600;
+}
+
+.lesson-meta {
+  color: var(--ink-soft);
+  font-size: 0.9rem;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 1.2rem;
+  margin-bottom: 2rem;
+}
+
+h2 {
+  font-size: 1.25rem;
+  margin-top: 2.6rem;
+  margin-bottom: 0.8rem;
+  font-weight: 600;
+}
+
+h3 { font-size: 1.05rem; margin-top: 1.8rem; }
+
+p, li { margin: 0.65rem 0; }
+
+a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 3px; }
+
+/* ----- 代码 ----- */
+
+code {
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  font-size: 0.82em;
+  background: var(--code-bg);
+  padding: 0.1em 0.35em;
+  border-radius: 3px;
+}
+
+pre {
+  background: var(--term-bg);
+  color: var(--term-ink);
+  padding: 1rem 1.2rem;
+  border-radius: 8px;
+  overflow-x: auto;
+  line-height: 1.5;
+}
+
+pre code {
+  background: none;
+  padding: 0;
+  font-size: 0.82rem;
+  color: inherit;
+}
+
+pre.plain { background: var(--code-bg); color: var(--ink); }
+
+/* 命令行示意：注释行弱化 */
+pre .cmt { color: #9a968a; }
+
+/* ----- 提示框 ----- */
+
+.callout {
+  border-left: 3px solid var(--accent);
+  background: var(--accent-soft);
+  padding: 0.9rem 1.1rem;
+  border-radius: 0 8px 8px 0;
+  margin: 1.4rem 0;
+  font-size: 0.95rem;
+}
+
+.callout .label {
+  font-family: ui-monospace, monospace;
+  font-size: 0.7rem;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  color: var(--accent);
+  display: block;
+  margin-bottom: 0.35rem;
+}
+
+.callout.task { border-color: var(--ok); background: var(--ok-bg); }
+.callout.task .label { color: var(--ok); }
+
+.callout.warn { border-color: #8a6d1f; background: #faf3df; }
+.callout.warn .label { color: #8a6d1f; }
+
+/* ----- 表格 ----- */
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 1.2rem 0;
+  font-size: 0.9rem;
+}
+
+th, td {
+  text-align: left;
+  padding: 0.5rem 0.7rem;
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+}
+
+th {
+  font-family: ui-monospace, monospace;
+  font-size: 0.72rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+
+/* ----- 双栏对照 ----- */
+
+.twin {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+  margin: 1.4rem 0;
+}
+
+.twin > div {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0.9rem 1.1rem;
+  font-size: 0.9rem;
+}
+
+.twin h4 {
+  margin: 0 0 0.5rem;
+  font-size: 0.8rem;
+  font-family: ui-monospace, monospace;
+  letter-spacing: 0.08em;
+  color: var(--ink-soft);
+}
+
+@media (max-width: 40rem) { .twin { grid-template-columns: 1fr; } }
+
+/* ----- 步骤列表（动手任务） ----- */
+
+ol.steps { counter-reset: step; list-style: none; padding-left: 0; }
+
+ol.steps > li {
+  counter-increment: step;
+  position: relative;
+  padding-left: 2.6rem;
+  margin: 1.1rem 0;
+}
+
+ol.steps > li::before {
+  content: counter(step);
+  position: absolute;
+  left: 0;
+  top: 0.15rem;
+  width: 1.7rem;
+  height: 1.7rem;
+  border-radius: 50%;
+  background: var(--accent);
+  color: #fff;
+  font-family: ui-monospace, monospace;
+  font-size: 0.85rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+ol.steps .expect {
+  display: block;
+  margin-top: 0.3rem;
+  font-size: 0.85rem;
+  color: var(--ink-soft);
+}
+
+ol.steps .expect code { background: var(--code-bg); color: var(--ink); }
+
+/* ----- Quiz（配合 assets/quiz.js） ----- */
+
+.quiz {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 1.2rem 1.4rem;
+  margin: 1.8rem 0;
+  background: #fff;
+}
+
+.quiz-q { margin: 1.4rem 0; }
+
+.quiz-q:first-of-type { margin-top: 0.4rem; }
+
+.quiz-prompt { font-weight: 600; margin-bottom: 0.7rem; }
+
+.quiz-opts { display: flex; flex-direction: column; gap: 0.45rem; }
+
+.quiz-opt {
+  text-align: left;
+  font: inherit;
+  font-size: 0.92rem;
+  padding: 0.5rem 0.9rem;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--paper);
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.quiz-opt:hover:not(:disabled) { border-color: var(--accent); }
+
+.quiz-opt.correct { background: var(--ok-bg); border-color: var(--ok); color: var(--ok); font-weight: 600; }
+
+.quiz-opt.wrong { background: var(--bad-bg); border-color: var(--bad); color: var(--bad); }
+
+.quiz-opt:disabled { cursor: default; opacity: 0.75; }
+.quiz-opt.correct:disabled, .quiz-opt.wrong:disabled { opacity: 1; }
+
+.quiz-explain {
+  display: none;
+  margin-top: 0.6rem;
+  font-size: 0.88rem;
+  color: var(--ink-soft);
+  border-top: 1px dashed var(--line);
+  padding-top: 0.55rem;
+}
+
+.quiz-explain.show { display: block; }
+
+.quiz-score {
+  margin-top: 1.2rem;
+  font-size: 0.85rem;
+  color: var(--ink-soft);
+  border-top: 1px solid var(--line);
+  padding-top: 0.8rem;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.quiz-reset {
+  font: inherit;
+  font-size: 0.8rem;
+  border: 1px solid var(--line);
+  background: none;
+  border-radius: 6px;
+  padding: 0.25rem 0.8rem;
+  cursor: pointer;
+  color: var(--ink-soft);
+}
+
+.quiz-reset:hover { border-color: var(--accent); color: var(--accent); }
+
+/* ----- 页脚导航 ----- */
+
+.lesson-footer {
+  margin-top: 3.5rem;
+  border-top: 1px solid var(--line);
+  padding-top: 1rem;
+  font-size: 0.88rem;
+  color: var(--ink-soft);
+  display: flex;
+  gap: 1.5rem;
+  flex-wrap: wrap;
+}
+
+/* ----- 打印 ----- */
+
+@media print {
+  body { padding: 0; background: #fff; }
+  pre, .quiz { break-inside: avoid; }
+  a { color: inherit; }
+}
